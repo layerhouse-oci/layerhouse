@@ -194,16 +194,95 @@ jobs:
           fi
       - run: cd docs/mdbook && mdbook build
 
-  docker-image:
-    name: Docker image
+  docker-image-build-binaries:
+    name: Docker image / build-binaries
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [test, dashboard, dockerfile-lint]
+    needs: [test, dockerfile-lint]
+    runs-on: ubuntu-latest
+    env:
+      ORB_CHRYSA_SKIP_DASHBOARD: ""
+      REGISTRY: ghcr.io
+      IMAGE_NAME: adamcavendish/orb-chrysa-server
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.14.0"
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-zigbuild
+        run: cargo binstall cargo-zigbuild --version 0.19.7 -y
+
+      - name: Install vp (vite-plus) and Node
+        run: |
+          export VP_HOME="$HOME/.vite-plus"
+          export VP_NODE_MANAGER=yes
+          export VP_NODE_VERSION=24.15.0
+          mkdir -p "$VP_HOME"
+          curl -fsSL https://viteplus.dev/install.sh | bash
+          echo "$VP_HOME/bin" >> "$GITHUB_PATH"
+          echo "VP_HOME=$VP_HOME" >> "$GITHUB_ENV"
+
+      - name: Install dashboard dependencies
+        run: vp install
+        working-directory: crates/orb-chrysa-server/dashboard
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          cache-targets: true
+
+      - name: Build all targets
+        run: |
+          cargo zigbuild --release -p orb-chrysa-server \
+            --target x86_64-unknown-linux-gnu \
+            --target aarch64-unknown-linux-gnu
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-image-binaries
+          path: |
+            target/x86_64-unknown-linux-gnu/release/orb-chrysa-server
+            target/aarch64-unknown-linux-gnu/release/orb-chrysa-server
+          retention-days: 1
+
+  docker-image:
+    name: Docker image (${{ matrix.platform.slug }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [docker-image-build-binaries]
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: linux/amd64
+            target: x86_64-unknown-linux-gnu
+            slug: linux-amd64
+          - arch: linux/arm64
+            target: aarch64-unknown-linux-gnu
+            slug: linux-arm64
     runs-on: ubuntu-latest
     env:
       REGISTRY: ghcr.io
       IMAGE_NAME: adamcavendish/orb-chrysa-server
     steps:
       - uses: actions/checkout@v6
+
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: docker-image-binaries
+          path: target
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -215,13 +294,64 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Copy ${{ matrix.platform.target }} binary
+        run: |
+          cp "target/${{ matrix.platform.target }}/release/orb-chrysa-server" ./orb-chrysa-server
+          chmod +x ./orb-chrysa-server
+
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          file: deploy/ci/Dockerfile.runtime
+          platforms: ${{ matrix.platform.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.platform.slug }}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.platform.slug }}
+          path: /tmp/digests/${{ matrix.platform.slug }}
+          retention-days: 1
+
+  docker-image-merge:
+    name: Docker image (merge)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [docker-image]
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: adamcavendish/orb-chrysa-server
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        run: |
+          DIGESTS=""
+          for f in /tmp/digests/*; do
+            DIGESTS="$DIGESTS $(cat "$f")"
+          done
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest $DIGESTS

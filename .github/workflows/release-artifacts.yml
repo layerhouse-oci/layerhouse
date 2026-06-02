@@ -21,7 +21,7 @@ jobs:
   # Cross-compile the server binary for all target architectures using
   # cargo-zigbuild (no QEMU needed). The dashboard SPA is embedded at compile
   # time via rust-embed, so it's built here too (once, arch-independent).
-  build-binaries:
+  docker-image-build-binaries:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -82,8 +82,8 @@ jobs:
   # One matrix job per architecture. Each copies its pre-built binary from
   # the zigbuild artifact into a minimal Docker image and pushes by digest
   # (no tag race between parallel jobs).
-  image:
-    needs: build-binaries
+  docker-image:
+    needs: docker-image-build-binaries
     strategy:
       fail-fast: false
       matrix:
@@ -157,8 +157,8 @@ jobs:
 
   # Stitch the per-architecture images into a single multi-arch manifest
   # and push with all the release tags.
-  merge:
-    needs: image
+  docker-image-merge:
+    needs: docker-image
     runs-on: ubuntu-latest
     steps:
       - name: Download digests
