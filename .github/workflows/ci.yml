@@ -306,6 +306,7 @@ jobs:
           context: .
           file: deploy/ci/Dockerfile.runtime
           platforms: ${{ matrix.platform.arch }}
+          push: true
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true
 
       - name: Export digest
