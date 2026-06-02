@@ -100,7 +100,9 @@ async fn logout_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
     };
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("orb_chrysa_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"),
+        HeaderValue::from_static(
+            "orb_chrysa_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0",
+        ),
     );
     response
 }

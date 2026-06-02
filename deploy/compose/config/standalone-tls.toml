@@ -1,10 +1,12 @@
-# Standalone orb-chrysa with Caddy reverse proxy (TLS) + Kanidm OIDC auth
+# Standalone orb-chrysa with TLS + Kanidm OIDC auth
 # Deployed at orb-chrysa.example.com
-#
-# Caddy handles TLS termination. orb-chrysa runs plain HTTP internally.
 
 [server]
-listen = "0.0.0.0:5050"
+listen = "0.0.0.0:443"
+
+[server.tls]
+cert_path = "/certs/tls.crt"
+key_path = "/certs/tls.key"
 
 [server.limits]
 max_concurrent_uploads = 64

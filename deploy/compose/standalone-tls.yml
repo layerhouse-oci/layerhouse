@@ -1,0 +1,71 @@
+# Production Docker Compose — single-node orb-chrysa with Caddy TLS + Kanidm OIDC.
+#
+# Caddy auto-handles Let's Encrypt certs for orb-chrysa.example.com.
+# orb-chrysa runs plain HTTP internally; Caddy terminates TLS.
+#
+# Prerequisites:
+#   1. Ports 80 and 443 must be reachable from the internet (for ACME + registry traffic)
+#   2. Kanidm OAuth2 client created at kani.example.com (update config with client secret)
+#   3. Fill in PLACEHOLDER values in config/standalone.toml
+#
+# Usage:
+#   docker compose -f standalone-tls.yml up -d
+
+name: orb-chrysa
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/data
+    restart: unless-stopped
+
+  rustfs:
+    image: rustfs/rustfs:1.0.0-beta.6
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_VOLUMES: /data
+    volumes:
+      - ./data/rustfs:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  rustfs-init:
+    image: rustfs/rc:latest
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+    entrypoint: >
+      /bin/sh -c "
+      RUSTFS_IP=$$(getent hosts rustfs | awk '{print $$1}');
+      rc alias set local http://$$RUSTFS_IP:9000 $$RUSTFS_ACCESS_KEY $$RUSTFS_SECRET_KEY;
+      rc bucket create local/orb-chrysa -p;
+      "
+    restart: "no"
+
+  orb-chrysa:
+    image: ghcr.io/adamcavendish/orb-chrysa-server:latest
+    hostname: orb-chrysa-0
+    volumes:
+      - ./config/standalone.toml:/etc/orb-chrysa/config.toml:ro
+    command: ["--config", "/etc/orb-chrysa/config.toml"]
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+    restart: unless-stopped

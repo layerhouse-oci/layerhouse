@@ -13,7 +13,8 @@ use crate::store::metadata::TokenStore;
 use super::permissions::OciAction;
 use super::session::DashboardSession;
 
-const CLEAR_SESSION_COOKIE: &str = "orb_chrysa_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0";
+const CLEAR_SESSION_COOKIE: &str =
+    "orb_chrysa_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0";
 
 pub async fn auth_middleware<M: TokenStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
@@ -270,7 +271,7 @@ mod tests {
                 .headers()
                 .get(header::SET_COOKIE)
                 .and_then(|value| value.to_str().ok()),
-            Some("orb_chrysa_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
+            Some("orb_chrysa_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
         );
     }
 
@@ -289,7 +290,7 @@ mod tests {
                 .headers()
                 .get(header::SET_COOKIE)
                 .and_then(|value| value.to_str().ok()),
-            Some("orb_chrysa_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
+            Some("orb_chrysa_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
         );
     }
 

@@ -50,7 +50,7 @@ pub async fn oauth2_start<M, B>(
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&format!(
-            "{}={}.{}; HttpOnly; SameSite=Lax; Path=/oauth2; Max-Age={}",
+            "{}={}.{}; HttpOnly; Secure; SameSite=Lax; Path=/oauth2; Max-Age={}",
             OAUTH2_COOKIE, state, code_verifier, OAUTH2_COOKIE_MAX_AGE_SECS
         ))
         .map_err(|e| OrbChrysaError::Internal(format!("oauth2 cookie failed: {}", e)))?,
@@ -148,7 +148,7 @@ pub async fn oauth2_callback<M, B>(
     response.headers_mut().append(
         axum::http::header::SET_COOKIE,
         axum::http::HeaderValue::from_str(&format!(
-            "orb_chrysa_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+            "orb_chrysa_session={}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={}",
             cookie_value, expires_in
         ))
         .expect("valid cookie header value"),
@@ -156,7 +156,7 @@ pub async fn oauth2_callback<M, B>(
     response.headers_mut().append(
         axum::http::header::SET_COOKIE,
         axum::http::HeaderValue::from_static(
-            "orb_chrysa_oauth2=; HttpOnly; SameSite=Lax; Path=/oauth2; Max-Age=0",
+            "orb_chrysa_oauth2=; HttpOnly; Secure; SameSite=Lax; Path=/oauth2; Max-Age=0",
         ),
     );
     Ok(response)

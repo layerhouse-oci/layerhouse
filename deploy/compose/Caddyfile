@@ -1,0 +1,3 @@
+orb-chrysa.example.com {
+    reverse_proxy orb-chrysa:5050
+}
