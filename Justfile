@@ -15,6 +15,7 @@ test:
     cargo test --workspace
 
 coverage-nextest:
+    mkdir -p coverage
     cargo llvm-cov nextest --workspace --lcov --output-path coverage/lcov.info
 
 dashboard-build:

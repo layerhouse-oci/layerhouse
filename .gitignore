@@ -26,3 +26,4 @@ crates/orb-chrysa-server/dashboard/dist/
 
 # Documentation build output
 docs/mdbook/book/
+coverage/
