@@ -3,10 +3,14 @@ name = "orb-chrysa-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "orb-chrysa-cli"
 path = "src/main.rs"
+
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 tokio = { workspace = true, features = ["full"] }

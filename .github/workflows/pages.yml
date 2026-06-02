@@ -5,13 +5,12 @@ on:
     branches: [master]
 
 permissions:
-  contents: write
   pages: write
   id-token: write
 
 concurrency:
-  group: pages-${{ github.ref }}
-  cancel-in-progress: true
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -27,8 +26,19 @@ jobs:
         with:
           mdbook-version: 'latest'
 
+      - name: Cache mdbook-mermaid
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/mdbook-mermaid
+          key: mdbook-mermaid-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
       - name: Install mdbook-mermaid
-        run: cargo install --locked mdbook-mermaid
+        run: |
+          if [ -f ~/.cargo/bin/mdbook-mermaid ]; then
+            echo "mdbook-mermaid found in cache"
+          else
+            cargo install --locked mdbook-mermaid
+          fi
 
       - name: Build book
         run: cd docs/mdbook && mdbook build

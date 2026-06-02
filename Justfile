@@ -14,6 +14,9 @@ clippy:
 test:
     cargo test --workspace
 
+coverage-nextest:
+    cargo llvm-cov nextest --workspace --lcov --output-path coverage/lcov.info
+
 dashboard-build:
     cd {{dashboard_dir}} && vp build
 
@@ -47,15 +50,22 @@ rustfs_version := "1.0.0-beta.6"
 pack-binary: pack-build pack-deps pack-tarball
 
 # Build orb-chrysa-server for the target platform.
-# Requires: rustup target add {{pack_target}}
+# Uses cargo-zigbuild for cross-compilation if available, falls back to cargo build.
+# Install: cargo install cargo-zigbuild
 pack-build:
-    @if ! rustup target list --installed | grep -q {{pack_target}}; then \
-        echo "Target {{pack_target}} not installed. Run:"; \
-        echo "  rustup target add {{pack_target}}"; \
+    @mkdir -p {{pack_out_dir}}/bin
+    @if which cargo-zigbuild > /dev/null 2>&1; then \
+        echo "Building with cargo-zigbuild for {{pack_target}}"; \
+        cargo zigbuild --release -p orb-chrysa-server --target {{pack_target}}; \
+    elif rustup target list --installed | grep -q {{pack_target}}; then \
+        echo "Building with cargo for {{pack_target}}"; \
+        cargo build --release -p orb-chrysa-server --target {{pack_target}}; \
+    else \
+        echo "Target {{pack_target}} not installed. Either:"; \
+        echo "  cargo install cargo-zigbuild  (recommended, handles C deps)"; \
+        echo "  rustup target add {{pack_target}} && apt install gcc-{{pack_target}}"; \
         exit 1; \
     fi
-    cargo build --release -p orb-chrysa-server --target {{pack_target}}
-    @mkdir -p {{pack_out_dir}}/bin
     cp target/{{pack_target}}/release/orb-chrysa-server {{pack_out_dir}}/bin/
 
 # Download RustFS and OxMgr binaries for the target platform.
