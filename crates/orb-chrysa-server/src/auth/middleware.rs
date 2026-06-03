@@ -189,17 +189,48 @@ fn auth_required_response(auth: &super::AuthService, req: &Request<Body>) -> Res
         return Redirect::temporary("/oauth2/start").into_response();
     }
 
+    // Only emit OCI WWW-Authenticate challenges with scope for /v2/ paths.
+    // Non-/v2/ paths (API, dashboard) get a plain 401 without scope.
+    if !path.starts_with("/v2/") {
+        return OrbChrysaError::Unauthorized {
+            message: "authentication required".to_string(),
+            realm: None,
+            service: None,
+            scope: None,
+        }
+        .into_response();
+    }
+
     let repository = extract_repository_from_path(path);
-    let service = path
-        .strip_prefix("/v2/")
-        .and_then(|rest| rest.split('/').next())
+
+    // Use the request Host header as the OCI service name, per the
+    // Distribution spec. Deriving it from the first path segment (the
+    // old behaviour) broke token validation for namespaced repos like
+    // /v2/qa/auth-test/alpine/... where "qa" is not a service name.
+    let service = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
         .unwrap_or("registry");
+
+    // Derive scope from HTTP method instead of hardcoding `*`.
+    // Docker follows the challenge and requests a token with the challenged
+    // scope. A pull+push PAT should be sufficient for push; `*` forces
+    // Docker to request delete-level scope.
+    let scope_action = scope_action_for_method(req.method());
+
+    let scope = if repository.is_empty() {
+        // e.g. /v2/_catalog — don't emit a broken scope
+        None
+    } else {
+        Some(format!("repository:{}:{}", repository, scope_action))
+    };
 
     OrbChrysaError::Unauthorized {
         message: "authentication required".to_string(),
         realm: Some(auth.token_endpoint_url().to_string()),
         service: Some(service.to_string()),
-        scope: Some(format!("repository:{}:*", repository)),
+        scope,
     }
     .into_response()
 }
@@ -263,9 +294,23 @@ fn extract_repository_from_path(path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Compute the OCI scope action string for a challenge from the HTTP method.
+/// Called by `auth_required_response` to derive scope from method instead of
+/// hardcoding `*`.
+fn scope_action_for_method(method: &http::Method) -> &'static str {
+    match OciAction::from_method(method) {
+        OciAction::Pull => "pull",
+        OciAction::Push => "pull,push",
+        OciAction::Delete => "delete",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{extract_repository_from_path, is_public_path, session_cookie_auth_error_response};
+    use super::{
+        extract_repository_from_path, is_public_path, scope_action_for_method,
+        session_cookie_auth_error_response,
+    };
     use crate::auth::CookieFlags;
     use crate::error::OrbChrysaError;
     use axum::body::Body;
@@ -363,5 +408,35 @@ mod tests {
         assert!(is_public_path("/api/v1/session/logout"));
         assert!(!is_public_path("/"));
         assert!(!is_public_path("/api/v1/session"));
+    }
+
+    #[test]
+    fn scope_action_pull_for_get() {
+        assert_eq!(scope_action_for_method(&http::Method::GET), "pull");
+        assert_eq!(scope_action_for_method(&http::Method::HEAD), "pull");
+    }
+
+    #[test]
+    fn scope_action_pull_push_for_post_put_patch() {
+        // POST/PUT/PATCH blob uploads need pull,push — push implies pull
+        assert_eq!(scope_action_for_method(&http::Method::POST), "pull,push");
+        assert_eq!(scope_action_for_method(&http::Method::PUT), "pull,push");
+        assert_eq!(scope_action_for_method(&http::Method::PATCH), "pull,push");
+    }
+
+    #[test]
+    fn scope_action_delete_for_delete() {
+        assert_eq!(scope_action_for_method(&http::Method::DELETE), "delete");
+    }
+
+    #[test]
+    fn empty_repository_for_catalog_path() {
+        // /v2/_catalog has no repository name
+        assert_eq!(extract_repository_from_path("/v2/_catalog"), "");
+    }
+
+    #[test]
+    fn empty_repository_for_v2_root() {
+        assert_eq!(extract_repository_from_path("/v2/"), "");
     }
 }

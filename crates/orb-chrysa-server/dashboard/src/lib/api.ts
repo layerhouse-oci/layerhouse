@@ -49,7 +49,8 @@ async function readError(res: Response): Promise<ApiError> {
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + url, {
     ...init,
-    signal: AbortSignal.timeout(5000),
+    // Only apply default timeout if caller didn't provide a signal.
+    signal: init?.signal ?? AbortSignal.timeout(5000),
   });
   if (!res.ok) throw await readError(res);
   return res.json();
@@ -58,7 +59,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 async function fetchNoBody(url: string, init?: RequestInit): Promise<void> {
   const res = await fetch(BASE + url, {
     ...init,
-    signal: AbortSignal.timeout(5000),
+    signal: init?.signal ?? AbortSignal.timeout(5000),
   });
   if (!res.ok) throw await readError(res);
 }
@@ -106,7 +107,10 @@ export function fetchStatus(): Promise<ClusterStatus> {
 }
 
 export function fetchClusterStatus(): Promise<DashboardClusterStatus> {
-  return fetchJson("/api/v1/admin/cluster/status");
+  // Use the authenticated (non-admin) endpoint so non-admin dashboard users
+  // can view cluster status. The /api/v1/admin/ variant remains available
+  // for admin-only contexts but requires delete-on-* permission.
+  return fetchJson("/api/v1/cluster/status");
 }
 
 export async function joinCluster(nodeId: number, addr: string): Promise<void> {
@@ -259,8 +263,11 @@ export function createPersonalAccessToken(
 }
 
 export async function deletePersonalAccessToken(id: string): Promise<void> {
+  // Use a longer timeout (15s) for token deletion — the Raft commit may
+  // take longer than the default 5s timeout used for read-only fetches.
   await fetchNoBody(`/api/v1/tokens/${encodeURIComponent(id)}`, {
     method: "DELETE",
+    signal: AbortSignal.timeout(15000),
   });
 }
 

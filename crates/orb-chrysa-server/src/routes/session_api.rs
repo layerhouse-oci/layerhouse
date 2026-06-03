@@ -19,6 +19,7 @@ pub struct SessionResponse {
     pub groups: Vec<String>,
     pub scopes: Vec<String>,
     pub token_type: Option<String>,
+    pub is_admin: bool,
 }
 
 pub fn routes<M: Send + Sync + 'static, B: Send + Sync + 'static>() -> Router<Arc<AppState<M, B>>> {
@@ -44,6 +45,7 @@ async fn get_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
             groups: vec![],
             scopes: vec![],
             token_type: None,
+            is_admin: false,
         }));
     }
 
@@ -56,6 +58,11 @@ async fn get_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
         });
     };
 
+    let is_admin = state
+        .auth
+        .as_ref()
+        .is_some_and(|auth| auth.check_admin_access(&identity).is_ok());
+
     Ok(Json(SessionResponse {
         auth_enabled: true,
         subject: Some(identity.subject),
@@ -65,6 +72,7 @@ async fn get_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
         groups: identity.groups,
         scopes: identity.scopes,
         token_type: Some(token_type_name(identity.token_type).to_string()),
+        is_admin,
     }))
 }
 
@@ -164,6 +172,7 @@ mod tests {
             groups: vec!["registry_admins".to_string()],
             scopes: vec![],
             token_type: Some("kanidm_access".to_string()),
+            is_admin: true,
         })
         .expect("serialize session");
 
@@ -172,6 +181,7 @@ mod tests {
         assert_eq!(value["username"], "admin");
         assert_eq!(value["display_name"], "Admin User");
         assert_eq!(value["email"], "admin@orb-chrysa.local");
+        assert_eq!(value["is_admin"], true);
     }
 
     #[test]
@@ -185,6 +195,7 @@ mod tests {
             groups: vec![],
             scopes: vec![],
             token_type: None,
+            is_admin: false,
         })
         .expect("serialize session");
 
@@ -193,5 +204,6 @@ mod tests {
         assert!(value["username"].is_null());
         assert!(value["display_name"].is_null());
         assert!(value["email"].is_null());
+        assert_eq!(value["is_admin"], false);
     }
 }

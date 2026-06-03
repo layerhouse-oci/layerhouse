@@ -113,6 +113,7 @@ export interface DashboardSession {
   groups: string[];
   scopes: string[];
   token_type: string | null;
+  is_admin: boolean;
 }
 
 export interface PersonalAccessToken {

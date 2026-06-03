@@ -85,6 +85,7 @@ export default function Access() {
   const [createdToken, setCreatedToken] = createSignal<CreateTokenResponse | null>(null);
   const [revokeTarget, setRevokeTarget] = createSignal<PersonalAccessToken | null>(null);
   const [revoking, setRevoking] = createSignal(false);
+  const [revokeError, setRevokeError] = createSignal<string | null>(null);
   const [copied, setCopied] = createSignal<string | null>(null);
 
   async function load() {
@@ -139,6 +140,11 @@ export default function Access() {
       actions: {
         ...form().actions,
         [action]: enabled,
+        // Push implies pull: a push-only token can't satisfy the
+        // pull,push challenge the registry emits for blob uploads.
+        ...(action === "push" && enabled ? { pull: true } : {}),
+        // Unchecking pull also unchecks push (push requires pull).
+        ...(action === "pull" && !enabled ? { push: false } : {}),
       },
     });
   }
@@ -178,14 +184,37 @@ export default function Access() {
   async function revokeToken() {
     const target = revokeTarget();
     if (!target) return;
+    setRevokeError(null);
     setRevoking(true);
+    // Optimistic removal: immediately remove the token from the list so the UI
+    // feels responsive. If the API call fails in a recoverable way, we restore
+    // it. For ambiguous outcomes (timeout, 404) we reload from the server.
+    const previous = tokens();
+    setTokens(previous.filter((t) => t.id !== target.id));
     try {
+      console.debug("[orb-chrysa] revoking token", { id: target.id, name: target.name });
       await deletePersonalAccessToken(target.id);
-      setRevokeTarget(null);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("access.revokeError"));
+      if (e instanceof DOMException && e.name === "AbortError") {
+        // Timeout: server-side delete may still have committed. Don't restore
+        // the token — we'd be resurrecting a potentially-revoked credential.
+        // Reload to get authoritative server state.
+        console.warn("[orb-chrysa] revoke timed out, reloading to reconcile", { id: target.id });
+        setError(t("access.revokeTimeout"));
+        await load();
+      } else if (e instanceof ApiError && e.status === 404) {
+        // Token already gone — reload to confirm. Don't restore.
+        console.warn("[orb-chrysa] revoke got 404, token already removed", { id: target.id });
+        await load();
+      } else {
+        // Recoverable failure (network error, server error): restore token.
+        console.warn("[orb-chrysa] revoke failed", { id: target.id, message: (e as Error).message });
+        setTokens(previous);
+        setError(e instanceof Error ? e.message : t("access.revokeError"));
+      }
     } finally {
+      setRevokeTarget(null);
       setRevoking(false);
     }
   }

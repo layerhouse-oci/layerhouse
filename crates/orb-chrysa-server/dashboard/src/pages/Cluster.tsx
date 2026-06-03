@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
-import { fetchClusterStatus, joinCluster, leaveCluster } from "../lib/api";
-import type { ClusterMember, DashboardClusterStatus } from "../lib/types";
+import { ApiError, fetchClusterStatus, fetchSession, joinCluster, leaveCluster } from "../lib/api";
+import type { ClusterMember, DashboardClusterStatus, DashboardSession } from "../lib/types";
 import { formatAgo } from "../lib/format";
 import { t } from "../lib/i18n";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -9,6 +9,7 @@ import ErrorBanner from "../components/ErrorBanner";
 
 export default function Cluster() {
   const [status, setStatus] = createSignal<DashboardClusterStatus | null>(null);
+  const [session, setSession] = createSignal<DashboardSession | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
   const [errorCount, setErrorCount] = createSignal(0);
@@ -19,7 +20,12 @@ export default function Cluster() {
 
   async function load() {
     try {
-      setStatus(await fetchClusterStatus());
+      const [s, clusterStatus] = await Promise.all([
+        fetchSession(),
+        fetchClusterStatus(),
+      ]);
+      setSession(s);
+      setStatus(clusterStatus);
       setError(null);
       setErrorCount(0);
     } catch (e) {
@@ -44,7 +50,11 @@ export default function Cluster() {
       setJoinForm({ node_id: 0, addr: "" });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("cluster.joinError"));
+      if (e instanceof ApiError && e.status === 403) {
+        setError(t("cluster.adminRequired"));
+      } else {
+        setError(e instanceof Error ? e.message : t("cluster.joinError"));
+      }
     } finally {
       setBusy(false);
     }
@@ -56,11 +66,15 @@ export default function Cluster() {
     setBusy(true);
     try {
       await leaveCluster(node.node_id);
-      setConfirmNode(null);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("cluster.removeError"));
+      if (e instanceof ApiError && e.status === 403) {
+        setError(t("cluster.adminRequired"));
+      } else {
+        setError(e instanceof Error ? e.message : t("cluster.removeError"));
+      }
     } finally {
+      setConfirmNode(null);
       setBusy(false);
     }
   }
@@ -81,7 +95,9 @@ export default function Cluster() {
           <p class="eyebrow">{t("cluster.eyebrow")}</p>
           <h1>{t("cluster.title")}</h1>
         </div>
-        <button class="btn btn-primary" onClick={() => setShowJoin(true)}>{t("cluster.joinNode")}</button>
+        <Show when={session()?.is_admin}>
+          <button class="btn btn-primary" onClick={() => setShowJoin(true)}>{t("cluster.joinNode")}</button>
+        </Show>
       </div>
 
       {error() && <ErrorBanner message={error()!} onRetry={load} />}
@@ -123,9 +139,11 @@ export default function Cluster() {
                       <td>{node.commit_index ?? "-"}</td>
                       <td>{node.replication_lag_ms === null ? "-" : `${node.replication_lag_ms}ms`}</td>
                       <td>
-                        <button class="btn btn-compact btn-danger" onClick={() => setConfirmNode(node)}>
-                          {node.role === "leader" ? t("common.leave") : t("common.unlink")}
-                        </button>
+                        <Show when={session()?.is_admin}>
+                          <button class="btn btn-compact btn-danger" onClick={() => setConfirmNode(node)}>
+                            {node.role === "leader" ? t("common.leave") : t("common.unlink")}
+                          </button>
+                        </Show>
                       </td>
                     </tr>
                   )}

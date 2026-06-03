@@ -27,6 +27,11 @@ pub fn routes<M: ManifestStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
             "/api/v1/repositories/{*path}",
             any(repository_dispatch::<M, B>),
         )
+        // Non-admin read-only cluster status — authenticated but not admin-gated.
+        // Lives outside /api/v1/admin/ so the middleware prefix check doesn't
+        // require admin (delete on *).
+        .route("/api/v1/cluster/status", get(cluster_status::<M, B>))
+        // Admin-gated cluster management endpoints
         .route("/api/v1/admin/cluster/status", get(cluster_status::<M, B>))
         .route("/api/v1/admin/cluster/join", post(cluster_join::<M, B>))
         .route("/api/v1/admin/cluster/leave", post(cluster_leave::<M, B>))
