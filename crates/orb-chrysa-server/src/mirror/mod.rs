@@ -49,6 +49,18 @@ impl MirrorManager {
         }
     }
 
+    /// Clear the proxy cache so the next pull-through sees the latest config.
+    /// Call after put/delete on proxy caches.
+    pub async fn invalidate_proxy_cache(&self) {
+        self.proxy_cache.write().await.0.clear();
+    }
+
+    /// Clear the rules cache so the next pull-through sees the latest config.
+    /// Call after put/delete on mirror rules.
+    pub async fn invalidate_rules_cache(&self) {
+        self.rules_cache.write().await.0.clear();
+    }
+
     fn make_upstream_ref(rule: &MirrorRule, upstream_repo: &str) -> UpstreamRef {
         UpstreamRef::new(
             &rule.upstream_registry,
@@ -330,9 +342,8 @@ impl MirrorManager {
         let tags = self
             .resolve_mirror_strategy_tags(&rule.strategy, &upstream)
             .await?;
-        // Force-refresh the rules cache so subsequent per-tag manifest pulls
-        // see this rule (same stale-cache issue as proxy_cache warm).
-        self.rules_cache.write().await.0.clear();
+        // Force-refresh so subsequent per-tag manifest pulls see this rule.
+        self.invalidate_rules_cache().await;
         Ok(ResolvedMirrorJob {
             direction: MirrorDirection::Pull,
             local_repo: rule.local_prefix,
@@ -366,11 +377,8 @@ impl MirrorManager {
             cache_id,
             cache.local_prefix,
         );
-        // Force-refresh the proxy cache so that the subsequent per-tag
-        // pull_manifest → match_proxy_cache calls see this cache. Without
-        // this, a stale proxy cache list (populated before the warm rule
-        // was created) causes pull_manifest to find no match.
-        self.proxy_cache.write().await.0.clear();
+        // Force-refresh so subsequent per-tag manifest pulls see this cache.
+        self.invalidate_proxy_cache().await;
         Ok((cache.local_prefix, tags))
     }
 

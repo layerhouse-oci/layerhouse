@@ -270,6 +270,7 @@ async fn put_rule<M: AdminStore, B: BlobStore>(
         rule.created_at = crate::store::metadata::now_epoch();
     }
     state.core.metadata.put_mirror_rule(rule).await?;
+    state.mirror.invalidate_rules_cache().await;
     Ok(axum::http::StatusCode::OK)
 }
 
@@ -278,6 +279,7 @@ async fn delete_rule<M: AdminStore, B: BlobStore>(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, OrbChrysaError> {
     state.core.metadata.delete_mirror_rule(&id).await?;
+    state.mirror.invalidate_rules_cache().await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -320,6 +322,7 @@ async fn put_proxy_cache<M: AdminStore, B: BlobStore>(
         cache.created_at = crate::store::metadata::now_epoch();
     }
     state.core.metadata.put_proxy_cache(cache).await?;
+    state.mirror.invalidate_proxy_cache().await;
     Ok(axum::http::StatusCode::OK)
 }
 
@@ -328,6 +331,7 @@ async fn delete_proxy_cache<M: AdminStore, B: BlobStore>(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, OrbChrysaError> {
     state.core.metadata.delete_proxy_cache(&id).await?;
+    state.mirror.invalidate_proxy_cache().await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
