@@ -347,9 +347,22 @@ impl MirrorManager {
         };
         let upstream_repo = Self::default_proxy_upstream_repo(&cache);
         let upstream = Self::make_proxy_upstream_ref(&cache, &upstream_repo);
+        tracing::info!(
+            "warm: listing tags for {}://{}/v2/{}/tags/list (local prefix: {})",
+            upstream.scheme,
+            upstream.registry,
+            upstream.repository,
+            cache.local_prefix,
+        );
         let tags = self
             .resolve_warm_filter_tags(&cache.warm_filters, &upstream)
             .await?;
+        tracing::info!(
+            "warm: resolved {} tags for cache {} (will pull as local repo {})",
+            tags.len(),
+            cache_id,
+            cache.local_prefix,
+        );
         Ok((cache.local_prefix, tags))
     }
 
@@ -622,6 +635,16 @@ impl MirrorManager {
 
         let upstream_head = self.client.head_manifest(upstream, reference).await?;
         let Some((upstream_digest, _)) = upstream_head else {
+            tracing::warn!(
+                "upstream manifest not found: {}/{}:{} ({}://{}/v2/{}/manifests/{})",
+                upstream.registry,
+                upstream.repository,
+                reference,
+                upstream.scheme,
+                upstream.registry,
+                upstream.repository,
+                reference,
+            );
             return Ok(None);
         };
 

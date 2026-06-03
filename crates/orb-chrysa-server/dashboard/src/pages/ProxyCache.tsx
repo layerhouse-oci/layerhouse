@@ -1,11 +1,14 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import {
+  ApiError,
   createProxyCache,
   deleteProxyCache,
   fetchProxyCaches,
+  fetchSession,
   triggerProxyCacheWarm,
 } from "../lib/api";
 import type {
+  DashboardSession,
   OutboundProxyProtocol,
   ProxyCache,
   ProxyCacheCreate,
@@ -120,6 +123,7 @@ function toPayload(form: CacheForm): ProxyCacheCreate {
 
 export default function ProxyCache() {
   const [caches, setCaches] = createSignal<ProxyCache[]>([]);
+  const [session, setSession] = createSignal<DashboardSession | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
   const [errorCount, setErrorCount] = createSignal(0);
@@ -131,12 +135,20 @@ export default function ProxyCache() {
 
   async function load() {
     try {
-      setCaches(await fetchProxyCaches());
+      const [s, c] = await Promise.all([fetchSession(), fetchProxyCaches()]);
+      setSession(s);
+      setCaches(c);
       setError(null);
       setErrorCount(0);
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("proxy.fetchError"));
-      setErrorCount((c) => c + 1);
+      if (e instanceof ApiError && e.status === 403) {
+        setError(t("cluster.adminRequired"));
+        setErrorCount(0);
+        setCaches([]);
+      } else {
+        setError(e instanceof Error ? e.message : t("proxy.fetchError"));
+        setErrorCount((c) => c + 1);
+      }
     } finally {
       setLoading(false);
     }
@@ -156,7 +168,11 @@ export default function ProxyCache() {
       setForm({ ...EMPTY_FORM });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("proxy.saveError"));
+      if (e instanceof ApiError && e.status === 403) {
+        setError(t("cluster.adminRequired"));
+      } else {
+        setError(e instanceof Error ? e.message : t("proxy.saveError"));
+      }
     } finally {
       setSaving(false);
     }
@@ -168,7 +184,11 @@ export default function ProxyCache() {
       await triggerProxyCacheWarm(id);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("proxy.warmError"));
+      if (e instanceof ApiError && e.status === 403) {
+        setError(t("cluster.adminRequired"));
+      } else {
+        setError(e instanceof Error ? e.message : t("proxy.warmError"));
+      }
     } finally {
       setWarming(null);
     }
@@ -182,7 +202,11 @@ export default function ProxyCache() {
       setDeleteTarget(null);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("proxy.deleteError"));
+      if (e instanceof ApiError && e.status === 403) {
+        setError(t("cluster.adminRequired"));
+      } else {
+        setError(e instanceof Error ? e.message : t("proxy.deleteError"));
+      }
     }
   }
 
@@ -197,9 +221,11 @@ export default function ProxyCache() {
           <p class="eyebrow">{t("proxy.eyebrow")}</p>
           <h1>{t("proxy.title")}</h1>
         </div>
-        <button class="btn btn-primary" onClick={() => setShowForm(true)}>
-          {t("proxy.create")}
-        </button>
+        <Show when={session()?.is_admin}>
+          <button class="btn btn-primary" onClick={() => setShowForm(true)}>
+            {t("proxy.create")}
+          </button>
+        </Show>
       </div>
 
       {error() && <ErrorBanner message={error()!} onRetry={load} />}
@@ -236,14 +262,16 @@ export default function ProxyCache() {
                     <td>{proxyLabel(cache.outbound_proxy.protocol, cache.outbound_proxy.url)}</td>
                     <td>{cache.warm_schedule ?? "—"}</td>
                     <td>
-                      <div class="row-actions">
-                        <button class="btn btn-compact" disabled={warming() === cache.id} onClick={() => warm(cache.id)}>
-                          {warming() === cache.id ? t("proxy.warming") : t("proxy.warm")}
-                        </button>
-                        <button class="btn btn-compact btn-danger" onClick={() => setDeleteTarget(cache)}>
-                          {t("common.delete")}
-                        </button>
-                      </div>
+                      <Show when={session()?.is_admin}>
+                        <div class="row-actions">
+                          <button class="btn btn-compact" disabled={warming() === cache.id} onClick={() => warm(cache.id)}>
+                            {warming() === cache.id ? t("proxy.warming") : t("proxy.warm")}
+                          </button>
+                          <button class="btn btn-compact btn-danger" onClick={() => setDeleteTarget(cache)}>
+                            {t("common.delete")}
+                          </button>
+                        </div>
+                      </Show>
                     </td>
                   </tr>
                 )}

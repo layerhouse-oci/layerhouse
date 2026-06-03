@@ -1,12 +1,15 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import {
+  ApiError,
   createMirrorRule,
   deleteMirrorRule,
   fetchMirrorRules,
+  fetchSession,
   fetchSyncJobs,
   triggerMirrorRule,
 } from "../lib/api";
 import type {
+  DashboardSession,
   MirrorDirection,
   MirrorRule,
   MirrorRuleCreate,
@@ -101,6 +104,7 @@ export default function Mirror() {
   const [tab, setTab] = createSignal<"rules" | "jobs">("rules");
   const [rules, setRules] = createSignal<MirrorRule[]>([]);
   const [jobs, setJobs] = createSignal<SyncJob[]>([]);
+  const [session, setSession] = createSignal<DashboardSession | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
   const [errorCount, setErrorCount] = createSignal(0);
@@ -112,14 +116,27 @@ export default function Mirror() {
 
   async function load() {
     try {
-      const [nextRules, nextJobs] = await Promise.all([fetchMirrorRules(), fetchSyncJobs()]);
+      const [s, nextRules, nextJobs] = await Promise.all([
+        fetchSession(),
+        fetchMirrorRules(),
+        fetchSyncJobs(),
+      ]);
+      setSession(s);
       setRules(nextRules);
       setJobs(nextJobs);
       setError(null);
       setErrorCount(0);
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("mirror.fetchError"));
-      setErrorCount((c) => c + 1);
+      if (e instanceof ApiError && e.status === 403) {
+        // Non-admin user — show permission message, reset error count.
+        setError(t("cluster.adminRequired"));
+        setErrorCount(0);
+        setRules([]);
+        setJobs([]);
+      } else {
+        setError(e instanceof Error ? e.message : t("mirror.fetchError"));
+        setErrorCount((c) => c + 1);
+      }
     } finally {
       setLoading(false);
     }
@@ -139,7 +156,11 @@ export default function Mirror() {
       setForm({ ...EMPTY_FORM });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("mirror.saveError"));
+      if (e instanceof ApiError && e.status === 403) {
+        setError(t("cluster.adminRequired"));
+      } else {
+        setError(e instanceof Error ? e.message : t("mirror.saveError"));
+      }
     } finally {
       setSaving(false);
     }
@@ -151,7 +172,11 @@ export default function Mirror() {
       await triggerMirrorRule(id);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("mirror.triggerError"));
+      if (e instanceof ApiError && e.status === 403) {
+        setError(t("cluster.adminRequired"));
+      } else {
+        setError(e instanceof Error ? e.message : t("mirror.triggerError"));
+      }
     } finally {
       setTriggering(null);
     }
@@ -163,7 +188,11 @@ export default function Mirror() {
       setDeleteId(null);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("mirror.deleteError"));
+      if (e instanceof ApiError && e.status === 403) {
+        setError(t("cluster.adminRequired"));
+      } else {
+        setError(e instanceof Error ? e.message : t("mirror.deleteError"));
+      }
     }
   }
 
@@ -201,9 +230,11 @@ export default function Mirror() {
           <p class="eyebrow">{t("mirror.eyebrow")}</p>
           <h1>{t("mirror.title")}</h1>
         </div>
-        <button class="btn btn-primary" onClick={() => setShowForm(true)}>
-          {t("mirror.create")}
-        </button>
+        <Show when={session()?.is_admin}>
+          <button class="btn btn-primary" onClick={() => setShowForm(true)}>
+            {t("mirror.create")}
+          </button>
+        </Show>
       </div>
 
       {error() && <ErrorBanner message={error()!} onRetry={load} />}
@@ -253,18 +284,20 @@ export default function Mirror() {
                       <td>{proxyLabel(rule.outbound_proxy.protocol, rule.outbound_proxy.url)}</td>
                       <td>{rule.schedule ?? t("common.manual")}</td>
                       <td>
-                        <div class="row-actions">
-                          <button
-                            class={`btn btn-compact ${rule.schedule ? "" : "btn-primary"}`}
-                            disabled={triggering() === rule.id}
-                            onClick={() => runRule(rule.id)}
-                          >
-                            {triggering() === rule.id ? t("mirror.triggering") : t("mirror.trigger")}
-                          </button>
-                          <button class="btn btn-compact btn-danger" onClick={() => setDeleteId(rule.id)}>
-                            {t("common.delete")}
-                          </button>
-                        </div>
+                        <Show when={session()?.is_admin}>
+                          <div class="row-actions">
+                            <button
+                              class={`btn btn-compact ${rule.schedule ? "" : "btn-primary"}`}
+                              disabled={triggering() === rule.id}
+                              onClick={() => runRule(rule.id)}
+                            >
+                              {triggering() === rule.id ? t("mirror.triggering") : t("mirror.trigger")}
+                            </button>
+                            <button class="btn btn-compact btn-danger" onClick={() => setDeleteId(rule.id)}>
+                              {t("common.delete")}
+                            </button>
+                          </div>
+                        </Show>
                       </td>
                     </tr>
                   )}

@@ -178,6 +178,24 @@ pub async fn oauth2_callback<M, B>(
     let (access_groups, access_subject, access_exp) =
         auth.verify_access_token_groups(&access_token).await?;
 
+    // Merge groups from both tokens: some IdPs put groups in the ID token
+    // rather than the access token.
+    let id_groups = id_claims.groups.clone().unwrap_or_default();
+    let mut all_groups = access_groups.clone();
+    for g in &id_groups {
+        if !all_groups.contains(g) {
+            all_groups.push(g.clone());
+        }
+    }
+
+    tracing::info!(
+        "oauth2 callback: subject={} access_token_groups={:?} id_token_groups={:?} merged={:?}",
+        access_subject,
+        access_groups,
+        id_groups,
+        all_groups,
+    );
+
     // Subject consistency: the subject in both tokens must match.
     if id_claims.subject != access_subject {
         return Err(OrbChrysaError::Unauthorized {
@@ -211,7 +229,7 @@ pub async fn oauth2_callback<M, B>(
         username: id_username,
         display_name: id_display_name,
         email: id_email,
-        groups: access_groups,
+        groups: all_groups,
         expires_at: now + session_max_age,
     };
 
