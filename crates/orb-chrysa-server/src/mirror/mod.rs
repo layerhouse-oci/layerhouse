@@ -330,6 +330,9 @@ impl MirrorManager {
         let tags = self
             .resolve_mirror_strategy_tags(&rule.strategy, &upstream)
             .await?;
+        // Force-refresh the rules cache so subsequent per-tag manifest pulls
+        // see this rule (same stale-cache issue as proxy_cache warm).
+        self.rules_cache.write().await.0.clear();
         Ok(ResolvedMirrorJob {
             direction: MirrorDirection::Pull,
             local_repo: rule.local_prefix,
@@ -363,6 +366,11 @@ impl MirrorManager {
             cache_id,
             cache.local_prefix,
         );
+        // Force-refresh the proxy cache so that the subsequent per-tag
+        // pull_manifest → match_proxy_cache calls see this cache. Without
+        // this, a stale proxy cache list (populated before the warm rule
+        // was created) causes pull_manifest to find no match.
+        self.proxy_cache.write().await.0.clear();
         Ok((cache.local_prefix, tags))
     }
 
@@ -414,8 +422,17 @@ impl MirrorManager {
             return Ok(Some(result));
         }
 
-        self.pull_manifest_from_mirror_rule(repo_name, reference, metadata, blobs)
-            .await
+        let result = self
+            .pull_manifest_from_mirror_rule(repo_name, reference, metadata, blobs)
+            .await?;
+        if result.is_none() {
+            tracing::warn!(
+                "pull_manifest: no match for {}:{} (not in proxy cache or mirror rules)",
+                repo_name,
+                reference,
+            );
+        }
+        Ok(result)
     }
 
     async fn pull_manifest_from_proxy_cache<M: RegistryStore, B: BlobStore>(
