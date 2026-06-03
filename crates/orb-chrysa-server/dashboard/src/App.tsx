@@ -24,6 +24,7 @@ const Mirror = lazy(() => import("./pages/Mirror"));
 const ProxyCache = lazy(() => import("./pages/ProxyCache"));
 const Cluster = lazy(() => import("./pages/Cluster"));
 const KubernetesSetup = lazy(() => import("./pages/KubernetesSetup"));
+const OAuth2Error = lazy(() => import("./pages/OAuth2Error"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
 const OAuth2Start: Component = () => {
@@ -188,6 +189,7 @@ export default function App() {
       <Route path="/cluster" component={Cluster} />
       <Route path="/setup" component={KubernetesSetup} />
       <Route path="/oauth2/start" component={OAuth2Start} />
+      <Route path="/oauth2/error" component={OAuth2Error} />
       <Route path="*" component={NotFound} />
     </HashRouter>
   );

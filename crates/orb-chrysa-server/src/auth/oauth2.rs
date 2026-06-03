@@ -10,11 +10,18 @@ use crate::error::OrbChrysaError;
 use crate::routes::AppState;
 
 use super::session::DashboardSession;
-use super::token::TokenClaims;
 
 const OAUTH2_COOKIE: &str = "orb_chrysa_oauth2";
 const OAUTH2_COOKIE_MAX_AGE_SECS: u64 = 600;
+const OAUTH2_STATE_ERROR_LOCATION: &str = "/?oauth_error=state#/oauth2/error";
 const OAUTH2_LOGIN_SCOPE: &str = "openid profile email groups";
+
+fn oauth2_cookie_clear_str(flags: &super::CookieFlags) -> String {
+    format!(
+        "orb_chrysa_oauth2=; {}; Path=/oauth2; Max-Age=0",
+        flags.attributes()
+    )
+}
 
 #[derive(serde::Deserialize)]
 pub struct CallbackQuery {
@@ -24,9 +31,10 @@ pub struct CallbackQuery {
 }
 
 pub async fn oauth2_start<M, B>(
-    axum::extract::State(state): axum::extract::State<Arc<AppState<M, B>>>,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState<M, B>>>,
+    headers: HeaderMap,
 ) -> Result<Response, OrbChrysaError> {
-    let auth = state
+    let auth = app_state
         .auth
         .as_ref()
         .ok_or_else(|| OrbChrysaError::Internal("auth not configured".to_string()))?;
@@ -36,25 +44,59 @@ pub async fn oauth2_start<M, B>(
     let code_challenge = pkce_challenge(&code_verifier);
 
     let authorization_endpoint = auth.authorization_endpoint().await;
-    let auth_url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
-        authorization_endpoint,
-        percent_encode(&auth.config.client_id),
-        percent_encode(auth.redirect_uri()),
-        percent_encode(OAUTH2_LOGIN_SCOPE),
-        percent_encode(&state),
-        percent_encode(&code_challenge),
-    );
+    // If the user explicitly logged out (orb_chrysa_logged_out marker),
+    // request interactive re-authentication so the IdP doesn't silently
+    // re-approve via the still-active SSO session.
+    let require_login = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|c| extract_cookie(c, "orb_chrysa_logged_out"))
+        .is_some();
 
+    let mut params: Vec<String> = vec![
+        format!("response_type=code"),
+        format!("client_id={}", percent_encode(&auth.config.client_id)),
+        format!("redirect_uri={}", percent_encode(auth.redirect_uri())),
+        format!("scope={}", percent_encode(OAUTH2_LOGIN_SCOPE)),
+        format!("state={}", percent_encode(&state)),
+        format!("code_challenge={}", percent_encode(&code_challenge)),
+        "code_challenge_method=S256".to_string(),
+    ];
+    if require_login {
+        params.push("prompt=login".to_string());
+        params.push("max_age=0".to_string());
+    }
+    let auth_url = format!("{}?{}", authorization_endpoint, params.join("&"));
+
+    let flags = super::cookie_secure_flag(
+        &headers,
+        &app_state.cookie_secure_mode,
+        app_state.server_tls_enabled,
+    );
     let mut response = Redirect::temporary(&auth_url).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&format!(
-            "{}={}.{}; HttpOnly; Secure; SameSite=Lax; Path=/oauth2; Max-Age={}",
-            OAUTH2_COOKIE, state, code_verifier, OAUTH2_COOKIE_MAX_AGE_SECS
+            "{}={}.{}; {}; Path=/oauth2; Max-Age={}",
+            OAUTH2_COOKIE,
+            state,
+            code_verifier,
+            flags.attributes(),
+            OAUTH2_COOKIE_MAX_AGE_SECS
         ))
         .map_err(|e| OrbChrysaError::Internal(format!("oauth2 cookie failed: {}", e)))?,
     );
+    // Clear the logged-out marker so subsequent logins use silent SSO again.
+    if require_login {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&format!(
+                "orb_chrysa_logged_out=; {}; Path=/; Max-Age=0",
+                flags.attributes()
+            ))
+            .expect("valid clear-logged-out marker value"),
+        );
+    }
     Ok(response)
 }
 
@@ -67,12 +109,21 @@ pub async fn oauth2_callback<M, B>(
         return Ok(Redirect::temporary("/oauth2/start").into_response());
     };
 
+    let flags = super::cookie_secure_flag(
+        &headers,
+        &state.cookie_secure_mode,
+        state.server_tls_enabled,
+    );
+
+    let code_verifier = match oauth2_code_verifier(&headers, query._state.as_deref()) {
+        Ok(code_verifier) => code_verifier,
+        Err(OAuth2StateError) => return Ok(oauth2_state_error_response(&flags)),
+    };
+
     let auth = state
         .auth
         .as_ref()
         .ok_or_else(|| OrbChrysaError::Internal("auth not configured".to_string()))?;
-
-    let code_verifier = oauth2_code_verifier(&headers, query._state.as_deref())?;
 
     // Exchange authorization code for tokens at the discovered token endpoint
     let token_url = auth.token_exchange_endpoint().await;
@@ -117,29 +168,51 @@ pub async fn oauth2_callback<M, B>(
         .as_str()
         .ok_or_else(|| OrbChrysaError::Internal("missing access_token".to_string()))?
         .to_string();
-    let id_token = token["id_token"]
+    let id_token_str = token["id_token"]
         .as_str()
-        .ok_or_else(|| OrbChrysaError::Internal("missing id_token".to_string()))?;
-    let id_claims = TokenClaims::from_jwt_unverified(id_token)
-        .ok_or_else(|| OrbChrysaError::Internal("invalid id_token".to_string()))?;
-    let refresh_token = token["refresh_token"].as_str().unwrap_or("").to_string();
-    let id_token = id_token.to_string();
+        .ok_or_else(|| OrbChrysaError::Internal("missing id_token".to_string()))?
+        .to_string();
+
+    // Verify both tokens against JWKS (replaces the previous from_jwt_unverified path).
+    let id_claims = auth.verify_id_token(&id_token_str).await?;
+    let (access_groups, access_subject, access_exp) =
+        auth.verify_access_token_groups(&access_token).await?;
+
+    // Subject consistency: the subject in both tokens must match.
+    if id_claims.subject != access_subject {
+        return Err(OrbChrysaError::Unauthorized {
+            message: "token subject mismatch".to_string(),
+            realm: None,
+            service: None,
+            scope: None,
+        });
+    }
 
     let now = chrono::Utc::now().timestamp() as u64;
-    let expires_in = token["expires_in"].as_u64().unwrap_or(86400);
-    let username = id_claims.username();
-    let display_name = id_claims.display_name();
-    let email = id_claims.email();
+    let expires_in = token["expires_in"].as_u64().unwrap_or(3600);
+    // Cap session lifetime at the minimum of: token expires_in,
+    // id_token exp, access_token exp, and the 1-hour hard cap.
+    let token_expires_at = now + expires_in;
+    let id_expires_at = id_claims.exp as u64;
+    let access_expires_at = access_exp as u64;
+    let session_max_age = token_expires_at
+        .min(id_expires_at)
+        .min(access_expires_at)
+        .min(now + 3600)
+        .saturating_sub(now);
+
+    let id_username = id_claims.username();
+    let id_display_name = id_claims.display_name();
+    let id_email = id_claims.email();
+    let id_subject = id_claims.subject;
 
     let session = DashboardSession {
-        subject: id_claims.subject,
-        username,
-        display_name,
-        email,
-        access_token,
-        refresh_token,
-        id_token,
-        expires_at: now + expires_in,
+        subject: id_subject,
+        username: id_username,
+        display_name: id_display_name,
+        email: id_email,
+        groups: access_groups,
+        expires_at: now + session_max_age,
     };
 
     let cookie_value = session.encrypt(auth.session_key())?;
@@ -148,55 +221,63 @@ pub async fn oauth2_callback<M, B>(
     response.headers_mut().append(
         axum::http::header::SET_COOKIE,
         axum::http::HeaderValue::from_str(&format!(
-            "orb_chrysa_session={}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={}",
-            cookie_value, expires_in
+            "orb_chrysa_session={}; {}; Path=/; Max-Age={}",
+            cookie_value,
+            flags.attributes(),
+            session_max_age
         ))
         .expect("valid cookie header value"),
     );
+    // Store the raw id_token in a path-scoped cookie so it is only sent
+    // to the logout endpoint (stays under the 4096-byte per-cookie limit).
     response.headers_mut().append(
         axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_static(
-            "orb_chrysa_oauth2=; HttpOnly; Secure; SameSite=Lax; Path=/oauth2; Max-Age=0",
-        ),
+        axum::http::HeaderValue::from_str(&format!(
+            "orb_chrysa_logout_hint={}; {}; Path=/api/v1/session/logout; Max-Age={}",
+            id_token_str,
+            flags.attributes(),
+            session_max_age
+        ))
+        .expect("valid cookie header value"),
     );
+    append_clear_oauth2_cookie(&mut response, &flags);
     Ok(response)
 }
+
+#[derive(Debug)]
+struct OAuth2StateError;
 
 fn oauth2_code_verifier(
     headers: &HeaderMap,
     state: Option<&str>,
-) -> Result<String, OrbChrysaError> {
+) -> Result<String, OAuth2StateError> {
     let cookie = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
         .and_then(|cookie| extract_cookie(cookie, OAUTH2_COOKIE))
-        .ok_or_else(|| OrbChrysaError::Unauthorized {
-            message: "missing oauth2 state".to_string(),
-            realm: None,
-            service: None,
-            scope: None,
-        })?;
+        .ok_or(OAuth2StateError)?;
 
-    let (stored_state, code_verifier) =
-        cookie
-            .split_once('.')
-            .ok_or_else(|| OrbChrysaError::Unauthorized {
-                message: "invalid oauth2 state".to_string(),
-                realm: None,
-                service: None,
-                scope: None,
-            })?;
+    let (stored_state, code_verifier) = cookie.split_once('.').ok_or(OAuth2StateError)?;
 
     if Some(stored_state) != state {
-        return Err(OrbChrysaError::Unauthorized {
-            message: "oauth2 state mismatch".to_string(),
-            realm: None,
-            service: None,
-            scope: None,
-        });
+        return Err(OAuth2StateError);
     }
 
     Ok(code_verifier.to_string())
+}
+
+fn oauth2_state_error_response(flags: &super::CookieFlags) -> Response {
+    let mut response = Redirect::temporary(OAUTH2_STATE_ERROR_LOCATION).into_response();
+    append_clear_oauth2_cookie(&mut response, flags);
+    response
+}
+
+fn append_clear_oauth2_cookie(response: &mut Response, flags: &super::CookieFlags) {
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&oauth2_cookie_clear_str(flags))
+            .expect("valid clear-cookie header value"),
+    );
 }
 
 fn extract_cookie<'a>(cookie: &'a str, name: &str) -> Option<&'a str> {

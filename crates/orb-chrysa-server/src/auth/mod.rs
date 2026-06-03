@@ -10,7 +10,9 @@ pub mod token_endpoint;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::config::{AuthConfig, S3Config};
+use axum::http::HeaderMap;
+
+use crate::config::{AuthConfig, CookieSecureMode, S3Config};
 use crate::error::OrbChrysaError;
 use crate::store::metadata::TokenStore;
 
@@ -418,7 +420,7 @@ impl AuthService {
         })
     }
 
-    async fn validate_kanidm_token(&self, token: &str) -> Result<AuthIdentity, OrbChrysaError> {
+    async fn verify_token_claims(&self, token: &str) -> Result<token::TokenClaims, OrbChrysaError> {
         let header =
             jsonwebtoken::decode_header(token).map_err(|_| OrbChrysaError::Unauthorized {
                 message: "invalid token".to_string(),
@@ -464,7 +466,35 @@ impl AuthService {
                 scope: None,
             })?;
 
-        let claims = token_data.claims;
+        Ok(token_data.claims)
+    }
+
+    /// Validates the OIDC ID token against JWKS and returns the verified claims.
+    /// The caller is responsible for checking subject consistency with the access token.
+    pub(crate) async fn verify_id_token(
+        &self,
+        id_token: &str,
+    ) -> Result<token::TokenClaims, OrbChrysaError> {
+        self.verify_token_claims(id_token).await
+    }
+
+    /// Validates the Kanidm access token via JWKS and returns the user's groups,
+    /// token subject, and expiration timestamp (Unix seconds).
+    pub(crate) async fn verify_access_token_groups(
+        &self,
+        access_token: &str,
+    ) -> Result<(Vec<String>, String, usize), OrbChrysaError> {
+        let claims = self.verify_token_claims(access_token).await?;
+        Ok((
+            claims.groups.unwrap_or_default(),
+            claims.subject,
+            claims.exp,
+        ))
+    }
+
+    async fn validate_kanidm_token(&self, token: &str) -> Result<AuthIdentity, OrbChrysaError> {
+        let claims = self.verify_token_claims(token).await?;
+
         let display_name = claims.display_name();
         let username = claims.username();
         let email = claims.email();
@@ -559,6 +589,69 @@ impl AuthService {
     }
 }
 
+pub(crate) struct CookieFlags {
+    pub secure: bool,
+    pub same_site: &'static str,
+}
+
+impl CookieFlags {
+    /// Returns the attribute portion of a Set-Cookie header:
+    /// "HttpOnly; SameSite=Lax" or "HttpOnly; Secure; SameSite=Lax" etc.
+    pub(crate) fn attributes(&self) -> String {
+        let mut parts: Vec<&str> = vec!["HttpOnly"];
+        if self.secure {
+            parts.push("Secure");
+        }
+        parts.push(self.same_site);
+        parts.join("; ")
+    }
+}
+
+/// Returns cookie flags appropriate for the request's security context.
+///
+/// - `Disabled`: `SameSite=Lax` without `Secure` (for localhost HTTP dev)
+/// - `Enabled`: `Secure; SameSite=Lax` (forced HTTPS).
+/// - `Auto`: checks `X-Forwarded-Proto` header first, falls back to
+///   `server_tls_enabled`. HTTPS → `Secure; SameSite=Lax`; HTTP → `SameSite=Lax`.
+pub(crate) fn cookie_secure_flag(
+    headers: &HeaderMap,
+    cookie_secure_mode: &CookieSecureMode,
+    server_tls_enabled: bool,
+) -> CookieFlags {
+    match cookie_secure_mode {
+        CookieSecureMode::Disabled => {
+            return CookieFlags {
+                secure: false,
+                same_site: "SameSite=Lax",
+            };
+        }
+        CookieSecureMode::Enabled => {
+            return CookieFlags {
+                secure: true,
+                same_site: "SameSite=Lax",
+            };
+        }
+        CookieSecureMode::Auto => {}
+    }
+    let https = headers
+        .get("X-Forwarded-Proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|p| p.eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+        || server_tls_enabled;
+    if https {
+        CookieFlags {
+            secure: true,
+            same_site: "SameSite=Lax",
+        }
+    } else {
+        CookieFlags {
+            secure: false,
+            same_site: "SameSite=Lax",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -590,6 +683,7 @@ mod tests {
                 groups: vec!["registry_admins".to_string()],
                 scopes: vec!["repository:*:*".to_string()],
             }],
+            cookie_secure_mode: super::CookieSecureMode::Auto,
         }
     }
 

@@ -11,9 +11,7 @@ pub struct DashboardSession {
     pub username: Option<String>,
     pub display_name: Option<String>,
     pub email: Option<String>,
-    pub access_token: String,
-    pub refresh_token: String,
-    pub id_token: String,
+    pub groups: Vec<String>,
     pub expires_at: u64,
 }
 
@@ -72,9 +70,7 @@ mod tests {
             username: Some("admin".into()),
             display_name: Some("Admin".into()),
             email: Some("admin@test.local".into()),
-            access_token: "access-token-value".into(),
-            refresh_token: "refresh-token-value".into(),
-            id_token: "id-token-value".into(),
+            groups: vec!["registry_admins".into()],
             expires_at: 1717200000,
         };
 
@@ -84,7 +80,7 @@ mod tests {
         assert_eq!(decrypted.subject, session.subject);
         assert_eq!(decrypted.username, session.username);
         assert_eq!(decrypted.email, session.email);
-        assert_eq!(decrypted.access_token, session.access_token);
+        assert_eq!(decrypted.groups, session.groups);
         assert_eq!(decrypted.expires_at, session.expires_at);
     }
 
@@ -95,14 +91,39 @@ mod tests {
             username: None,
             display_name: None,
             email: None,
-            access_token: "token".into(),
-            refresh_token: "refresh".into(),
-            id_token: "id".into(),
+            groups: vec![],
             expires_at: 1,
         };
 
         let encrypted = session.encrypt(&[1u8; 32]).unwrap();
         let result = DashboardSession::decrypt(&encrypted, &[2u8; 32]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cookie_size_under_4096_bytes() {
+        let key = [42u8; 32];
+        // Representative claims: long-ish subject/email, multiple groups.
+        let session = DashboardSession {
+            subject: "a1b2c3d4-e5f6-7890-abcd-ef1234567890".into(),
+            username: Some("adamcavendish".into()),
+            display_name: Some("Adam Cavendish".into()),
+            email: Some("adam.cavendish@modest-destiny.com".into()),
+            groups: vec![
+                "orb_chrysa_admins".into(),
+                "orb_chrysa_developers".into(),
+                "qa/auth-test/developers".into(),
+            ],
+            expires_at: 1717200000,
+        };
+
+        let encrypted = session.encrypt(&key).unwrap();
+        // "orb_chrysa_session=" + encrypted_value
+        let cookie_value = format!("orb_chrysa_session={}", encrypted);
+        assert!(
+            cookie_value.len() < 4096,
+            "session cookie must be under 4096 bytes, got {}",
+            cookie_value.len()
+        );
     }
 }

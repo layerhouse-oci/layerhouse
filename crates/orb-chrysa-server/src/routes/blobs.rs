@@ -244,6 +244,7 @@ async fn delete_blob<M: RegistryStore, B: BlobStore>(
 #[cfg(test)]
 mod tests {
     use super::{dispatch, parse_range};
+    use crate::config::CookieSecureMode;
     use crate::mirror::MirrorManager;
     use crate::oci::digest::Digest;
     use crate::routes::{AppState, RegistryCore};
@@ -271,6 +272,8 @@ mod tests {
             raft: None,
             raft_tls: None,
             auth: None,
+            server_tls_enabled: false,
+            cookie_secure_mode: CookieSecureMode::Disabled,
         })
     }
 

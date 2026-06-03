@@ -54,6 +54,20 @@ pub struct AuthConfig {
     pub token_signing_keys: Vec<String>,
     pub session_encryption_key: String,
     pub permissions: Vec<PermissionMapping>,
+    #[serde(default = "default_cookie_secure_mode")]
+    pub cookie_secure_mode: CookieSecureMode,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CookieSecureMode {
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+fn default_cookie_secure_mode() -> CookieSecureMode {
+    CookieSecureMode::Auto
 }
 
 impl AuthConfig {
@@ -611,6 +625,7 @@ mod tests {
             token_signing_keys: vec![base64::engine::general_purpose::STANDARD.encode(b"signing")],
             session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
             permissions: Vec::new(),
+            cookie_secure_mode: CookieSecureMode::Auto,
         });
         assert!(config.validate().is_ok());
 
@@ -648,6 +663,7 @@ mod tests {
             token_signing_keys: vec![base64::engine::general_purpose::STANDARD.encode(b"signing")],
             session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
             permissions: Vec::new(),
+            cookie_secure_mode: CookieSecureMode::Auto,
         };
 
         assert_eq!(

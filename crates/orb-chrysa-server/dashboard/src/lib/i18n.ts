@@ -242,6 +242,11 @@ const en: Messages = {
   "access.authDisabled": "Authentication is not configured",
   "access.authDisabledDesc": "This registry is currently open. Configure auth to manage dashboard sessions and personal access tokens.",
 
+  "oauth2.errorEyebrow": "OIDC sign in",
+  "oauth2.stateErrorTitle": "Sign-in link expired",
+  "oauth2.stateErrorDesc": "This login attempt could not be verified. It may have expired or been opened in a different browser session.",
+  "oauth2.restartLogin": "Start sign in again",
+
   "setup.eyebrow": "Kubernetes Pull Setup",
   "setup.title": "Setup",
   "setup.copy":

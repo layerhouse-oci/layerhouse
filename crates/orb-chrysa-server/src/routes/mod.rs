@@ -17,7 +17,7 @@ use axum::response::IntoResponse;
 use axum::{Json, Router};
 
 use crate::auth::AuthService;
-use crate::config::RaftTlsConfig;
+use crate::config::{CookieSecureMode, RaftTlsConfig};
 use crate::mirror::MirrorManager;
 use crate::raft::membership;
 use crate::store::blob::BlobStore;
@@ -42,6 +42,8 @@ pub struct AppState<M, B> {
     pub raft: Option<std::sync::Arc<crate::raft::RaftInstance>>,
     pub raft_tls: Option<Arc<RaftTlsConfig>>,
     pub auth: Option<Arc<AuthService>>,
+    pub server_tls_enabled: bool,
+    pub cookie_secure_mode: CookieSecureMode,
 }
 
 /// Convenience constructor for tests: a fully initialized AppState
@@ -62,6 +64,8 @@ pub(crate) fn test_state() -> Arc<
         raft: None,
         raft_tls: None,
         auth: None,
+        server_tls_enabled: false,
+        cookie_secure_mode: CookieSecureMode::Disabled,
     })
 }
 
@@ -510,6 +514,83 @@ mod tests {
                 .get(axum::http::header::LOCATION)
                 .and_then(|value| value.to_str().ok()),
             Some("/oauth2/start")
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth2_callback_missing_state_cookie_redirects_to_error_page() {
+        let state = test_state();
+        let router = build_router(state, true);
+
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/oauth2/callback?code=abc&state=expected")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_oauth2_state_error_redirect(response);
+    }
+
+    #[tokio::test]
+    async fn oauth2_callback_malformed_state_cookie_redirects_to_error_page() {
+        let state = test_state();
+        let router = build_router(state, true);
+
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/oauth2/callback?code=abc&state=expected")
+                    .header(axum::http::header::COOKIE, "orb_chrysa_oauth2=malformed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_oauth2_state_error_redirect(response);
+    }
+
+    #[tokio::test]
+    async fn oauth2_callback_state_mismatch_redirects_to_error_page() {
+        let state = test_state();
+        let router = build_router(state, true);
+
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/oauth2/callback?code=abc&state=expected")
+                    .header(
+                        axum::http::header::COOKIE,
+                        "orb_chrysa_oauth2=different.verifier",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_oauth2_state_error_redirect(response);
+    }
+
+    fn assert_oauth2_state_error_redirect(response: Response) {
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/?oauth_error=state#/oauth2/error")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::SET_COOKIE)
+                .and_then(|value| value.to_str().ok()),
+            Some("orb_chrysa_oauth2=; HttpOnly; SameSite=Lax; Path=/oauth2; Max-Age=0")
         );
     }
 

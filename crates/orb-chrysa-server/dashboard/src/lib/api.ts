@@ -236,8 +236,12 @@ export function fetchSession(): Promise<DashboardSession> {
   return fetchJson("/api/v1/session");
 }
 
-export async function logoutSession(): Promise<void> {
-  await fetchNoBody("/api/v1/session/logout", { method: "POST" });
+export function logoutSession(): void {
+  // Set window.location directly — the browser navigates to the logout
+  // endpoint immediately, before any caller cleanup can cancel it.
+  // Do NOT use window.location.assign() (returns a Promise-like that
+  // resolves before navigation, letting callers overwrite the location).
+  window.location.href = "/api/v1/session/logout";
 }
 
 export function fetchPersonalAccessTokens(): Promise<PersonalAccessToken[]> {

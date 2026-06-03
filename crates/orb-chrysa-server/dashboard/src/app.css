@@ -1834,6 +1834,30 @@ label {
   margin-top: 10px;
 }
 
+/* ---- OAuth2 ---- */
+.oauth-error {
+  display: grid;
+  min-height: min(560px, calc(100vh - 220px));
+  place-items: center;
+  padding: 32px 0;
+}
+
+.oauth-error-panel {
+  width: min(100%, 560px);
+}
+
+.oauth-error-panel h1 {
+  margin-bottom: 12px;
+  color: var(--strong);
+  font-size: 32px;
+  font-weight: 600;
+}
+
+.oauth-error-panel p:not(.eyebrow) {
+  margin-bottom: 20px;
+  color: var(--muted);
+}
+
 :root[dir="rtl"] .advanced p {
   direction: ltr;
   text-align: left;

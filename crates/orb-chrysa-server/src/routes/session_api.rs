@@ -5,7 +5,6 @@ use axum::{Json, Router};
 use serde::Serialize;
 use std::sync::Arc;
 
-use crate::auth::session::DashboardSession;
 use crate::auth::token::{AuthIdentity, TokenType};
 use crate::error::OrbChrysaError;
 use crate::routes::AppState;
@@ -27,7 +26,7 @@ pub fn routes<M: Send + Sync + 'static, B: Send + Sync + 'static>() -> Router<Ar
         .route("/api/v1/session", axum::routing::get(get_session::<M, B>))
         .route(
             "/api/v1/session/logout",
-            axum::routing::post(logout_session::<M, B>),
+            axum::routing::get(logout_session::<M, B>).post(logout_session::<M, B>),
         )
 }
 
@@ -73,37 +72,64 @@ async fn logout_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
     State(state): State<Arc<AppState<M, B>>>,
     headers: HeaderMap,
 ) -> Response {
-    let end_session_url = if let Some(auth) = state.auth.as_ref() {
-        let cookie = headers
-            .get(header::COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|c| extract_cookie_value(c, "orb_chrysa_session"));
-        if let Some(cookie) = cookie
-            && let Ok(session) = DashboardSession::decrypt(cookie, auth.session_key())
-        {
-            auth.end_session_endpoint().await.map(|url| {
-                format!(
-                    "{}?id_token_hint={}&post_logout_redirect_uri=/",
-                    url, session.id_token
-                )
-            })
-        } else {
-            None
-        }
-    } else {
-        None
+    // Read the logout hint cookie (path-scoped, only sent to this endpoint).
+    let logout_hint = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|c| extract_cookie_value(c, "orb_chrysa_logout_hint"))
+        .map(|s| s.to_string());
+
+    let end_session_url = match (&state.auth, logout_hint) {
+        (Some(auth), Some(id_token)) => auth.end_session_endpoint().await.map(|url| {
+            format!(
+                "{}?id_token_hint={}&post_logout_redirect_uri=/",
+                url, id_token
+            )
+        }),
+        _ => None,
     };
 
+    let flags = crate::auth::cookie_secure_flag(
+        &headers,
+        &state.cookie_secure_mode,
+        state.server_tls_enabled,
+    );
+    let had_end_session = end_session_url.is_some();
     let mut response = match end_session_url {
         Some(url) => Redirect::temporary(&url).into_response(),
+        // When there is no OIDC end_session endpoint (or no logout hint),
+        // set a logged-out marker to break the auto-re-auth loop.
         None => Redirect::temporary("/").into_response(),
     };
+    // Clear both session cookies
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static(
-            "orb_chrysa_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0",
-        ),
+        HeaderValue::from_str(&format!(
+            "orb_chrysa_session=; {}; Path=/; Max-Age=0",
+            flags.attributes()
+        ))
+        .expect("valid clear-session header value"),
     );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&format!(
+            "orb_chrysa_logout_hint=; {}; Path=/api/v1/session/logout; Max-Age=0",
+            flags.attributes()
+        ))
+        .expect("valid clear-logout-hint header value"),
+    );
+    // Set a short-lived marker so the middleware knows not to auto-redirect
+    // to /oauth2/start (which would immediately re-auth via Kanidm SSO).
+    if !had_end_session {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&format!(
+                "orb_chrysa_logged_out=1; {}; Path=/; Max-Age=300",
+                flags.attributes()
+            ))
+            .expect("valid logged-out marker value"),
+        );
+    }
     response
 }
 
@@ -119,6 +145,7 @@ fn token_type_name(token_type: TokenType) -> &'static str {
         TokenType::KanidmAccess => "kanidm_access",
         TokenType::PersonalAccess => "personal_access",
         TokenType::OciBearer => "oci_bearer",
+        TokenType::Session => "session",
     }
 }
 

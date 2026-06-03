@@ -1,4 +1,3 @@
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
@@ -17,6 +16,14 @@ pub enum TokenType {
     KanidmAccess,
     PersonalAccess,
     OciBearer,
+    Session,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AudienceClaim {
+    One(String),
+    Many(Vec<String>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,7 +32,7 @@ pub struct TokenClaims {
     pub subject: String,
     pub exp: usize,
     #[serde(default)]
-    pub aud: Option<String>,
+    pub aud: Option<AudienceClaim>,
     #[serde(default)]
     pub groups: Option<Vec<String>>,
     #[serde(default)]
@@ -45,15 +52,6 @@ pub struct TokenClaims {
 }
 
 impl TokenClaims {
-    pub fn from_jwt_unverified(token: &str) -> Option<Self> {
-        let payload = token.split('.').nth(1)?;
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload)
-            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
-            .ok()?;
-        serde_json::from_slice(&bytes).ok()
-    }
-
     pub fn trimmed(value: &Option<String>) -> Option<String> {
         value
             .as_deref()

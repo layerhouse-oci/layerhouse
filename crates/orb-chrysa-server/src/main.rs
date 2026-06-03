@@ -16,7 +16,9 @@ use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{Config, RaftTlsConfig, resolve_advertise_addr, resolve_node_id};
+use crate::config::{
+    Config, CookieSecureMode, RaftTlsConfig, resolve_advertise_addr, resolve_node_id,
+};
 use crate::mirror::MirrorManager;
 use crate::raft::kubernetes;
 use crate::raft::log_store::RedbLogStore;
@@ -251,6 +253,12 @@ async fn main() -> Result<(), AppError> {
         None => None,
     };
 
+    let cookie_secure_mode = config
+        .auth
+        .as_ref()
+        .map(|a| a.cookie_secure_mode.clone())
+        .unwrap_or(CookieSecureMode::Auto);
+
     let state = Arc::new(AppState {
         core: RegistryCore {
             metadata: metadata_store,
@@ -265,6 +273,8 @@ async fn main() -> Result<(), AppError> {
         raft: Some(raft.clone()),
         raft_tls: tls_config.clone(),
         auth: auth_service,
+        server_tls_enabled: config.server.tls.is_some(),
+        cookie_secure_mode,
     });
 
     let scheduler_state = state.clone();
