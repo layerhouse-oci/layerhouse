@@ -1,0 +1,47 @@
+# Standalone orb-chrysa with OIDC authentication
+# Replace the URL placeholders with your IdP's values.
+# See docs: https://orb-chrysa.docs/authentication/bring-your-own-idp.html
+
+[server]
+listen = "0.0.0.0:5050"
+
+[storage.s3]
+endpoint = "http://rustfs:9000"
+bucket = "orb-chrysa"
+region = "us-east-1"
+access_key = "rustfsadmin"
+secret_key = "rustfsadmin"
+path_style = true
+
+[raft]
+listen = "0.0.0.0:5051"
+data_dir = "/tmp/raft"
+discovery_dns = "orb-chrysa"
+
+[auth]
+issuer_url = "https://idp.example.com/realms/your-realm"
+issuer_internal_url = "https://idp.internal:8443/realms/your-realm"
+client_id = "orb-chrysa"
+client_secret = "<your-client-secret>"
+token_endpoint_url = "https://registry.example.com/v2/token"
+redirect_uri = "https://registry.example.com/oauth2/callback"
+token_signing_keys = ["<base64-encoded-signing-key>"]
+session_encryption_key = "<base64-encoded-32-byte-key>"
+# group_claim = "groups"  # default; change to "roles", "realm_access.roles", etc.
+# login_scopes = "openid profile email groups"  # default
+# access_token_audience = "<audience>"  # default: uses client_id
+
+[[auth.permissions]]
+name = "admin-access"
+groups = ["registry_admins"]
+scopes = ["repository:*:*"]
+
+[[auth.permissions]]
+name = "developer-access"
+groups = ["registry_developers"]
+scopes = ["repository:dev/*:push", "repository:dev/*:pull"]
+
+[[auth.permissions]]
+name = "read-only"
+groups = ["registry_readers"]
+scopes = ["repository:*:pull"]

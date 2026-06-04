@@ -64,6 +64,11 @@ data:
     jwks_max_stale_seconds = {{ .Values.auth.jwksMaxStaleSeconds }}
     token_signing_keys = __AUTH_TOKEN_SIGNING_KEYS__
     session_encryption_key = "__AUTH_SESSION_ENCRYPTION_KEY__"
+    group_claim = {{ .Values.auth.groupClaim | quote }}
+    login_scopes = {{ .Values.auth.loginScopes | quote }}
+    {{- if .Values.auth.accessTokenAudience }}
+    access_token_audience = {{ .Values.auth.accessTokenAudience | quote }}
+    {{- end }}
     {{- range .Values.auth.permissions }}
 
     [[auth.permissions]]

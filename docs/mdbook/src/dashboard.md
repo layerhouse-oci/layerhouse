@@ -20,4 +20,4 @@ The dashboard is served at the root path (`/`). In development, it is available 
 ## Authentication
 
 When auth is enabled, the dashboard redirects unauthenticated users to the OIDC login
-flow via kanidm. See [Dashboard OIDC](authentication/oidc.md) for details.
+flow via the configured OIDC provider (e.g., kanidm). See [Dashboard OIDC](authentication/oidc.md) for details.

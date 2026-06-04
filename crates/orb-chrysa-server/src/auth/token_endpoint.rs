@@ -75,7 +75,7 @@ pub async fn token_endpoint<M: TokenStore, B: BlobStore>(
             scope: scope_string(&query.scope),
         })?;
 
-    // The password field is the token (PAT or kanidm access token)
+    // The password field is the token (PAT or OIDC access token)
     let token = &password;
     let identity = auth_service
         .validate_token::<M>(token, &state.core.metadata)

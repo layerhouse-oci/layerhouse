@@ -72,6 +72,9 @@ auth:
   clientSecretKey: client_secret
   tokenSigningKeysKey: token_signing_keys
   sessionEncryptionKeyKey: session_encryption_key
+  groupClaim: groups
+  loginScopes: "openid profile email groups"
+  accessTokenAudience: ""
   permissions:
     - name: admin-full-access
       groups: ["registry_admins"]

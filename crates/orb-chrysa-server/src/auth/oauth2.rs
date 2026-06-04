@@ -14,7 +14,6 @@ use super::session::DashboardSession;
 const OAUTH2_COOKIE: &str = "orb_chrysa_oauth2";
 const OAUTH2_COOKIE_MAX_AGE_SECS: u64 = 600;
 const OAUTH2_STATE_ERROR_LOCATION: &str = "/?oauth_error=state#/oauth2/error";
-const OAUTH2_LOGIN_SCOPE: &str = "openid profile email groups";
 
 fn oauth2_cookie_clear_str(flags: &super::CookieFlags) -> String {
     format!(
@@ -57,7 +56,7 @@ pub async fn oauth2_start<M, B>(
         format!("response_type=code"),
         format!("client_id={}", percent_encode(&auth.config.client_id)),
         format!("redirect_uri={}", percent_encode(auth.redirect_uri())),
-        format!("scope={}", percent_encode(OAUTH2_LOGIN_SCOPE)),
+        format!("scope={}", percent_encode(&auth.config.login_scopes)),
         format!("state={}", percent_encode(&state)),
         format!("code_challenge={}", percent_encode(&code_challenge)),
         "code_challenge_method=S256".to_string(),
@@ -176,11 +175,11 @@ pub async fn oauth2_callback<M, B>(
     // Verify both tokens against JWKS (replaces the previous from_jwt_unverified path).
     let id_claims = auth.verify_id_token(&id_token_str).await?;
     let (access_groups, access_subject, access_exp) =
-        auth.verify_access_token_groups(&access_token).await?;
+        auth.verify_access_token(&access_token).await?;
 
     // Merge groups from both tokens: some IdPs put groups in the ID token
     // rather than the access token.
-    let id_groups = id_claims.groups.clone().unwrap_or_default();
+    let id_groups = id_claims.extract_groups(&auth.config.group_claim);
     let mut all_groups = access_groups.clone();
     for g in &id_groups {
         if !all_groups.contains(g) {
@@ -338,14 +337,14 @@ fn percent_encode(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{OAUTH2_LOGIN_SCOPE, percent_encode};
+    use crate::config::default_login_scopes;
+
+    use super::percent_encode;
 
     #[test]
-    fn login_scope_requests_groups_for_dashboard_permissions() {
-        assert_eq!(OAUTH2_LOGIN_SCOPE, "openid profile email groups");
-        assert_eq!(
-            percent_encode(OAUTH2_LOGIN_SCOPE),
-            "openid%20profile%20email%20groups"
-        );
+    fn login_scope_default_includes_groups_for_dashboard_permissions() {
+        let scopes = default_login_scopes();
+        assert_eq!(scopes, "openid profile email groups");
+        assert_eq!(percent_encode(&scopes), "openid%20profile%20email%20groups");
     }
 }

@@ -10,3 +10,6 @@ auth:
   clientId: orb-chrysa
   tokenEndpointUrl: https://idp.example.internal/oauth2/token
   redirectUri: https://registry.example.internal/oauth2/callback
+  groupClaim: realm_access.roles
+  loginScopes: "openid profile email"
+  accessTokenAudience: https://api.example.internal

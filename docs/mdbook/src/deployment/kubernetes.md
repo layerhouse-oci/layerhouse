@@ -75,10 +75,10 @@ helm install orb-chrysa ./deploy/kubernetes/helm \
 
 ## Sidecars
 
-The Helm chart deploys only orb-chrysa. You deploy RustFS and Kanidm separately:
+The Helm chart deploys only orb-chrysa. You deploy RustFS and an OIDC provider separately:
 
 - **RustFS** — Run as a separate StatefulSet or use an external S3 endpoint
-- **Kanidm** — Run as a separate Deployment for OIDC authentication
+- **OIDC Provider** — Run as a separate Deployment for OIDC authentication (Kanidm recommended)
 
 See [Authentication](../authentication/kanidm.md) for Kanidm integration.
 

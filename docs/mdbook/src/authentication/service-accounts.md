@@ -1,9 +1,9 @@
 # CI / Service Accounts
 
-For CI pipelines and machine-to-machine authentication, use kanidm service accounts
-with API tokens.
+For CI pipelines and machine-to-machine authentication, use your OIDC provider's
+service accounts with API tokens. The examples below use kanidm — the recommended IdP.
 
-## Creating a Service Account
+## Creating a Service Account (kanidm)
 
 Service accounts are created in kanidm:
 
@@ -24,15 +24,15 @@ echo "<api-token>" | docker login localhost:5050 --username ci-bot --password-st
 
 ## How It Works
 
-1. CI pipeline authenticates with the kanidm API token
+1. CI pipeline authenticates with the IdP access token
 2. Orb Chrysa's `/v2/token` endpoint validates the token via the JWKS endpoint
-3. kanidm groups are mapped to OCI scopes through the config's `[[auth.permissions]]`
+3. IdP groups are mapped to OCI scopes through the config's `[[auth.permissions]]`
 4. A short-lived OCI bearer token is issued for the session
 
 ## Token Validation
 
-Kanidm API tokens are validated locally using the cached JWKS — no per-request
-call to kanidm. The JWKS is refreshed periodically (default: every 300 seconds).
+IdP access tokens are validated locally using the cached JWKS — no per-request
+call to the IdP. The JWKS is refreshed periodically (default: every 300 seconds).
 
 ## Client Credentials Grant
 
@@ -41,7 +41,7 @@ Service accounts configured as OAuth2 resource servers can also use the
 
 ```bash
 # Exchange client credentials for an access token
-curl -X POST https://kanidm:8443/oauth2/token \
+curl -X POST https://idp:8443/oauth2/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -u "ci-bot:<client-secret>" \
   -d "grant_type=client_credentials&scope=oci_push oci_pull"

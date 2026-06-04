@@ -26,6 +26,7 @@
 
 - [Authentication](authentication.md)
   - [Kanidm Setup](authentication/kanidm.md)
+  - [Bring Your Own IdP](authentication/bring-your-own-idp.md)
   - [Personal Access Tokens](authentication/pat.md)
   - [CI / Service Accounts](authentication/service-accounts.md)
   - [Dashboard OIDC](authentication/oidc.md)

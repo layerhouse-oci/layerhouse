@@ -64,17 +64,20 @@ and descriptions.
 | `client_secret` | string | — | OAuth2 client secret |
 | `token_endpoint_url` | string | — | Public `/v2/token` URL |
 | `redirect_uri` | string | — | OAuth2 callback URL |
-| `tls_insecure_skip_verify` | bool | `false` | Skip kanidm TLS verify |
+| `tls_insecure_skip_verify` | bool | `false` | Skip IdP TLS verify |
 | `jwks_refresh_seconds` | integer | 300 | JWKS refresh interval |
 | `jwks_cache_s3_key` | string | `auth/jwks/last-good.json` | S3 key for public last-good discovery/JWKS cache |
 | `jwks_max_stale_seconds` | integer | 86400 | Maximum age for cached JWKS when IdP endpoints are down |
 | `token_signing_keys` | []string | — | Base64 HMAC signing keys |
 | `session_encryption_key` | string | — | Base64 AES-256-GCM key |
+| `group_claim` | string | `"groups"` | Claim path for group extraction |
+| `login_scopes` | string | `"openid profile email groups"` | OAuth2 scopes for dashboard login |
+| `access_token_audience` | string | — | Expected `aud` claim; defaults to `client_id` |
 
 ### `[[auth.permissions]]`
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `name` | string | Rule name |
-| `groups` | []string | kanidm groups |
+| `groups` | []string | IdP groups |
 | `scopes` | []string | OCI scope patterns |

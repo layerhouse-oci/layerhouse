@@ -46,7 +46,7 @@ impl PermissionResolver {
         Self { mappings: compiled }
     }
 
-    /// Check permissions using group membership (for kanidm tokens).
+    /// Check permissions using group membership (for OIDC tokens).
     pub fn check(
         &self,
         user_groups: &[String],
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn matches_kanidm_group_spn_by_local_name() {
+    fn matches_group_spn_by_local_name() {
         let resolver = PermissionResolver::new(&[PermissionMapping {
             name: "admins".to_string(),
             groups: vec!["registry_admins".to_string()],

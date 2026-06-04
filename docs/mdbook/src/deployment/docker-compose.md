@@ -1,7 +1,7 @@
 # Docker Compose
 
-Single-node orb-chrysa with Caddy for automatic TLS and Kanidm for OIDC
-authentication.
+Single-node orb-chrysa with Caddy for automatic TLS and OIDC
+authentication (kanidm shown).
 
 ## Architecture
 
