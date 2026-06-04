@@ -5,6 +5,7 @@ import {
   deleteProxyCache,
   fetchProxyCaches,
   fetchSession,
+  redirectToSignIn,
   triggerProxyCacheWarm,
 } from "../lib/api";
 import type {
@@ -141,6 +142,10 @@ export default function ProxyCache() {
       setError(null);
       setErrorCount(0);
     } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        redirectToSignIn();
+        return;
+      }
       if (e instanceof ApiError && e.status === 403) {
         setError(t("cluster.adminRequired"));
         setErrorCount(0);

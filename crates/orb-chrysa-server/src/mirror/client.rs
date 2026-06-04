@@ -10,6 +10,30 @@ use http_body_util::{BodyExt, StreamBody};
 use tokio::sync::RwLock;
 
 use crate::error::OrbChrysaError;
+
+/// Strip credentials and path from a proxy URL for safe logging.
+fn redact_proxy_url(url: &str) -> String {
+    // Parse out scheme://host:port only, dropping userinfo, path, query, fragment.
+    if let Some(rest) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    {
+        let host_port = rest.split('/').next().unwrap_or(rest);
+        let host = host_port.split('@').next_back().unwrap_or(host_port);
+        format!(
+            "{}://{}",
+            if url.starts_with("https") {
+                "https"
+            } else {
+                "http"
+            },
+            host
+        )
+    } else {
+        // Can't parse — redact entirely to be safe.
+        "<redacted>".to_string()
+    }
+}
 use crate::store::metadata::{OutboundProxy, OutboundProxyProtocol};
 
 const MANIFEST_ACCEPT: &str = "\
@@ -276,6 +300,11 @@ impl UpstreamClient {
                 config = config.basic_auth(username, password);
             }
             builder = builder.proxy_settings(ProxySettings::all(config));
+            tracing::debug!(
+                "outbound proxy configured: protocol={:?} host={}",
+                proxy.protocol,
+                redact_proxy_url(url),
+            );
         }
 
         builder
@@ -293,6 +322,7 @@ impl UpstreamClient {
         {
             let cache = self.proxied.read().await;
             if let Some(client) = cache.get(&key) {
+                tracing::debug!("outbound proxy: cache hit");
                 return Ok(client.clone());
             }
         }

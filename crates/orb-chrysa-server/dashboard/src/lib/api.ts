@@ -35,6 +35,15 @@ export class ApiError extends Error {
   }
 }
 
+// Idempotent redirect guard — prevents polling loaders from firing
+// multiple navigations before the first one completes.
+let _redirectingToLogin = false;
+export function redirectToSignIn() {
+  if (_redirectingToLogin) return;
+  _redirectingToLogin = true;
+  window.location.href = "/oauth2/start";
+}
+
 async function readError(res: Response): Promise<ApiError> {
   const text = await res.text().catch(() => res.statusText);
   try {
@@ -92,6 +101,10 @@ async function fetchAllPages<TResponse, TItem>(
 
   while (target) {
     const res: Response = await fetch(target, { signal: AbortSignal.timeout(5000) });
+    if (res.status === 401) {
+      redirectToSignIn();
+      throw new ApiError("session expired", 401);
+    }
     if (!res.ok) throw await readError(res);
     const data: TResponse = await res.json();
     results.push(...extractItems(data));

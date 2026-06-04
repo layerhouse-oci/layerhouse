@@ -6,6 +6,7 @@ import {
   fetchMirrorRules,
   fetchSession,
   fetchSyncJobs,
+  redirectToSignIn,
   triggerMirrorRule,
 } from "../lib/api";
 import type {
@@ -127,6 +128,10 @@ export default function Mirror() {
       setError(null);
       setErrorCount(0);
     } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        redirectToSignIn();
+        return;
+      }
       if (e instanceof ApiError && e.status === 403) {
         // Non-admin user — show permission message, reset error count.
         setError(t("cluster.adminRequired"));
