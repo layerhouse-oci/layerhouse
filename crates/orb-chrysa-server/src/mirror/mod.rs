@@ -102,6 +102,7 @@ impl MirrorManager {
         rules: &'a [MirrorRule],
         repo_name: &str,
     ) -> Option<(&'a MirrorRule, String)> {
+        let mut best: Option<(&MirrorRule, String)> = None;
         for rule in rules {
             if rule.direction != MirrorDirection::Pull {
                 continue;
@@ -118,10 +119,16 @@ impl MirrorManager {
                 } else {
                     suffix.to_string()
                 };
-                return Some((rule, upstream_repo));
+                if best
+                    .as_ref()
+                    .map(|(existing, _)| rule.local_prefix.len() > existing.local_prefix.len())
+                    .unwrap_or(true)
+                {
+                    best = Some((rule, upstream_repo));
+                }
             }
         }
-        None
+        best
     }
 
     fn match_proxy_cache<'a>(
