@@ -1,7 +1,12 @@
 # Kanidm Setup
 
-Orb Chrysa uses [kanidm](https://kanidm.com) as its identity provider. Kanidm is a
-Rust-based identity management platform that provides OIDC/OAuth2 authentication.
+Kanidm is the **recommended and best-tested** identity provider for orb-chrysa.
+It's a Rust-based identity management platform — the same language and design
+philosophy as orb-chrysa — providing OIDC/OAuth2 authentication.
+
+> If you already have an existing IdP (Keycloak, Okta, Azure AD, Authentik,
+> etc.), orb-chrysa works with any standard OIDC provider. See
+> [Bring Your Own IdP](bring-your-own-idp.md) for setup instructions.
 
 ## Docker Compose Deployment
 

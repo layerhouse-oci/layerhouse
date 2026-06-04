@@ -140,8 +140,8 @@ mod tests {
             "https://localhost:8443"
         );
         assert_eq!(
-            extract_origin("https://kanidm:8443/oauth2/openid/orb-chrysa"),
-            "https://kanidm:8443"
+            extract_origin("https://idp.internal:8443/oauth2/openid/orb-chrysa"),
+            "https://idp.internal:8443"
         );
         assert_eq!(
             extract_origin("https://localhost:8443"),
@@ -155,17 +155,17 @@ mod tests {
             rewrite_base(
                 "https://localhost:8443/oauth2/token",
                 "https://localhost:8443/oauth2/openid/orb-chrysa",
-                "https://kanidm:8443/oauth2/openid/orb-chrysa"
+                "https://idp.internal:8443/oauth2/openid/orb-chrysa"
             ),
-            "https://kanidm:8443/oauth2/token"
+            "https://idp.internal:8443/oauth2/token"
         );
         assert_eq!(
             rewrite_base(
                 "https://localhost:8443/oauth2/openid/orb-chrysa/public_key.jwk",
                 "https://localhost:8443/oauth2/openid/orb-chrysa",
-                "https://kanidm:8443/oauth2/openid/orb-chrysa"
+                "https://idp.internal:8443/oauth2/openid/orb-chrysa"
             ),
-            "https://kanidm:8443/oauth2/openid/orb-chrysa/public_key.jwk"
+            "https://idp.internal:8443/oauth2/openid/orb-chrysa/public_key.jwk"
         );
     }
 
@@ -175,7 +175,7 @@ mod tests {
             rewrite_base(
                 "https://other:8443/oauth2/token",
                 "https://localhost:8443/oauth2/openid/orb-chrysa",
-                "https://kanidm:8443/oauth2/openid/orb-chrysa"
+                "https://idp.internal:8443/oauth2/openid/orb-chrysa"
             ),
             "https://other:8443/oauth2/token"
         );

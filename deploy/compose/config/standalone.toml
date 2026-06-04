@@ -1,4 +1,4 @@
-# Standalone orb-chrysa with Caddy reverse proxy (TLS) + Kanidm OIDC auth
+# Standalone orb-chrysa with Caddy reverse proxy (TLS) + OIDC auth
 # Deployed at orb-chrysa.example.com
 #
 # Caddy handles TLS termination. orb-chrysa runs plain HTTP internally.

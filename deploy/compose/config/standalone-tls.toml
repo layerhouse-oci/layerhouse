@@ -1,4 +1,4 @@
-# Standalone orb-chrysa with TLS + Kanidm OIDC auth
+# Standalone orb-chrysa with TLS + OIDC auth
 # Deployed at orb-chrysa.example.com
 
 [server]

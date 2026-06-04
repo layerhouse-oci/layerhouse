@@ -127,7 +127,7 @@ async fn logout_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
         .expect("valid clear-logout-hint header value"),
     );
     // Set a short-lived marker so the middleware knows not to auto-redirect
-    // to /oauth2/start (which would immediately re-auth via Kanidm SSO).
+    // to /oauth2/start (which would immediately re-auth via IdP SSO).
     if !had_end_session {
         response.headers_mut().append(
             header::SET_COOKIE,
@@ -150,7 +150,7 @@ fn extract_cookie_value<'a>(cookie: &'a str, name: &str) -> Option<&'a str> {
 
 fn token_type_name(token_type: TokenType) -> &'static str {
     match token_type {
-        TokenType::KanidmAccess => "kanidm_access",
+        TokenType::OidcAccess => "oidc_access",
         TokenType::PersonalAccess => "personal_access",
         TokenType::OciBearer => "oci_bearer",
         TokenType::Session => "session",
@@ -171,7 +171,7 @@ mod tests {
             email: Some("admin@orb-chrysa.local".to_string()),
             groups: vec!["registry_admins".to_string()],
             scopes: vec![],
-            token_type: Some("kanidm_access".to_string()),
+            token_type: Some("oidc_access".to_string()),
             is_admin: true,
         })
         .expect("serialize session");

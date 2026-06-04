@@ -344,8 +344,8 @@ impl AuthService {
             return Ok(identity);
         }
 
-        // 3. Try as kanidm access token (validate via JWKS)
-        self.validate_kanidm_token(token).await
+        // 3. Try as OIDC access token (validate via JWKS)
+        self.validate_oidc_token(token).await
     }
 
     async fn validate_pat<M: TokenStore>(
@@ -420,7 +420,11 @@ impl AuthService {
         })
     }
 
-    async fn verify_token_claims(&self, token: &str) -> Result<token::TokenClaims, OrbChrysaError> {
+    async fn verify_token_claims(
+        &self,
+        token: &str,
+        audience: &str,
+    ) -> Result<token::TokenClaims, OrbChrysaError> {
         let header =
             jsonwebtoken::decode_header(token).map_err(|_| OrbChrysaError::Unauthorized {
                 message: "invalid token".to_string(),
@@ -455,7 +459,7 @@ impl AuthService {
         };
 
         let mut validation = jsonwebtoken::Validation::new(header.alg);
-        validation.set_audience(&[&self.config.client_id]);
+        validation.set_audience(&[audience]);
         validation.set_issuer(&[&self.config.issuer_url]);
 
         let token_data = jsonwebtoken::decode::<token::TokenClaims>(token, dec_key, &validation)
@@ -471,34 +475,44 @@ impl AuthService {
 
     /// Validates the OIDC ID token against JWKS and returns the verified claims.
     /// The caller is responsible for checking subject consistency with the access token.
+    /// ID tokens always validate audience against client_id (OIDC spec requirement).
     pub(crate) async fn verify_id_token(
         &self,
         id_token: &str,
     ) -> Result<token::TokenClaims, OrbChrysaError> {
-        self.verify_token_claims(id_token).await
+        self.verify_token_claims(id_token, &self.config.client_id)
+            .await
     }
 
-    /// Validates the Kanidm access token via JWKS and returns the user's groups,
+    /// Validates the OIDC access token via JWKS and returns the user's groups,
     /// token subject, and expiration timestamp (Unix seconds).
-    pub(crate) async fn verify_access_token_groups(
+    pub(crate) async fn verify_access_token(
         &self,
         access_token: &str,
     ) -> Result<(Vec<String>, String, usize), OrbChrysaError> {
-        let claims = self.verify_token_claims(access_token).await?;
+        let audience = self
+            .config
+            .effective_access_token_audience()
+            .unwrap_or(&self.config.client_id);
+        let claims = self.verify_token_claims(access_token, audience).await?;
         Ok((
-            claims.groups.unwrap_or_default(),
+            claims.extract_groups(&self.config.group_claim),
             claims.subject,
             claims.exp,
         ))
     }
 
-    async fn validate_kanidm_token(&self, token: &str) -> Result<AuthIdentity, OrbChrysaError> {
-        let claims = self.verify_token_claims(token).await?;
+    async fn validate_oidc_token(&self, token: &str) -> Result<AuthIdentity, OrbChrysaError> {
+        let audience = self
+            .config
+            .effective_access_token_audience()
+            .unwrap_or(&self.config.client_id);
+        let claims = self.verify_token_claims(token, audience).await?;
 
         let display_name = claims.display_name();
         let username = claims.username();
         let email = claims.email();
-        let user_groups = claims.groups.unwrap_or_default();
+        let user_groups = claims.extract_groups(&self.config.group_claim);
 
         Ok(AuthIdentity {
             subject: claims.subject,
@@ -507,7 +521,7 @@ impl AuthService {
             email,
             groups: user_groups,
             scopes: vec![],
-            token_type: TokenType::KanidmAccess,
+            token_type: TokenType::OidcAccess,
         })
     }
 
@@ -527,7 +541,7 @@ impl AuthService {
                 .check_scopes(&identity.scopes, repository, action);
         }
 
-        // Kanidm tokens: map groups → permissions via config
+        // OIDC tokens: map groups to permissions via config
         self.permission_resolver
             .check(&identity.groups, repository, action)
     }
@@ -557,6 +571,7 @@ impl AuthService {
             token_type: Some("oci_bearer".to_string()),
             iat: Some(now.timestamp() as usize),
             iss: Some("orb-chrysa".to_string()),
+            additional_claims: serde_json::Value::Null,
         };
 
         let header = jsonwebtoken::Header::default();
@@ -684,6 +699,9 @@ mod tests {
                 scopes: vec!["repository:*:*".to_string()],
             }],
             cookie_secure_mode: super::CookieSecureMode::Auto,
+            group_claim: "groups".to_string(),
+            login_scopes: "openid profile email groups".to_string(),
+            access_token_audience: None,
         }
     }
 
@@ -699,7 +717,7 @@ mod tests {
     fn cached_doc(fetched_at_unix: u64) -> CachedJwksDocument {
         CachedJwksDocument::new(
             "https://idp.example.test/oauth2/openid/orb-chrysa".to_string(),
-            "https://kanidm.kanidm.svc.cluster.local:8443/oauth2/openid/orb-chrysa".to_string(),
+            "https://idp.internal:8443/oauth2/openid/orb-chrysa".to_string(),
             discovery_doc(),
             serde_json::json!({"keys":[]}),
             fetched_at_unix,
@@ -718,7 +736,7 @@ mod tests {
 
         assert_eq!(
             discovery.jwks_uri,
-            "https://kanidm.kanidm.svc.cluster.local:8443/oauth2/openid/orb-chrysa/public_key.jwk"
+            "https://idp.internal:8443/oauth2/openid/orb-chrysa/public_key.jwk"
         );
         let metrics = cache.read().await.metrics();
         assert!(metrics.stale_mode);

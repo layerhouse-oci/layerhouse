@@ -43,7 +43,7 @@ pub async fn auth_middleware<M: TokenStore, B: BlobStore>(
 
     // After logout without OIDC end_session, the user has a logged-out
     // marker cookie so the middleware doesn't immediately re-auth them
-    // via the still-active Kanidm SSO session.
+    // via the still-active IdP SSO session.
     if has_logged_out_marker(&req) && is_dashboard_request_path(&path) {
         return next.run(req).await;
     }

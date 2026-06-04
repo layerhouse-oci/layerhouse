@@ -56,6 +56,12 @@ pub struct AuthConfig {
     pub permissions: Vec<PermissionMapping>,
     #[serde(default = "default_cookie_secure_mode")]
     pub cookie_secure_mode: CookieSecureMode,
+    #[serde(default = "default_group_claim")]
+    pub group_claim: String,
+    #[serde(default = "default_login_scopes")]
+    pub login_scopes: String,
+    #[serde(default)]
+    pub access_token_audience: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -68,6 +74,14 @@ pub enum CookieSecureMode {
 
 fn default_cookie_secure_mode() -> CookieSecureMode {
     CookieSecureMode::Auto
+}
+
+fn default_group_claim() -> String {
+    "groups".to_string()
+}
+
+pub fn default_login_scopes() -> String {
+    "openid profile email groups".to_string()
 }
 
 impl AuthConfig {
@@ -99,6 +113,16 @@ impl AuthConfig {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .collect()
+    }
+
+    /// Returns `None` when `access_token_audience` is empty or unset,
+    /// signalling "fall back to client_id". An explicit non-empty value
+    /// is returned as `Some`.
+    pub fn effective_access_token_audience(&self) -> Option<&str> {
+        self.access_token_audience
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
     }
 }
 
@@ -507,6 +531,17 @@ fn validate_auth_config(auth: &AuthConfig) -> Result<(), ConfigError> {
         )));
     }
 
+    if auth.group_claim.trim().is_empty() {
+        return Err(ConfigError::Invalid(
+            "auth.group_claim must not be empty".to_string(),
+        ));
+    }
+    if auth.login_scopes.trim().is_empty() {
+        return Err(ConfigError::Invalid(
+            "auth.login_scopes must not be empty".to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -626,6 +661,9 @@ mod tests {
             session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
             permissions: Vec::new(),
             cookie_secure_mode: CookieSecureMode::Auto,
+            group_claim: "groups".to_string(),
+            login_scopes: "openid profile email groups".to_string(),
+            access_token_audience: None,
         });
         assert!(config.validate().is_ok());
 
@@ -648,8 +686,8 @@ mod tests {
             issuer_url: "https://idp.example.test".to_string(),
             issuer_internal_url: Some("https://legacy.internal".to_string()),
             issuer_internal_urls: vec![
-                "https://kanidm-a.internal".to_string(),
-                "https://kanidm-b.internal".to_string(),
+                "https://idp-a.internal".to_string(),
+                "https://idp-b.internal".to_string(),
             ],
             jwks_urls: vec!["https://jwks-a.internal/key.jwk".to_string()],
             client_id: "orb-chrysa".to_string(),
@@ -664,11 +702,14 @@ mod tests {
             session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
             permissions: Vec::new(),
             cookie_secure_mode: CookieSecureMode::Auto,
+            group_claim: "groups".to_string(),
+            login_scopes: "openid profile email groups".to_string(),
+            access_token_audience: None,
         };
 
         assert_eq!(
             auth.issuer_internal_urls(),
-            vec!["https://kanidm-a.internal", "https://kanidm-b.internal"]
+            vec!["https://idp-a.internal", "https://idp-b.internal"]
         );
         assert_eq!(auth.jwks_urls(), vec!["https://jwks-a.internal/key.jwk"]);
     }

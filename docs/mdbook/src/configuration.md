@@ -8,7 +8,7 @@ configuration — node identity is derived from the hostname at runtime.
 - [Server](configuration/server.md) — listen address, concurrency limits
 - [Storage](configuration/storage.md) — S3 endpoint, bucket, credentials
 - [Raft](configuration/raft.md) — consensus configuration, DNS discovery, TLS
-- [Authentication](configuration/auth.md) — kanidm connection, permissions
+- [Authentication](configuration/auth.md) — OIDC connection, permissions
 
 ## Minimal Configuration
 
