@@ -37,7 +37,7 @@ aws-credential-types = "1"
 aws-types = "1"
 clap = "4"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-aioduct = { version = "0.2.0-alpha.4", features = ["tokio", "rustls", "rustls-ring", "json"] }
+aioduct = { version = "0.2.0-alpha.7", features = ["tokio", "rustls", "rustls-ring", "json"] }
 http = "1"
 hyper = "1"
 http-body-util = "0.1"

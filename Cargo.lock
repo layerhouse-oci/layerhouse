@@ -59,9 +59,9 @@ dependencies = [
 
 [[package]]
 name = "aioduct"
-version = "0.2.0-alpha.4"
+version = "0.2.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c5dec5e9ce7909ce3abc9c1681936b8102b6ee81bda8648675aafeb07b1920a"
+checksum = "c28cafb012d740c32dcc2dbacdd98894ffa9d73711ea83c067728b18b89d5331"
 dependencies = [
  "base64 0.22.1",
  "bytes",

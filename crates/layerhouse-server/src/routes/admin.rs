@@ -82,10 +82,10 @@ fn validate_outbound_proxy(proxy: &mut OutboundProxy) -> Result<(), LayerhouseEr
         OutboundProxyProtocol::Socks5 => {
             let url = proxy.url.as_deref().ok_or_else(|| {
                 LayerhouseError::NameInvalid(
-                    "outbound_proxy.url is required for SOCKS5 proxy".to_string(),
+                    "outbound_proxy.url is required for SOCKS5h proxy".to_string(),
                 )
             })?;
-            ProxyConfig::socks5(url).map_err(|e| LayerhouseError::NameInvalid(e.to_string()))?;
+            ProxyConfig::socks5h(url).map_err(|e| LayerhouseError::NameInvalid(e.to_string()))?;
             Ok(())
         }
         OutboundProxyProtocol::Https => Err(LayerhouseError::NameInvalid(

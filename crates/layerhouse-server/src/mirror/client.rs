@@ -14,25 +14,22 @@ use crate::error::LayerhouseError;
 /// Strip credentials and path from a proxy URL for safe logging.
 fn redact_proxy_url(url: &str) -> String {
     // Parse out scheme://host:port only, dropping userinfo, path, query, fragment.
-    if let Some(rest) = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-    {
-        let host_port = rest.split('/').next().unwrap_or(rest);
-        let host = host_port.split('@').next_back().unwrap_or(host_port);
-        format!(
-            "{}://{}",
-            if url.starts_with("https") {
-                "https"
-            } else {
-                "http"
-            },
-            host
-        )
+    let (scheme, rest) = if let Some(rest) = url.strip_prefix("http://") {
+        ("http", rest)
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        ("https", rest)
+    } else if let Some(rest) = url.strip_prefix("socks5://") {
+        ("socks5", rest)
+    } else if let Some(rest) = url.strip_prefix("socks4://") {
+        ("socks4", rest)
     } else {
         // Can't parse — redact entirely to be safe.
-        "<redacted>".to_string()
-    }
+        return "<redacted>".to_string();
+    };
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    // Strip userinfo (user:pass@host → host)
+    let host = host_port.split('@').next_back().unwrap_or(host_port);
+    format!("{}://{}", scheme, host)
 }
 use crate::store::metadata::{OutboundProxy, OutboundProxyProtocol};
 
@@ -284,7 +281,7 @@ impl UpstreamClient {
                     .map_err(|e| LayerhouseError::NameInvalid(e.to_string()))?,
                 OutboundProxyProtocol::Socks4 => ProxyConfig::socks4(url)
                     .map_err(|e| LayerhouseError::NameInvalid(e.to_string()))?,
-                OutboundProxyProtocol::Socks5 => ProxyConfig::socks5(url)
+                OutboundProxyProtocol::Socks5 => ProxyConfig::socks5h(url)
                     .map_err(|e| LayerhouseError::NameInvalid(e.to_string()))?,
                 OutboundProxyProtocol::Https => {
                     return Err(LayerhouseError::Unsupported(
@@ -300,7 +297,7 @@ impl UpstreamClient {
                 config = config.basic_auth(username, password);
             }
             builder = builder.proxy_settings(ProxySettings::all(config));
-            tracing::debug!(
+            tracing::info!(
                 "outbound proxy configured: protocol={:?} host={}",
                 proxy.protocol,
                 redact_proxy_url(url),
@@ -322,7 +319,7 @@ impl UpstreamClient {
         {
             let cache = self.proxied.read().await;
             if let Some(client) = cache.get(&key) {
-                tracing::debug!("outbound proxy: cache hit");
+                tracing::info!("outbound proxy: cache hit");
                 return Ok(client.clone());
             }
         }
@@ -514,6 +511,14 @@ impl UpstreamClient {
             } else {
                 builder
             };
+
+            tracing::debug!(
+                method = %request.method,
+                url = %request.url,
+                proxy = %upstream.outbound_proxy.protocol != OutboundProxyProtocol::None,
+                attempt = attempt,
+                "upstream request",
+            );
 
             let resp = match builder.send().await {
                 Ok(r) => r,
@@ -795,6 +800,14 @@ impl UpstreamClient {
         self.ensure_auth(upstream).await?;
         let mut tags = Vec::new();
         let mut last: Option<String> = None;
+
+        let base = upstream.base_url();
+        tracing::info!(
+            "list_tags: requesting {}/v2/{}/tags/list (proxy={})",
+            base,
+            upstream.repository,
+            upstream.outbound_proxy.protocol != OutboundProxyProtocol::None,
+        );
 
         loop {
             let url = match &last {
