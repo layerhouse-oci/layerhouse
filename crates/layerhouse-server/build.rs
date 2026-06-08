@@ -4,14 +4,16 @@ fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let dashboard_dir = std::path::Path::new(&manifest_dir).join("dashboard");
     let dist_dir = dashboard_dir.join("dist");
-    let skip = std::env::var("LAYERHOUSE_SKIP_DASHBOARD").is_ok();
+    let skip = std::env::var("LAYERHOUSE_SKIP_DASHBOARD")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
 
-    println!("cargo:rerun-if-changed=dashboard/src");
-    println!("cargo:rerun-if-changed=dashboard/public");
-    println!("cargo:rerun-if-changed=dashboard/static");
-    println!("cargo:rerun-if-changed=dashboard/vite.config.ts");
-    println!("cargo:rerun-if-changed=dashboard/package.json");
-    println!("cargo:rerun-if-env-changed=LAYERHOUSE_SKIP_DASHBOARD");
+    println!("cargo::rerun-if-changed=dashboard/src");
+    println!("cargo::rerun-if-changed=dashboard/public");
+    println!("cargo::rerun-if-changed=dashboard/static");
+    println!("cargo::rerun-if-changed=dashboard/vite.config.ts");
+    println!("cargo::rerun-if-changed=dashboard/package.json");
+    println!("cargo::rerun-if-env-changed=LAYERHOUSE_SKIP_DASHBOARD");
 
     if skip {
         std::fs::create_dir_all(&dist_dir).ok();
@@ -36,7 +38,7 @@ fn main() {
             );
         } else {
             println!(
-                "cargo:warning=vp (vite-plus) not found — dashboard won't be built. \
+                "cargo::warning=vp (vite-plus) not found — dashboard won't be built. \
                  Set LAYERHOUSE_SKIP_DASHBOARD=1 to suppress this warning."
             );
             std::fs::create_dir_all(&dist_dir).ok();
