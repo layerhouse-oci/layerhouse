@@ -2,6 +2,12 @@
 
 All notable changes to Layerhouse are documented in this file.
 
+## 0.0.3 - 2026-06-09
+
+### Fixed
+
+- Fixed proxy cache and mirror admin controls being unavailable when authentication is disabled.
+
 ## 0.0.2 - 2026-06-09
 
 ### Added

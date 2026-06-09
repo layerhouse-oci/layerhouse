@@ -398,7 +398,7 @@ just release-dry-run
 
 ```bash
 export RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
-export VERSION="0.0.2"
+export VERSION="0.0.3"
 export TAG="$VERSION"
 export WORK="/tmp/orb-release-$RUN_ID"
 umask 077

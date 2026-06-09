@@ -45,7 +45,7 @@ async fn get_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
             groups: vec![],
             scopes: vec![],
             token_type: None,
-            is_admin: false,
+            is_admin: true,
         }));
     }
 
@@ -195,7 +195,7 @@ mod tests {
             groups: vec![],
             scopes: vec![],
             token_type: None,
-            is_admin: false,
+            is_admin: true,
         })
         .expect("serialize session");
 
@@ -204,6 +204,6 @@ mod tests {
         assert!(value["username"].is_null());
         assert!(value["display_name"].is_null());
         assert!(value["email"].is_null());
-        assert_eq!(value["is_admin"], false);
+        assert_eq!(value["is_admin"], true);
     }
 }

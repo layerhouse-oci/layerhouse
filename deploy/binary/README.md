@@ -17,7 +17,7 @@ OXMGR_URL=https://github.com/Vladimir-Urik/OxMgr/releases/download/v0.3.0/oxmgr-
 
 The tarball contains:
 ```
-layerhouse-0.0.2-x86_64-unknown-linux-gnu.tar.gz
+layerhouse-0.0.3-x86_64-unknown-linux-gnu.tar.gz
   bin/
     layerhouse-server     # the registry
     rustfs                # S3-compatible storage
@@ -30,7 +30,7 @@ layerhouse-0.0.2-x86_64-unknown-linux-gnu.tar.gz
 
 Extract and run:
 ```bash
-tar xzf layerhouse-0.0.2-x86_64-unknown-linux-gnu.tar.gz
+tar xzf layerhouse-0.0.3-x86_64-unknown-linux-gnu.tar.gz
 cd layerhouse-*
 
 # Option A: oxmgr (all-in-one)

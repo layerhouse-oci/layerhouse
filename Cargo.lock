@@ -2754,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "layerhouse-ctl"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "aioduct",
  "base64 0.22.1",
@@ -2773,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "layerhouse-server"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "aes-gcm",
  "aioduct",

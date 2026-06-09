@@ -38,7 +38,7 @@ helm-check:
 
 # ── Binary deployment tarball ──────────────────────────────────────────
 
-pack_version := "0.0.2"
+pack_version := "0.0.3"
 pack_target := "x86_64-unknown-linux-gnu"
 pack_out_dir := "dist"
 rustfs_version := "1.0.0-beta.6"
