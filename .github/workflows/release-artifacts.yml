@@ -60,7 +60,7 @@ jobs:
         run: |
           if command -v cargo-zigbuild >/dev/null 2>&1; then
             echo "installed=true" >> "$GITHUB_OUTPUT"
-            cargo zigbuild --version
+            cargo-zigbuild --version
           else
             echo "installed=false" >> "$GITHUB_OUTPUT"
           fi
