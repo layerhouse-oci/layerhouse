@@ -15,6 +15,9 @@ env:
   RUST_BACKTRACE: 1
   rust_min: "1.92"
   LAYERHOUSE_SKIP_DASHBOARD: 1
+  CARGO_ZIGBUILD_VERSION: "0.19.7"
+  VP_NODE_VERSION: "24.15.0"
+  ZIG_VERSION: "0.14.0"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -194,79 +197,10 @@ jobs:
           fi
       - run: cd docs/mdbook && mdbook build
 
-  docker-image-build-binaries:
-    name: Docker image / build-binaries
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [test, dockerfile-lint]
-    runs-on: ubuntu-latest
-    env:
-      LAYERHOUSE_SKIP_DASHBOARD: ""
-      REGISTRY: ghcr.io
-      IMAGE_NAME: adamcavendish/layerhouse-server
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
-
-      - name: Install zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.14.0"
-
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
-
-      - name: Install cargo-zigbuild
-        run: cargo binstall cargo-zigbuild --version 0.19.7 -y
-
-      - name: Install vp (vite-plus) and Node
-        run: |
-          export VP_HOME="$HOME/.vite-plus"
-          export VP_NODE_MANAGER=yes
-          export VP_NODE_VERSION=24.15.0
-          mkdir -p "$VP_HOME"
-          curl -fsSL https://viteplus.dev/install.sh | bash
-          echo "$VP_HOME/bin" >> "$GITHUB_PATH"
-          echo "VP_HOME=$VP_HOME" >> "$GITHUB_ENV"
-
-      - name: Install dashboard dependencies
-        run: vp install
-        working-directory: crates/layerhouse-server/dashboard
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-          cache-targets: true
-
-      - name: Build all targets
-        run: |
-          # The server build script writes dashboard/dist for rust-embed.
-          # Build targets one at a time so concurrent build scripts do not race
-          # while Vite clears and rewrites that shared directory.
-          for target in \
-            x86_64-unknown-linux-gnu \
-            aarch64-unknown-linux-gnu
-          do
-            cargo zigbuild --release -p layerhouse-server --target "$target"
-          done
-
-      - name: Upload binaries
-        uses: actions/upload-artifact@v7
-        with:
-          name: docker-image-binaries
-          path: |
-            target/x86_64-unknown-linux-gnu/release/layerhouse-server
-            target/aarch64-unknown-linux-gnu/release/layerhouse-server
-          retention-days: 1
-
   docker-image:
     name: Docker image (${{ matrix.platform.slug }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [docker-image-build-binaries]
+    needs: [test, dockerfile-lint]
     strategy:
       fail-fast: false
       matrix:
@@ -279,16 +213,67 @@ jobs:
             slug: linux-arm64
     runs-on: ubuntu-latest
     env:
+      LAYERHOUSE_SKIP_DASHBOARD: ""
       REGISTRY: ghcr.io
       IMAGE_NAME: adamcavendish/layerhouse-server
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download binaries
-        uses: actions/download-artifact@v8
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          name: docker-image-binaries
-          path: target
+          targets: ${{ matrix.platform.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          cache-targets: true
+          prefix-key: v0-rust-zigbuild-${{ env.CARGO_ZIGBUILD_VERSION }}-zig-${{ env.ZIG_VERSION }}-${{ matrix.platform.slug }}
+
+      - name: Check cargo-zigbuild
+        id: cargo-zigbuild
+        run: |
+          if command -v cargo-zigbuild >/dev/null 2>&1; then
+            echo "installed=true" >> "$GITHUB_OUTPUT"
+            cargo zigbuild --version
+          else
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install cargo-binstall
+        if: steps.cargo-zigbuild.outputs.installed != 'true'
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-zigbuild
+        if: steps.cargo-zigbuild.outputs.installed != 'true'
+        run: cargo binstall cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" -y
+
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install vp (vite-plus) and Node
+        run: |
+          export VP_HOME="$HOME/.vite-plus"
+          export VP_NODE_MANAGER=yes
+          mkdir -p "$VP_HOME"
+          curl -fsSL https://viteplus.dev/install.sh | bash
+          echo "$VP_HOME/bin" >> "$GITHUB_PATH"
+          echo "VP_HOME=$VP_HOME" >> "$GITHUB_ENV"
+
+      - name: Install dashboard dependencies
+        run: vp install
+        working-directory: crates/layerhouse-server/dashboard
+
+      - name: Build ${{ matrix.platform.target }} binary
+        run: cargo zigbuild --release -p layerhouse-server --target "${{ matrix.platform.target }}"
+
+      - name: Copy ${{ matrix.platform.target }} binary
+        run: |
+          cp "target/${{ matrix.platform.target }}/release/layerhouse-server" ./layerhouse-server
+          chmod +x ./layerhouse-server
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -299,11 +284,6 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Copy ${{ matrix.platform.target }} binary
-        run: |
-          cp "target/${{ matrix.platform.target }}/release/layerhouse-server" ./layerhouse-server
-          chmod +x ./layerhouse-server
 
       - name: Build and push by digest
         id: build
