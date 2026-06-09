@@ -49,7 +49,7 @@ Response:
   "voters": [
     {
       "node_id": 1,
-      "address": "layerhouse-0.layerhouse-headless.layerhouse.svc.cluster.local:5051",
+      "address": "layerhouse-0.layerhouse-headless.layerhouse.svc:5051",
       "role": "leader",
       "status": "healthy",
       "commit_index": 42,
@@ -57,7 +57,7 @@ Response:
     },
     {
       "node_id": 2,
-      "address": "layerhouse-1.layerhouse-headless.layerhouse.svc.cluster.local:5051",
+      "address": "layerhouse-1.layerhouse-headless.layerhouse.svc:5051",
       "role": "voter",
       "status": "healthy",
       "commit_index": 42,
@@ -65,7 +65,7 @@ Response:
     },
     {
       "node_id": 3,
-      "address": "layerhouse-2.layerhouse-headless.layerhouse.svc.cluster.local:5051",
+      "address": "layerhouse-2.layerhouse-headless.layerhouse.svc:5051",
       "role": "voter",
       "status": "healthy",
       "commit_index": 42,
