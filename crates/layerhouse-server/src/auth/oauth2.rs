@@ -14,6 +14,8 @@ use super::session::DashboardSession;
 const OAUTH2_COOKIE: &str = "layerhouse_oauth2";
 const OAUTH2_COOKIE_MAX_AGE_SECS: u64 = 600;
 const OAUTH2_STATE_ERROR_LOCATION: &str = "/?oauth_error=state#/oauth2/error";
+const OAUTH2_SESSION_ERROR_LOCATION: &str = "/?oauth_error=session#/oauth2/error";
+const MAX_SET_COOKIE_HEADER_LEN: usize = 4096;
 
 fn oauth2_cookie_clear_str(flags: &super::CookieFlags) -> String {
     format!(
@@ -218,6 +220,18 @@ pub async fn oauth2_callback<M, B>(
         .min(now + 3600)
         .saturating_sub(now);
 
+    let id_token_ttl_secs = id_expires_at.saturating_sub(now);
+    let access_token_ttl_secs = access_expires_at.saturating_sub(now);
+    if session_max_age == 0 {
+        tracing::warn!(
+            expires_in,
+            id_token_ttl_secs,
+            access_token_ttl_secs,
+            "oauth2 callback produced zero-length dashboard session"
+        );
+        return Ok(oauth2_session_error_response(&flags));
+    }
+
     let id_username = id_claims.username();
     let id_display_name = id_claims.display_name();
     let id_email = id_claims.email();
@@ -233,30 +247,63 @@ pub async fn oauth2_callback<M, B>(
     };
 
     let cookie_value = session.encrypt(auth.session_key())?;
+    let session_group_count = session.groups.len();
+    let session_cookie = format!(
+        "layerhouse_session={}; {}; Path=/; Max-Age={}",
+        cookie_value,
+        flags.attributes(),
+        session_max_age
+    );
+    let logout_hint_cookie = format!(
+        "layerhouse_logout_hint={}; {}; Path=/api/v1/session/logout; Max-Age={}",
+        id_token_str,
+        flags.attributes(),
+        session_max_age
+    );
+
+    tracing::info!(
+        session_max_age,
+        expires_in,
+        id_token_ttl_secs,
+        access_token_ttl_secs,
+        session_cookie_len = session_cookie.len(),
+        logout_hint_cookie_len = logout_hint_cookie.len(),
+        session_group_count,
+        secure_cookie = flags.secure,
+        "oauth2 callback session cookies prepared"
+    );
+
+    if session_cookie.len() > MAX_SET_COOKIE_HEADER_LEN {
+        tracing::warn!(
+            session_cookie_len = session_cookie.len(),
+            max_cookie_len = MAX_SET_COOKIE_HEADER_LEN,
+            "oauth2 dashboard session cookie exceeds browser cookie limit"
+        );
+        return Ok(oauth2_session_error_response(&flags));
+    }
 
     let mut response = Redirect::temporary("/").into_response();
     response.headers_mut().append(
         axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&format!(
-            "layerhouse_session={}; {}; Path=/; Max-Age={}",
-            cookie_value,
-            flags.attributes(),
-            session_max_age
-        ))
-        .expect("valid cookie header value"),
+        axum::http::HeaderValue::from_str(&session_cookie)
+            .map_err(|e| LayerhouseError::Internal(format!("session cookie failed: {}", e)))?,
     );
-    // Store the raw id_token in a path-scoped cookie so it is only sent
-    // to the logout endpoint (stays under the 4096-byte per-cookie limit).
-    response.headers_mut().append(
-        axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&format!(
-            "layerhouse_logout_hint={}; {}; Path=/api/v1/session/logout; Max-Age={}",
-            id_token_str,
-            flags.attributes(),
-            session_max_age
-        ))
-        .expect("valid cookie header value"),
-    );
+    if logout_hint_cookie.len() <= MAX_SET_COOKIE_HEADER_LEN {
+        // Store the raw id_token in a path-scoped cookie so it is only sent
+        // to the logout endpoint.
+        response.headers_mut().append(
+            axum::http::header::SET_COOKIE,
+            axum::http::HeaderValue::from_str(&logout_hint_cookie).map_err(|e| {
+                LayerhouseError::Internal(format!("logout hint cookie failed: {}", e))
+            })?,
+        );
+    } else {
+        tracing::warn!(
+            logout_hint_cookie_len = logout_hint_cookie.len(),
+            max_cookie_len = MAX_SET_COOKIE_HEADER_LEN,
+            "skipping oversized oauth2 logout hint cookie"
+        );
+    }
     append_clear_oauth2_cookie(&mut response, &flags);
     Ok(response)
 }
@@ -284,7 +331,15 @@ fn oauth2_code_verifier(
 }
 
 fn oauth2_state_error_response(flags: &super::CookieFlags) -> Response {
-    let mut response = Redirect::temporary(OAUTH2_STATE_ERROR_LOCATION).into_response();
+    oauth2_error_response(OAUTH2_STATE_ERROR_LOCATION, flags)
+}
+
+fn oauth2_session_error_response(flags: &super::CookieFlags) -> Response {
+    oauth2_error_response(OAUTH2_SESSION_ERROR_LOCATION, flags)
+}
+
+fn oauth2_error_response(location: &str, flags: &super::CookieFlags) -> Response {
+    let mut response = Redirect::temporary(location).into_response();
     append_clear_oauth2_cookie(&mut response, flags);
     response
 }

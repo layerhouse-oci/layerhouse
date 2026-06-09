@@ -59,7 +59,7 @@ pub async fn auth_middleware<M: TokenStore, B: BlobStore>(
     );
 
     let credential = extract_credential(&req);
-    let uses_session_cookie = matches!(credential, Some(RequestCredential::SessionCookie(_)));
+    let uses_session_cookie = matches!(credential, Some(RequestCredential::SessionCookies(_)));
     let identity = match authenticate_request(auth_service, &state.core.metadata, credential).await
     {
         Ok(Some(identity)) => identity,
@@ -114,16 +114,18 @@ fn extract_bearer_token(req: &Request<Body>) -> Option<&str> {
 
 enum RequestCredential {
     Bearer(String),
-    SessionCookie(String),
+    SessionCookies(Vec<String>),
 }
 
 fn extract_credential(req: &Request<Body>) -> Option<RequestCredential> {
     if let Some(token) = extract_bearer_token(req) {
         return Some(RequestCredential::Bearer(token.to_string()));
     }
-    extract_cookie(req, "layerhouse_session")
-        .map(str::to_string)
-        .map(RequestCredential::SessionCookie)
+    let session_cookies: Vec<String> = extract_cookies(req, "layerhouse_session")
+        .into_iter()
+        .map(ToString::to_string)
+        .collect();
+    (!session_cookies.is_empty()).then_some(RequestCredential::SessionCookies(session_cookies))
 }
 
 async fn authenticate_request<M: TokenStore>(
@@ -139,53 +141,81 @@ async fn authenticate_request<M: TokenStore>(
         RequestCredential::Bearer(token) => {
             auth.validate_token::<M>(&token, metadata).await.map(Some)
         }
-        RequestCredential::SessionCookie(cookie_value) => {
-            let session =
-                DashboardSession::decrypt(&cookie_value, auth.session_key()).map_err(|_| {
-                    LayerhouseError::Unauthorized {
-                        message: "invalid session".to_string(),
-                        realm: None,
-                        service: None,
-                        scope: None,
-                    }
-                })?;
-            let now = chrono::Utc::now().timestamp() as u64;
-            if now >= session.expires_at {
-                return Err(LayerhouseError::Unauthorized {
-                    message: "session expired".to_string(),
-                    realm: None,
-                    service: None,
-                    scope: None,
-                });
-            }
-
-            // Build identity directly from the encrypted session — no per-request
-            // JWKS validation. The tokens were verified once at login and the
-            // encrypted cookie is trusted for the session lifetime (max 1 hour).
-            Ok(Some(super::token::AuthIdentity {
-                subject: session.subject,
-                username: session.username,
-                display_name: session.display_name,
-                email: session.email,
-                groups: session.groups,
-                scopes: vec![],
-                token_type: super::token::TokenType::Session,
-            }))
+        RequestCredential::SessionCookies(cookie_values) => {
+            authenticate_session_cookies(&cookie_values, auth.session_key()).map(Some)
         }
     }
 }
 
-fn extract_cookie<'a>(req: &'a Request<Body>, name: &str) -> Option<&'a str> {
-    let cookie = req.headers().get(header::COOKIE)?.to_str().ok()?;
-    cookie.split(';').find_map(|part| {
-        let (key, value) = part.trim().split_once('=')?;
-        (key == name).then_some(value)
+fn authenticate_session_cookies(
+    cookie_values: &[String],
+    key: &[u8; 32],
+) -> Result<super::token::AuthIdentity, LayerhouseError> {
+    let now = chrono::Utc::now().timestamp() as u64;
+    let mut last_error_message = "invalid session";
+
+    for cookie_value in cookie_values {
+        let Ok(session) = DashboardSession::decrypt(cookie_value, key) else {
+            last_error_message = "invalid session";
+            continue;
+        };
+
+        if now >= session.expires_at {
+            last_error_message = "session expired";
+            continue;
+        }
+
+        // Build identity directly from the encrypted session — no per-request
+        // JWKS validation. The tokens were verified once at login and the
+        // encrypted cookie is trusted for the session lifetime (max 1 hour).
+        return Ok(super::token::AuthIdentity {
+            subject: session.subject,
+            username: session.username,
+            display_name: session.display_name,
+            email: session.email,
+            groups: session.groups,
+            scopes: vec![],
+            token_type: super::token::TokenType::Session,
+        });
+    }
+
+    Err(LayerhouseError::Unauthorized {
+        message: last_error_message.to_string(),
+        realm: None,
+        service: None,
+        scope: None,
     })
+}
+
+fn extract_cookies<'a>(req: &'a Request<Body>, name: &str) -> Vec<&'a str> {
+    let mut values = Vec::new();
+    for cookie in req
+        .headers()
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+    {
+        for part in cookie.split(';') {
+            let Some((key, value)) = part.trim().split_once('=') else {
+                continue;
+            };
+            if key == name {
+                values.push(value);
+            }
+        }
+    }
+    values
 }
 
 fn auth_required_response(auth: &super::AuthService, req: &Request<Body>) -> Response {
     let path = req.uri().path();
     if is_dashboard_request_path(path) {
+        let cookie_header_count = req.headers().get_all(header::COOKIE).iter().count();
+        tracing::info!(
+            path = %path,
+            cookie_header_count,
+            "dashboard request missing auth credential; redirecting to oauth2 start"
+        );
         return Redirect::temporary("/oauth2/start").into_response();
     }
 
@@ -240,6 +270,24 @@ fn session_cookie_auth_error_response(
     error: LayerhouseError,
     flags: &super::CookieFlags,
 ) -> Response {
+    let path = req.uri().path();
+    let session_cookie_count = extract_cookies(req, "layerhouse_session").len();
+    if is_dashboard_request_path(path) {
+        tracing::warn!(
+            path = %path,
+            session_cookie_count,
+            error = %error,
+            "dashboard session cookie rejected; redirecting to oauth2 start"
+        );
+    } else {
+        tracing::warn!(
+            path = %path,
+            session_cookie_count,
+            error = %error,
+            "session cookie rejected"
+        );
+    }
+
     let mut response = if is_dashboard_request_path(req.uri().path()) {
         Redirect::temporary("/oauth2/start").into_response()
     } else {
@@ -308,10 +356,13 @@ fn scope_action_for_method(method: &http::Method) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
+        RequestCredential, authenticate_session_cookies, extract_cookies, extract_credential,
         extract_repository_from_path, is_public_path, scope_action_for_method,
         session_cookie_auth_error_response,
     };
     use crate::auth::CookieFlags;
+    use crate::auth::session::DashboardSession;
+    use crate::auth::token::TokenType;
     use crate::error::LayerhouseError;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
@@ -323,6 +374,69 @@ mod tests {
             service: None,
             scope: None,
         }
+    }
+
+    fn encrypted_session(expires_at: u64) -> String {
+        DashboardSession {
+            subject: "user-1".to_string(),
+            username: Some("user".to_string()),
+            display_name: None,
+            email: None,
+            groups: vec!["layerhouse_admins@example.com".to_string()],
+            expires_at,
+        }
+        .encrypt(&[42u8; 32])
+        .expect("session encrypts")
+    }
+
+    #[test]
+    fn extracts_duplicate_session_cookies_in_order() {
+        let req = Request::builder()
+            .uri("/")
+            .header(
+                header::COOKIE,
+                "layerhouse_session=stale; other=1; layerhouse_session=fresh",
+            )
+            .body(Body::empty())
+            .expect("request");
+
+        assert_eq!(
+            extract_cookies(&req, "layerhouse_session"),
+            vec!["stale", "fresh"]
+        );
+
+        match extract_credential(&req) {
+            Some(RequestCredential::SessionCookies(values)) => {
+                assert_eq!(values, vec!["stale".to_string(), "fresh".to_string()]);
+            }
+            _ => panic!("expected session cookies credential"),
+        }
+    }
+
+    #[test]
+    fn authenticates_later_valid_session_cookie_when_stale_cookie_comes_first() {
+        let valid = encrypted_session(chrono::Utc::now().timestamp() as u64 + 60);
+        let identity = authenticate_session_cookies(&["stale".to_string(), valid], &[42u8; 32])
+            .expect("later valid cookie should authenticate");
+
+        assert_eq!(identity.subject, "user-1");
+        assert_eq!(identity.token_type, TokenType::Session);
+        assert_eq!(
+            identity.groups,
+            vec!["layerhouse_admins@example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn rejects_session_cookies_when_none_are_valid() {
+        let expired = encrypted_session(1);
+        let err = authenticate_session_cookies(&["stale".to_string(), expired], &[42u8; 32])
+            .expect_err("all invalid or expired cookies should fail");
+
+        assert!(matches!(
+            err,
+            LayerhouseError::Unauthorized { message, .. } if message == "session expired"
+        ));
     }
 
     #[test]
