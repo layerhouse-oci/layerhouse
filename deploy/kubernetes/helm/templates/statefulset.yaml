@@ -73,7 +73,7 @@ spec:
             - name: HOSTNAME
               value: "$(POD_NAME)"
             - name: LAYERHOUSE_RAFT_ADVERTISE_HOST
-              value: "$(POD_NAME).{{ include "layerhouse.fullname" . }}-headless.{{ include "layerhouse.namespace" . }}.svc.cluster.local"
+              value: "$(POD_NAME).{{ include "layerhouse.fullname" . }}-headless.{{ include "layerhouse.namespace" . }}.svc"
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

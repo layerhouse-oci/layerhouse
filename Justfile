@@ -35,6 +35,7 @@ helm-check:
     bash -euo pipefail -c 'out="$(mktemp)"; helm template layerhouse deploy/kubernetes/helm --namespace layerhouse -f deploy/kubernetes/helm/test-values/minimal.yaml --set replicaCount=3 > "$out"; grep -q "minAvailable: 2" "$out"; rm -f "$out"'
     bash -euo pipefail -c 'if helm template layerhouse deploy/kubernetes/helm --namespace layerhouse -f deploy/kubernetes/helm/test-values/minimal.yaml --set replicaCount=0 >/tmp/layerhouse-replica-zero.out 2>&1; then cat /tmp/layerhouse-replica-zero.out; exit 1; fi; grep -q "replicaCount must be at least 1" /tmp/layerhouse-replica-zero.out; rm -f /tmp/layerhouse-replica-zero.out'
     bash -euo pipefail -c 'out="$(mktemp)"; helm template layerhouse deploy/kubernetes/helm --namespace layerhouse -f deploy/kubernetes/helm/test-values/minimal.yaml > "$out"; grep -q "\\[raft.kubernetes\\]" "$out"; grep -q "statefulset_name = \"layerhouse\"" "$out"; grep -q "kind: Role" "$out"; grep -q "statefulsets" "$out"; grep -q "preStop:" "$out"; rm -f "$out"'
+    bash -euo pipefail -c 'out="$(mktemp)"; helm template layerhouse deploy/kubernetes/helm --namespace layerhouse -f deploy/kubernetes/helm/test-values/minimal.yaml > "$out"; pattern='\''value: "$(POD_NAME).layerhouse-headless.layerhouse.svc"'\''; grep -F -q "$pattern" "$out"; rm -f "$out"'
 
 # ── Binary deployment tarball ──────────────────────────────────────────
 

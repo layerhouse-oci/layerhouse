@@ -647,9 +647,8 @@ async fn join_cluster_with_seed_peers(
                 continue;
             }
 
-            let target = match status.leader_addr {
-                Some(ref addr) => addr.as_str(),
-                None => continue,
+            let Some(target) = join_target_for_status(peer, &status) else {
+                continue;
             };
 
             match request_join(target, tls.as_deref(), &req).await {
@@ -731,6 +730,14 @@ fn merge_seed_and_discovered_peers(
         .chain(discovered_peers)
         .filter(|peer| seen.insert(peer.clone()))
         .collect()
+}
+
+fn join_target_for_status<'a>(peer: &'a str, status: &'a ClusterStatus) -> Option<&'a str> {
+    if status.state == NodeState::Leader {
+        Some(peer)
+    } else {
+        status.leader_addr.as_deref()
+    }
 }
 
 fn ordinal_zero_peer_target(advertise_addr: &str) -> Option<String> {
@@ -1005,6 +1012,52 @@ mod tests {
                 "layerhouse-1.layerhouse-headless.ns.svc.cluster.local:5051".to_string(),
                 "layerhouse-headless:5051".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn join_target_uses_reachable_peer_when_peer_is_leader() {
+        let status = ClusterStatus {
+            node_id: 1,
+            state: NodeState::Leader,
+            leader_id: Some(1),
+            leader_addr: Some("layerhouse-0.layerhouse-headless.ns.svc.cluster.local:5051".into()),
+            voters: Vec::new(),
+            learners: Vec::new(),
+            term: 1,
+            last_log_index: Some(1),
+            last_applied_log: Some(1),
+            last_membership_log_id: Some(1),
+            millis_since_quorum_ack: None,
+            replication: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            join_target_for_status("layerhouse-0.layerhouse-headless.ns.svc:5051", &status),
+            Some("layerhouse-0.layerhouse-headless.ns.svc:5051")
+        );
+    }
+
+    #[test]
+    fn join_target_follows_advertised_leader_when_peer_is_follower() {
+        let status = ClusterStatus {
+            node_id: 2,
+            state: NodeState::Follower,
+            leader_id: Some(1),
+            leader_addr: Some("layerhouse-0.layerhouse-headless.ns.svc:5051".into()),
+            voters: Vec::new(),
+            learners: Vec::new(),
+            term: 1,
+            last_log_index: Some(1),
+            last_applied_log: Some(1),
+            last_membership_log_id: Some(1),
+            millis_since_quorum_ack: None,
+            replication: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            join_target_for_status("layerhouse-1.layerhouse-headless.ns.svc:5051", &status),
+            Some("layerhouse-0.layerhouse-headless.ns.svc:5051")
         );
     }
 
