@@ -239,6 +239,12 @@ impl From<&OutboundProxy> for OutboundProxyPublic {
 pub struct PersonalAccessToken {
     pub id: String,
     pub subject: String,
+    /// Human-readable username snapshotted from the creating identity. Frozen
+    /// at creation because PATs outlive the OIDC session that minted them;
+    /// used to grant the personal namespace (`users/<username>/*`) on the PAT
+    /// auth path. Optional for forward-compat with pre-field token rows.
+    #[serde(default)]
+    pub username: Option<String>,
     pub name: String,
     pub token_hash: String,
     pub token_prefix: String,
@@ -248,6 +254,73 @@ pub struct PersonalAccessToken {
     pub last_used_at: Option<u64>,
     #[serde(default)]
     pub expires_at: Option<u64>,
+}
+
+/// Visibility of a repository. Controls whether anonymous clients may pull.
+/// `Private` (the default) requires authentication for every operation;
+/// `PublicPull` additionally allows unauthenticated `GET`/`HEAD` of manifests
+/// and blobs (write operations still require auth). The public-pull middleware
+/// short-circuit that honors this is a follow-on (see TODOS.md); Phase 1 only
+/// carries the label so the schema is stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    #[default]
+    Private,
+    PublicPull,
+}
+
+/// A first-class repository object ("shadow repository"). Unlike a manifest
+/// map keyed by pushed content, a `Repository` can exist before any blob is
+/// pushed, carrying human metadata (description, owner) and a visibility label.
+/// Phase 1 defines the shape and persists an empty collection; the creation
+/// flow (`POST /api/v1/repositories`) and listing integration land in Phase 2.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Repository {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Subject of the identity that owns this repository, if any.
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub visibility: Visibility,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+/// Where a permission rule came from. `Config` rules are loaded from
+/// `[[auth.permissions]]` at startup and are read-only at runtime; `Raft`
+/// rules are created through the dashboard and persisted via consensus, so
+/// they are editable. OIDC-sourced bindings (Phase 3) are also read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleSource {
+    #[default]
+    Config,
+    Raft,
+    Oidc,
+}
+
+/// A path-based permission grant binding groups to an action on a repository
+/// path pattern. First-class so admins can edit Raft-sourced rules through the
+/// dashboard. Phase 1 defines the shape and persists an empty collection; the
+/// editing flow and enforcement-from-Raft land in Phase 3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionRule {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// Scope strings (`repository:<pattern>:<action>`), same vocabulary as
+    /// `[[auth.permissions]]` config and PAT scopes.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub source: RuleSource,
+    #[serde(default)]
+    pub created_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

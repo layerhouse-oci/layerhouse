@@ -31,7 +31,7 @@ use crate::routes::{AppState, RegistryCore, build_router};
 use crate::store::s3::S3BlobStore;
 use crate::store::upload::UploadTracker;
 
-const SNAPSHOT_FORMAT_VERSION: u32 = 4;
+const SNAPSHOT_FORMAT_VERSION: u32 = 5;
 const SNAPSHOT_HEADER_LEN: usize = 4;
 
 #[derive(Debug, Error)]
@@ -387,7 +387,10 @@ fn deserialize_snapshot(bytes: &[u8]) -> Result<StateMachineData, AppError> {
     let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let payload = &bytes[SNAPSHOT_HEADER_LEN..];
     match version {
-        2 | SNAPSHOT_FORMAT_VERSION => {
+        // v2 and v4 are accepted for forward-compat: the v5 collections
+        // (`repositories`, `permission_rules`) default to empty via
+        // `#[serde(default)]`, so older S3 snapshots load cleanly.
+        2 | 4 | SNAPSHOT_FORMAT_VERSION => {
             let mut data: StateMachineData = serde_json::from_slice(payload)?;
             data.normalize_restored_metadata();
             Ok(data)
@@ -727,5 +730,19 @@ mod tests {
             ),
             1
         );
+    }
+
+    #[test]
+    fn snapshot_restores_v4_with_empty_v5_collections() {
+        // A v4 S3 snapshot predates `repositories`/`permission_rules`. It must
+        // still load, with those collections defaulting to empty.
+        let payload = serde_json::json!({ "manifests": {}, "tags": {} });
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&serde_json::to_vec(&payload).unwrap());
+
+        let data = deserialize_snapshot(&bytes).expect("v4 snapshot restores");
+        assert!(data.repositories.is_empty());
+        assert!(data.permission_rules.is_empty());
     }
 }

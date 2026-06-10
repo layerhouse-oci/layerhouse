@@ -43,4 +43,4 @@ scopes = ["repository:*:*"]
 [[auth.permissions]]
 name = "developer-access"
 groups = ["registry_developers"]
-scopes = ["repository:dev/*:push", "repository:dev/*:pull"]
+scopes = ["repository:dev/*:pull,create,update", "repository:dev/*:pull"]

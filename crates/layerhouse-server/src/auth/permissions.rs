@@ -1,19 +1,44 @@
 use crate::config::PermissionMapping;
 use crate::error::LayerhouseError;
 
+/// Action ladder for repository access. Higher tiers imply all lower ones:
+/// `Pull < Create < Update < Delete`. `Create` is "add a manifest/tag that
+/// does not yet exist"; `Update` additionally allows overwriting an existing
+/// tag. This is the single source of truth for the action model — verb
+/// derivation, scope-string tokens, and the implication ladder all live here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OciAction {
     Pull,
-    Push,
+    Create,
+    Update,
     Delete,
 }
 
 impl OciAction {
+    /// Base action implied by the HTTP method alone. Writes default to
+    /// `Create`; the manifest-PUT overwrite case is upgraded to `Update` by
+    /// the middleware after a manifest-existence lookup (it is not derivable
+    /// from the method).
     pub fn from_method(method: &http::Method) -> Self {
         match *method {
             http::Method::GET | http::Method::HEAD => OciAction::Pull,
             http::Method::DELETE => OciAction::Delete,
-            _ => OciAction::Push,
+            _ => OciAction::Create,
+        }
+    }
+
+    /// Wire scope-string token for this action (`repository:<name>:<token>`).
+    /// Used both to emit `WWW-Authenticate` challenge scopes and to label
+    /// minted OCI bearer tokens. Spec-compliant clients echo the challenged
+    /// scope back to `/v2/token`, so the token must name the exact action the
+    /// request needs (e.g. a brand-new tag is challenged `create`, not
+    /// `update`, so a create-only grant is sufficient).
+    pub fn scope_token(self) -> &'static str {
+        match self {
+            OciAction::Pull => "pull",
+            OciAction::Create => "create",
+            OciAction::Update => "update",
+            OciAction::Delete => "delete",
         }
     }
 }
@@ -110,20 +135,34 @@ pub(crate) fn parse_scope(scope: &str) -> Option<(String, OciAction)> {
     }
     let repo = parts[1..parts.len() - 1].join(":");
     let action_str = parts.last()?;
-    let actions: Vec<&str> = action_str.split(',').collect();
-    let action = if actions
-        .iter()
-        .any(|action| *action == "*" || *action == "delete")
-    {
-        OciAction::Delete
-    } else if actions.contains(&"push") {
-        OciAction::Push
-    } else if actions.contains(&"pull") {
-        OciAction::Pull
-    } else {
-        return None;
-    };
+    let action = action_str
+        .split(',')
+        .filter_map(parse_action_token)
+        .max_by_key(|action| action_rank(*action))?;
     Some((repo, action))
+}
+
+/// Map a single scope-string token to its action. `*` is an alias for the
+/// top of the ladder (`Delete`). Unknown tokens (including the legacy `push`,
+/// which is intentionally not parsed) yield `None`.
+fn parse_action_token(token: &str) -> Option<OciAction> {
+    match token.trim() {
+        "*" | "delete" => Some(OciAction::Delete),
+        "update" => Some(OciAction::Update),
+        "create" => Some(OciAction::Create),
+        "pull" => Some(OciAction::Pull),
+        _ => None,
+    }
+}
+
+/// Ladder position: higher rank implies all lower actions.
+fn action_rank(action: OciAction) -> u8 {
+    match action {
+        OciAction::Pull => 0,
+        OciAction::Create => 1,
+        OciAction::Update => 2,
+        OciAction::Delete => 3,
+    }
 }
 
 fn match_repository(pattern: &str, repo: &str) -> bool {
@@ -136,14 +175,22 @@ fn match_repository(pattern: &str, repo: &str) -> bool {
     pattern == repo
 }
 
+/// A grant for `allowed` covers a request for `requested` when it sits at or
+/// above the requested tier: `Delete ⊇ Update ⊇ Create ⊇ Pull`.
 fn action_matches(allowed: OciAction, requested: OciAction) -> bool {
-    match (allowed, requested) {
-        (OciAction::Delete, _) => true, // * or delete covers everything
-        (OciAction::Push, OciAction::Push) => true,
-        (OciAction::Push, OciAction::Pull) => true, // push implies pull
-        (OciAction::Pull, OciAction::Pull) => true,
-        _ => false,
-    }
+    action_rank(allowed) >= action_rank(requested)
+}
+
+/// Personal-namespace auto-grant: every authenticated user has full access
+/// (any action) to repositories under `users/<their-username>/`. Returns true
+/// when `username` is present and `repository` falls in that namespace. The
+/// action is irrelevant — the personal namespace grants the whole ladder.
+pub fn in_personal_namespace(username: Option<&str>, repository: &str) -> bool {
+    let Some(username) = username.filter(|u| !u.is_empty()) else {
+        return false;
+    };
+    let prefix = format!("users/{}/", username);
+    repository.starts_with(&prefix)
 }
 
 #[cfg(test)]
@@ -159,10 +206,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_scope_push_pull() {
+    fn parse_scope_create() {
         assert_eq!(
-            parse_scope("repository:foo:pull,push"),
-            Some(("foo".to_string(), OciAction::Push))
+            parse_scope("repository:foo:pull,create"),
+            Some(("foo".to_string(), OciAction::Create))
+        );
+    }
+
+    #[test]
+    fn parse_scope_keeps_highest_action() {
+        // Comma-separated tokens resolve to the highest tier present.
+        assert_eq!(
+            parse_scope("repository:foo:pull,create,update"),
+            Some(("foo".to_string(), OciAction::Update))
         );
     }
 
@@ -172,6 +228,50 @@ mod tests {
             parse_scope("repository:foo:*"),
             Some(("foo".to_string(), OciAction::Delete))
         );
+    }
+
+    #[test]
+    fn parse_scope_rejects_legacy_push() {
+        // `push` is no longer a recognized token; a lone `push` yields nothing.
+        assert_eq!(parse_scope("repository:foo:push"), None);
+        // Mixed with a known token, only the known token survives.
+        assert_eq!(
+            parse_scope("repository:foo:pull,push"),
+            Some(("foo".to_string(), OciAction::Pull))
+        );
+    }
+
+    #[test]
+    fn action_ladder_implications() {
+        use OciAction::*;
+        // Delete covers everything.
+        for requested in [Pull, Create, Update, Delete] {
+            assert!(action_matches(Delete, requested));
+        }
+        // Update covers all but Delete.
+        assert!(action_matches(Update, Pull));
+        assert!(action_matches(Update, Create));
+        assert!(action_matches(Update, Update));
+        assert!(!action_matches(Update, Delete));
+        // Create covers Pull and Create only.
+        assert!(action_matches(Create, Pull));
+        assert!(action_matches(Create, Create));
+        assert!(!action_matches(Create, Update));
+        assert!(!action_matches(Create, Delete));
+        // Pull covers only Pull.
+        assert!(action_matches(Pull, Pull));
+        assert!(!action_matches(Pull, Create));
+        assert!(!action_matches(Pull, Update));
+        assert!(!action_matches(Pull, Delete));
+    }
+
+    #[test]
+    fn scope_token_round_trips_through_parser() {
+        use OciAction::*;
+        for action in [Pull, Create, Update, Delete] {
+            let scope = format!("repository:foo:{}", action.scope_token());
+            assert_eq!(parse_scope(&scope), Some(("foo".to_string(), action)));
+        }
     }
 
     #[test]
@@ -199,7 +299,7 @@ mod tests {
                 .check(
                     &["registry_admins@localhost".to_string()],
                     "qa/test",
-                    OciAction::Push
+                    OciAction::Create
                 )
                 .is_ok()
         );
@@ -215,5 +315,30 @@ mod tests {
             "registry_admins@prod.example",
             "registry_admins@localhost"
         ));
+    }
+
+    #[test]
+    fn personal_namespace_grants_own_prefix() {
+        assert!(in_personal_namespace(Some("alice"), "users/alice/app"));
+        assert!(in_personal_namespace(
+            Some("alice"),
+            "users/alice/nested/repo"
+        ));
+    }
+
+    #[test]
+    fn personal_namespace_rejects_other_users_and_missing_username() {
+        // Another user's namespace is off-limits.
+        assert!(!in_personal_namespace(Some("alice"), "users/bob/app"));
+        // The bare `users/<name>` (no trailing slash) is not inside the
+        // namespace — only `users/<name>/...` is.
+        assert!(!in_personal_namespace(Some("alice"), "users/alice"));
+        // A prefix collision (`alicia` vs `alice`) must not match.
+        assert!(!in_personal_namespace(Some("alice"), "users/alicia/app"));
+        // No username (anonymous / unpopulated) never grants.
+        assert!(!in_personal_namespace(None, "users/alice/app"));
+        assert!(!in_personal_namespace(Some(""), "users/alice/app"));
+        // A repo outside the personal namespace is never auto-granted.
+        assert!(!in_personal_namespace(Some("alice"), "team-a/app"));
     }
 }
