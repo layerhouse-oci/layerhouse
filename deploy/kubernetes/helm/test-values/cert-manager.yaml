@@ -4,11 +4,18 @@ storage:
     bucket: layerhouse
 
 certManager:
-  enabled: true
-  issuerRef:
-    name: layerhouse-ca
-    kind: ClusterIssuer
-    group: cert-manager.io
+  server:
+    enabled: true
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+      group: cert-manager.io
+  raft:
+    enabled: true
+    issuerRef:
+      name: layerhouse-raft-ca
+      kind: Issuer
+      group: cert-manager.io
 
 server:
   tls:

@@ -64,11 +64,18 @@ auth:
       scopes: ["repository:dev/*:push", "repository:dev/*:pull"]
 
 certManager:
-  enabled: true
-  issuerRef:
-    name: layerhouse-ca
-    kind: ClusterIssuer
-    group: cert-manager.io
+  server:
+    enabled: true
+    issuerRef:
+      name: layerhouse-ca
+      kind: ClusterIssuer
+      group: cert-manager.io
+  raft:
+    enabled: true
+    issuerRef:
+      name: layerhouse-ca
+      kind: ClusterIssuer
+      group: cert-manager.io
 YAML
 
 cat <<YAML
