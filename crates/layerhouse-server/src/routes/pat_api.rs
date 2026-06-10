@@ -101,6 +101,7 @@ async fn create_token<M: TokenStore, B: BlobStore>(
     let pat = PersonalAccessToken {
         id: uuid::Uuid::new_v4().to_string(),
         subject: identity.subject.clone(),
+        username: identity.username.clone(),
         name: req.name.clone(),
         token_hash,
         token_prefix,

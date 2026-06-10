@@ -380,7 +380,7 @@ impl AuthService {
 
         Ok(AuthIdentity {
             subject: pat.subject,
-            username: None,
+            username: pat.username,
             display_name: None,
             email: None,
             groups: vec![],
@@ -531,6 +531,14 @@ impl AuthService {
         repository: &str,
         action: permissions::OciAction,
     ) -> Result<(), LayerhouseError> {
+        // Personal-namespace auto-grant: any authenticated user has the full
+        // action ladder under `users/<their-username>/`. Keyed on
+        // `identity.username`, which is now populated for PATs as well as OIDC
+        // sessions (see `validate_pat`).
+        if permissions::in_personal_namespace(identity.username.as_deref(), repository) {
+            return Ok(());
+        }
+
         // PATs and minted OCI bearer tokens carry explicit repository scopes.
         if matches!(
             identity.token_type,

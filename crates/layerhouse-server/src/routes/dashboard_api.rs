@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, delete, get, post};
@@ -240,9 +240,27 @@ async fn repository_dispatch_result<M: ManifestStore, B: BlobStore>(
 
 async fn list_repositories<M: ManifestStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
+    identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Query(query): Query<RepositoryQuery>,
 ) -> Result<Response, LayerhouseError> {
     let mut repos = state.core.metadata.list_repository_summaries().await?;
+
+    // Hide repositories the caller cannot pull. The dashboard list is
+    // user-facing, so it filters by Pull access; the OCI `/v2/_catalog`
+    // endpoint stays unfiltered for spec compliance. When auth is disabled
+    // (`state.auth` is None) there is nothing to filter against, so the full
+    // list is returned.
+    if let (Some(auth), Some(Extension(identity))) = (state.auth.as_ref(), &identity) {
+        repos.retain(|repo| {
+            auth.check_permission(
+                identity,
+                &repo.name,
+                crate::auth::permissions::OciAction::Pull,
+            )
+            .is_ok()
+        });
+    }
+
     let q = query.q.unwrap_or_default().to_lowercase();
     if !q.is_empty() {
         repos.retain(|repo| repo.name.to_lowercase().contains(&q));

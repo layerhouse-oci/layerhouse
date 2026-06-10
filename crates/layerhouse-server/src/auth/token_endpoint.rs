@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn token_query_accepts_repeated_scope_parameters() {
         let query = TokenQuery::from_raw_query(Some(
-            "service=qa&scope=repository%3Aqa%2Fexample%3A%2A&scope=repository%3Aqa%2Fexample%3Apull%2Cpush",
+            "service=qa&scope=repository%3Aqa%2Fexample%3A%2A&scope=repository%3Aqa%2Fexample%3Apull%2Ccreate",
         ))
         .expect("query should parse");
 
@@ -148,7 +148,7 @@ mod tests {
             query.scope,
             vec![
                 "repository:qa/example:*".to_string(),
-                "repository:qa/example:pull,push".to_string(),
+                "repository:qa/example:pull,create".to_string(),
             ]
         );
     }
@@ -157,12 +157,12 @@ mod tests {
     fn scope_string_joins_repeated_scope_parameters() {
         let scopes = vec![
             "repository:qa/example:*".to_string(),
-            "repository:qa/example:pull,push".to_string(),
+            "repository:qa/example:pull,create".to_string(),
         ];
 
         assert_eq!(
             scope_string(&scopes),
-            Some("repository:qa/example:* repository:qa/example:pull,push".to_string())
+            Some("repository:qa/example:* repository:qa/example:pull,create".to_string())
         );
     }
 

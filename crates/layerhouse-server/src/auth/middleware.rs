@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::error::LayerhouseError;
 use crate::routes::AppState;
 use crate::store::blob::BlobStore;
-use crate::store::metadata::TokenStore;
+use crate::store::metadata::{ManifestStore, MetadataStore, TokenStore};
 
 use super::permissions::OciAction;
 use super::session::DashboardSession;
@@ -20,7 +20,7 @@ fn clear_session_cookie_str(flags: &super::CookieFlags) -> String {
     )
 }
 
-pub async fn auth_middleware<M: TokenStore, B: BlobStore>(
+pub async fn auth_middleware<M: MetadataStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     req: Request<Body>,
     next: Next,
@@ -58,12 +58,24 @@ pub async fn auth_middleware<M: TokenStore, B: BlobStore>(
         state.server_tls_enabled,
     );
 
+    // Resolve the OCI action for /v2/ requests once, before authentication.
+    // The action is identity-independent but a manifest PUT requires a
+    // metadata lookup to tell Create (new tag) from Update (overwrite), so we
+    // compute it here and reuse it for both the auth challenge and the
+    // post-auth permission check — the challenge scope must name the exact
+    // action the request needs.
+    let oci_action = if path.starts_with("/v2/") {
+        Some(resolve_oci_action(&state.core.metadata, &path, req.method()).await)
+    } else {
+        None
+    };
+
     let credential = extract_credential(&req);
     let uses_session_cookie = matches!(credential, Some(RequestCredential::SessionCookies(_)));
     let identity = match authenticate_request(auth_service, &state.core.metadata, credential).await
     {
         Ok(Some(identity)) => identity,
-        Ok(None) => return auth_required_response(auth_service, &req),
+        Ok(None) => return auth_required_response(auth_service, &req, oci_action),
         Err(e) if uses_session_cookie => {
             return session_cookie_auth_error_response(&req, e, &flags);
         }
@@ -72,7 +84,7 @@ pub async fn auth_middleware<M: TokenStore, B: BlobStore>(
 
     if path.starts_with("/v2/") {
         let repository = extract_repository_from_path(&path);
-        let action = OciAction::from_method(req.method());
+        let action = oci_action.unwrap_or(OciAction::Pull);
 
         if let Err(e) = auth_service.check_permission(&identity, &repository, action) {
             return e.into_response();
@@ -207,7 +219,11 @@ fn extract_cookies<'a>(req: &'a Request<Body>, name: &str) -> Vec<&'a str> {
     values
 }
 
-fn auth_required_response(auth: &super::AuthService, req: &Request<Body>) -> Response {
+fn auth_required_response(
+    auth: &super::AuthService,
+    req: &Request<Body>,
+    oci_action: Option<OciAction>,
+) -> Response {
     let path = req.uri().path();
     if is_dashboard_request_path(path) {
         let cookie_header_count = req.headers().get_all(header::COOKIE).iter().count();
@@ -243,11 +259,12 @@ fn auth_required_response(auth: &super::AuthService, req: &Request<Body>) -> Res
         .and_then(|v| v.to_str().ok())
         .unwrap_or("registry");
 
-    // Derive scope from HTTP method instead of hardcoding `*`.
+    // Derive scope from the resolved OCI action instead of hardcoding `*`.
     // Docker follows the challenge and requests a token with the challenged
-    // scope. A pull+push PAT should be sufficient for push; `*` forces
-    // Docker to request delete-level scope.
-    let scope_action = scope_action_for_method(req.method());
+    // scope, so the scope must name the exact action the request needs: a
+    // brand-new tag is challenged `create` (a create-only PAT suffices), an
+    // overwrite is challenged `update`.
+    let scope_action = oci_action.unwrap_or(OciAction::Pull).scope_token();
 
     let scope = if repository.is_empty() {
         // e.g. /v2/_catalog — don't emit a broken scope
@@ -342,28 +359,61 @@ fn extract_repository_from_path(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Compute the OCI scope action string for a challenge from the HTTP method.
-/// Called by `auth_required_response` to derive scope from method instead of
-/// hardcoding `*`.
-fn scope_action_for_method(method: &http::Method) -> &'static str {
-    match OciAction::from_method(method) {
-        OciAction::Pull => "pull",
-        OciAction::Push => "pull,push",
-        OciAction::Delete => "delete",
+/// Resolve the OCI action a `/v2/` request needs, performing the manifest
+/// existence lookup that distinguishes Create from Update.
+///
+/// The HTTP method alone yields the base action (`OciAction::from_method`):
+/// reads → Pull, DELETE → Delete, writes → Create. The one case the method
+/// cannot decide is a manifest PUT: pushing a brand-new tag is `Create`, while
+/// overwriting an existing one is `Update`. We resolve that by looking the
+/// manifest up in the Raft-local metadata store (in-memory, no S3) — present
+/// means Update, absent means Create. Blob and upload PUTs stay `Create`.
+async fn resolve_oci_action<M: ManifestStore>(
+    metadata: &M,
+    path: &str,
+    method: &http::Method,
+) -> OciAction {
+    let base = OciAction::from_method(method);
+    if base != OciAction::Create {
+        return base;
     }
+    let Some((name, reference)) = manifest_put_target(path) else {
+        // Not a manifest PUT (blob/upload write) — stays Create.
+        return OciAction::Create;
+    };
+    match metadata.get_manifest(&name, &reference).await {
+        Ok(Some(_)) => OciAction::Update,
+        // Absent, or a lookup error we treat as absent: challenge/charge the
+        // lower tier. A genuine overwrite that slips through as Create is still
+        // gated by the create grant, and the manifest PUT itself revalidates.
+        _ => OciAction::Create,
+    }
+}
+
+/// Extract `(name, reference)` from a manifest PUT path
+/// (`/v2/<name>/manifests/<reference>`), or `None` for any other path.
+fn manifest_put_target(path: &str) -> Option<(String, String)> {
+    let rest = path.strip_prefix("/v2/")?;
+    let (name, reference) = rest.rsplit_once("/manifests/")?;
+    if name.is_empty() || reference.is_empty() || reference.contains('/') {
+        return None;
+    }
+    Some((name.to_string(), reference.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         RequestCredential, authenticate_session_cookies, extract_cookies, extract_credential,
-        extract_repository_from_path, is_public_path, scope_action_for_method,
+        extract_repository_from_path, is_public_path, manifest_put_target, resolve_oci_action,
         session_cookie_auth_error_response,
     };
     use crate::auth::CookieFlags;
+    use crate::auth::permissions::OciAction;
     use crate::auth::session::DashboardSession;
     use crate::auth::token::TokenType;
     use crate::error::LayerhouseError;
+    use crate::store::metadata::{InMemoryMetadataStore, ManifestEntry, ManifestStore};
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
 
@@ -525,22 +575,140 @@ mod tests {
     }
 
     #[test]
-    fn scope_action_pull_for_get() {
-        assert_eq!(scope_action_for_method(&http::Method::GET), "pull");
-        assert_eq!(scope_action_for_method(&http::Method::HEAD), "pull");
+    fn from_method_pull_for_get() {
+        assert_eq!(OciAction::from_method(&http::Method::GET), OciAction::Pull);
+        assert_eq!(OciAction::from_method(&http::Method::HEAD), OciAction::Pull);
     }
 
     #[test]
-    fn scope_action_pull_push_for_post_put_patch() {
-        // POST/PUT/PATCH blob uploads need pull,push — push implies pull
-        assert_eq!(scope_action_for_method(&http::Method::POST), "pull,push");
-        assert_eq!(scope_action_for_method(&http::Method::PUT), "pull,push");
-        assert_eq!(scope_action_for_method(&http::Method::PATCH), "pull,push");
+    fn from_method_create_for_post_put_patch() {
+        // Writes default to Create; a manifest PUT overwrite is upgraded to
+        // Update by resolve_oci_action after a metadata lookup.
+        assert_eq!(
+            OciAction::from_method(&http::Method::POST),
+            OciAction::Create
+        );
+        assert_eq!(
+            OciAction::from_method(&http::Method::PUT),
+            OciAction::Create
+        );
+        assert_eq!(
+            OciAction::from_method(&http::Method::PATCH),
+            OciAction::Create
+        );
     }
 
     #[test]
-    fn scope_action_delete_for_delete() {
-        assert_eq!(scope_action_for_method(&http::Method::DELETE), "delete");
+    fn from_method_delete_for_delete() {
+        assert_eq!(
+            OciAction::from_method(&http::Method::DELETE),
+            OciAction::Delete
+        );
+    }
+
+    #[test]
+    fn scope_tokens_match_action_ladder() {
+        assert_eq!(OciAction::Pull.scope_token(), "pull");
+        assert_eq!(OciAction::Create.scope_token(), "create");
+        assert_eq!(OciAction::Update.scope_token(), "update");
+        assert_eq!(OciAction::Delete.scope_token(), "delete");
+    }
+
+    #[test]
+    fn manifest_put_target_matches_only_manifest_paths() {
+        assert_eq!(
+            manifest_put_target("/v2/qa/auth-test/alpine/manifests/v1"),
+            Some(("qa/auth-test/alpine".to_string(), "v1".to_string()))
+        );
+        // Blob and upload writes are not manifest PUTs.
+        assert_eq!(
+            manifest_put_target("/v2/qa/auth-test/alpine/blobs/uploads/"),
+            None
+        );
+        assert_eq!(manifest_put_target("/v2/foo/manifests/"), None);
+        // A reference containing a slash is not a valid manifest reference.
+        assert_eq!(manifest_put_target("/v2/foo/manifests/a/b"), None);
+        assert_eq!(manifest_put_target("/healthz"), None);
+    }
+
+    fn manifest_entry() -> ManifestEntry {
+        let body = b"{}".to_vec();
+        ManifestEntry {
+            digest: crate::oci::digest::Digest::sha256(&body),
+            content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            body,
+            referenced_blobs: Vec::new(),
+            subject: None,
+            artifact_type: None,
+            annotations: None,
+            stored_size_bytes: 0,
+            manifest_size_bytes: 2,
+            created_at: 1,
+            last_modified: 1,
+            config_summary: None,
+        }
+    }
+
+    // T2: the Create/Update boundary, both directions. A manifest PUT to a
+    // brand-new tag resolves to Create; the same PUT once the tag exists
+    // resolves to Update.
+    #[tokio::test]
+    async fn resolve_action_manifest_put_create_then_update() {
+        let store = InMemoryMetadataStore::default();
+        let path = "/v2/team-a/app/manifests/v1";
+
+        // Tag does not exist yet → Create.
+        assert_eq!(
+            resolve_oci_action(&store, path, &http::Method::PUT).await,
+            OciAction::Create
+        );
+
+        // Push the tag, then the same PUT is an overwrite → Update.
+        store
+            .put_manifest("team-a/app", "v1", manifest_entry())
+            .await
+            .expect("put manifest");
+        assert_eq!(
+            resolve_oci_action(&store, path, &http::Method::PUT).await,
+            OciAction::Update
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_action_blob_and_upload_writes_stay_create() {
+        let store = InMemoryMetadataStore::default();
+        // Blob upload writes are never manifest PUTs, so they stay Create even
+        // when a manifest with a colliding-looking reference exists.
+        assert_eq!(
+            resolve_oci_action(&store, "/v2/team-a/app/blobs/uploads/", &http::Method::POST).await,
+            OciAction::Create
+        );
+        assert_eq!(
+            resolve_oci_action(
+                &store,
+                "/v2/team-a/app/blobs/uploads/abc",
+                &http::Method::PUT
+            )
+            .await,
+            OciAction::Create
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_action_reads_and_deletes_ignore_manifest_lookup() {
+        let store = InMemoryMetadataStore::default();
+        assert_eq!(
+            resolve_oci_action(&store, "/v2/team-a/app/manifests/v1", &http::Method::GET).await,
+            OciAction::Pull
+        );
+        assert_eq!(
+            resolve_oci_action(&store, "/v2/team-a/app/manifests/v1", &http::Method::HEAD).await,
+            OciAction::Pull
+        );
+        assert_eq!(
+            resolve_oci_action(&store, "/v2/team-a/app/manifests/v1", &http::Method::DELETE).await,
+            OciAction::Delete
+        );
     }
 
     #[test]

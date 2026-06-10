@@ -17,15 +17,16 @@ use crate::oci::digest::Digest;
 use crate::oci::manifest::extract_referenced_digests;
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion,
-    ManifestEntry, ManifestSummary, MirrorRule, PersonalAccessToken, ProxyCache, ReferrerEntry,
-    RepositorySummary, SyncJob, SyncJobKind, SyncJobRun, SyncJobStatus, WarmImage,
-    clear_proxy_cache_tag_validations_for_cache, clear_proxy_cache_tag_validations_for_repository,
-    clear_proxy_cache_tag_validations_for_tag, get_proxy_cache_tag_validation, mirror_rule_job,
-    now_epoch, proxy_cache_warm_job, put_proxy_cache_tag_validation,
-    repository_manifest_size_bytes, repository_stored_size_bytes, sync_job_blocks_trigger,
+    ManifestEntry, ManifestSummary, MirrorRule, PermissionRule, PersonalAccessToken, ProxyCache,
+    ReferrerEntry, Repository, RepositorySummary, SyncJob, SyncJobKind, SyncJobRun, SyncJobStatus,
+    WarmImage, clear_proxy_cache_tag_validations_for_cache,
+    clear_proxy_cache_tag_validations_for_repository, clear_proxy_cache_tag_validations_for_tag,
+    get_proxy_cache_tag_validation, mirror_rule_job, now_epoch, proxy_cache_warm_job,
+    put_proxy_cache_tag_validation, repository_manifest_size_bytes, repository_stored_size_bytes,
+    sync_job_blocks_trigger,
 };
 
-const SNAPSHOT_VERSION: u32 = 4;
+const SNAPSHOT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StateMachineData {
@@ -59,6 +60,14 @@ pub struct StateMachineData {
     pub helm_chart_versions: BTreeMap<String, Vec<HelmChartVersion>>,
     #[serde(default)]
     pub personal_access_tokens: BTreeMap<String, PersonalAccessToken>,
+    /// First-class repository objects (shadow repositories). Keyed by repo
+    /// name. Empty in Phase 1; populated by the creation flow in Phase 2.
+    #[serde(default)]
+    pub repositories: BTreeMap<String, Repository>,
+    /// Raft-sourced permission rules, keyed by rule id. Empty in Phase 1;
+    /// the dashboard editing flow lands in Phase 3.
+    #[serde(default)]
+    pub permission_rules: BTreeMap<String, PermissionRule>,
 }
 
 pub struct StateMachine {
@@ -524,7 +533,10 @@ impl openraft::storage::RaftStateMachine<TypeConfig> for StateMachine {
         let payload = &bytes[4..];
 
         let mut new_data: StateMachineData = match version {
-            2 | SNAPSHOT_VERSION => {
+            // v2 and v4 are accepted for forward-compat: the new collections
+            // (`repositories`, `permission_rules`) default to empty via
+            // `#[serde(default)]`, so older snapshots deserialize cleanly.
+            2 | 4 | SNAPSHOT_VERSION => {
                 serde_json::from_slice(payload).map_err(|e| StorageError::IO {
                     source: StorageIOError::read_snapshot(None, openraft::AnyError::new(&e)),
                 })?
@@ -1081,6 +1093,7 @@ mod tests {
         let token = PersonalAccessToken {
             id: "pat-1".to_string(),
             subject: "subject-a".to_string(),
+            username: None,
             name: "token".to_string(),
             token_hash: "hash".to_string(),
             token_prefix: "layerhouse-abc".to_string(),
@@ -1233,6 +1246,71 @@ mod tests {
         .expect("state machine data should deserialize");
 
         assert!(data.proxy_cache_tag_validations.is_empty());
+    }
+
+    #[test]
+    fn v4_snapshot_json_loads_with_empty_v5_collections() {
+        // A v4-shaped payload predates `repositories` and `permission_rules`.
+        // `#[serde(default)]` must fill them with empty maps so v4 snapshots
+        // taken before this migration still load.
+        let data: StateMachineData = serde_json::from_value(serde_json::json!({
+            "manifests": {},
+            "tags": {},
+            "personal_access_tokens": {}
+        }))
+        .expect("v4-shaped snapshot should deserialize");
+
+        assert!(data.repositories.is_empty());
+        assert!(data.permission_rules.is_empty());
+    }
+
+    #[test]
+    fn v5_snapshot_roundtrips_repositories_and_permission_rules() {
+        let mut data = StateMachineData::default();
+        data.repositories.insert(
+            "users/alice/app".to_string(),
+            Repository {
+                name: "users/alice/app".to_string(),
+                description: "alice's app".to_string(),
+                owner: Some("subject-alice".to_string()),
+                visibility: crate::store::metadata::Visibility::PublicPull,
+                created_at: 7,
+            },
+        );
+        data.permission_rules.insert(
+            "rule-1".to_string(),
+            PermissionRule {
+                id: "rule-1".to_string(),
+                name: "team-a-devs".to_string(),
+                groups: vec!["team-a".to_string()],
+                scopes: vec!["repository:team-a/*:pull,create".to_string()],
+                source: crate::store::metadata::RuleSource::Raft,
+                created_at: 9,
+            },
+        );
+
+        // Serialize and deserialize the same way the snapshot path does
+        // (JSON payload after the version prefix).
+        let payload = serde_json::to_vec(&data).expect("serialize");
+        let restored: StateMachineData =
+            serde_json::from_slice(&payload).expect("deserialize v5 payload");
+
+        let repo = restored
+            .repositories
+            .get("users/alice/app")
+            .expect("repository preserved");
+        assert_eq!(repo.owner.as_deref(), Some("subject-alice"));
+        assert_eq!(
+            repo.visibility,
+            crate::store::metadata::Visibility::PublicPull
+        );
+
+        let rule = restored
+            .permission_rules
+            .get("rule-1")
+            .expect("permission rule preserved");
+        assert_eq!(rule.groups, vec!["team-a".to_string()]);
+        assert_eq!(rule.source, crate::store::metadata::RuleSource::Raft);
     }
 
     // ── Shared read tests against StateMachineData ────────────────────
