@@ -213,7 +213,8 @@ impl ManifestStore for InMemoryMetadataStore {
 
         for (name, repo_manifests) in &state.manifests {
             let tag_count = state.tags.get(name).map(|t| t.len()).unwrap_or(0);
-            let size_bytes = repo_manifests.values().map(|m| m.size_bytes).sum();
+            let stored_size_bytes = repository_stored_size_bytes(repo_manifests);
+            let manifest_size_bytes = repository_manifest_size_bytes(repo_manifests);
             let last_modified = repo_manifests
                 .values()
                 .map(|m| m.last_modified)
@@ -223,7 +224,8 @@ impl ManifestStore for InMemoryMetadataStore {
                 name: name.clone(),
                 tag_count,
                 manifest_count: repo_manifests.len(),
-                size_bytes,
+                stored_size_bytes,
+                manifest_size_bytes,
                 last_modified,
             });
         }
@@ -877,15 +879,17 @@ pub(crate) mod shared_read_tests {
     pub(crate) fn seed_entry() -> (ManifestEntry, String) {
         let digest_str = format!("sha256:{:064x}", 1u64);
         let digest = Digest::from_str_checked(&digest_str).unwrap();
+        let body = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}"#.to_vec();
         let entry = ManifestEntry {
             digest: digest.clone(),
             content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
-            body: br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}"#.to_vec(),
+            manifest_size_bytes: body.len() as u64,
+            body,
             referenced_blobs: vec![],
             subject: None,
             artifact_type: None,
             annotations: None,
-            size_bytes: 200,
+            stored_size_bytes: 2,
             created_at: 100,
             last_modified: 200,
             config_summary: None,

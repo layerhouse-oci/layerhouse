@@ -21,7 +21,8 @@ use crate::store::metadata::{
     RepositorySummary, SyncJob, SyncJobKind, SyncJobRun, SyncJobStatus, WarmImage,
     clear_proxy_cache_tag_validations_for_cache, clear_proxy_cache_tag_validations_for_repository,
     clear_proxy_cache_tag_validations_for_tag, get_proxy_cache_tag_validation, mirror_rule_job,
-    now_epoch, proxy_cache_warm_job, put_proxy_cache_tag_validation, sync_job_blocks_trigger,
+    now_epoch, proxy_cache_warm_job, put_proxy_cache_tag_validation,
+    repository_manifest_size_bytes, repository_stored_size_bytes, sync_job_blocks_trigger,
 };
 
 const SNAPSHOT_VERSION: u32 = 4;
@@ -102,7 +103,8 @@ impl StateMachine {
                 subject,
                 artifact_type,
                 annotations,
-                size_bytes,
+                stored_size_bytes,
+                manifest_size_bytes,
                 created_at,
                 last_modified,
                 config_summary,
@@ -131,7 +133,8 @@ impl StateMachine {
                     subject: subject_parsed,
                     artifact_type,
                     annotations,
-                    size_bytes,
+                    stored_size_bytes,
+                    manifest_size_bytes,
                     created_at,
                     last_modified,
                     config_summary,
@@ -610,8 +613,13 @@ impl StateMachineData {
                 entry
                     .referenced_blobs
                     .dedup_by(|a, b| a.to_string() == b.to_string());
-                if entry.size_bytes == 0 {
-                    entry.size_bytes = entry.body.len() as u64;
+                if entry.manifest_size_bytes == 0 {
+                    entry.manifest_size_bytes = entry.body.len() as u64;
+                }
+                if entry.stored_size_bytes == 0
+                    && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&entry.body)
+                {
+                    entry.stored_size_bytes = crate::oci::manifest::stored_size_bytes(&value);
                 }
                 if entry.created_at == 0 {
                     entry.created_at = now;
@@ -721,7 +729,8 @@ impl StateMachineData {
         let mut summaries = Vec::new();
         for (name, repo_manifests) in &self.manifests {
             let tag_count = self.tags.get(name).map(|t| t.len()).unwrap_or(0);
-            let size_bytes = repo_manifests.values().map(|m| m.size_bytes).sum();
+            let stored_size_bytes = repository_stored_size_bytes(repo_manifests);
+            let manifest_size_bytes = repository_manifest_size_bytes(repo_manifests);
             let last_modified = repo_manifests
                 .values()
                 .map(|m| m.last_modified)
@@ -731,7 +740,8 @@ impl StateMachineData {
                 name: name.clone(),
                 tag_count,
                 manifest_count: repo_manifests.len(),
-                size_bytes,
+                stored_size_bytes,
+                manifest_size_bytes,
                 last_modified,
             });
         }
@@ -889,16 +899,21 @@ mod tests {
             .first()
             .copied()
             .unwrap_or(default_config.as_str());
+        let body = manifest_body(config_digest, referenced_blobs);
+        let stored_size_bytes = serde_json::from_slice::<serde_json::Value>(&body)
+            .map(|value| crate::oci::manifest::stored_size_bytes(&value))
+            .unwrap_or(0);
         Request::Manifest(ManifestRequest::PutManifest {
             name: "repo".to_string(),
             reference: reference.to_string(),
             digest: manifest_digest.to_string(),
             content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
-            body: manifest_body(config_digest, referenced_blobs),
+            manifest_size_bytes: body.len() as u64,
+            body,
             subject: None,
             artifact_type: None,
             annotations: None,
-            size_bytes: 128,
+            stored_size_bytes,
             created_at: 1,
             last_modified: 1,
             config_summary: None,
@@ -913,11 +928,12 @@ mod tests {
         ManifestEntry {
             digest: Digest::from_str_checked(manifest_digest).unwrap(),
             content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            manifest_size_bytes: body.len() as u64,
             body,
             subject: None,
             artifact_type: None,
             annotations: None,
-            size_bytes: 0,
+            stored_size_bytes: 0,
             created_at: 0,
             last_modified: 0,
             config_summary: None,
@@ -1258,7 +1274,8 @@ mod tests {
                 subject: None,
                 artifact_type: None,
                 annotations: None,
-                size_bytes: 200,
+                stored_size_bytes: 200,
+                manifest_size_bytes: body.len() as u64,
                 created_at: 100,
                 last_modified: 200,
                 config_summary: None,
@@ -1294,7 +1311,8 @@ mod tests {
                     subject: None,
                     artifact_type: None,
                     annotations: None,
-                    size_bytes: 200,
+                    stored_size_bytes: 200,
+                    manifest_size_bytes: body.len() as u64,
                     created_at: 100,
                     last_modified: 200,
                     config_summary: None,
@@ -1325,7 +1343,8 @@ mod tests {
                     subject: None,
                     artifact_type: None,
                     annotations: None,
-                    size_bytes: 200,
+                    stored_size_bytes: 200,
+                    manifest_size_bytes: body.len() as u64,
                     created_at: 100,
                     last_modified: 200,
                     config_summary: None,
@@ -1350,11 +1369,12 @@ mod tests {
                 reference: "v1".to_string(),
                 digest: manifest_digest,
                 content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                manifest_size_bytes: body.len() as u64,
                 body,
                 subject: None,
                 artifact_type: None,
                 annotations: None,
-                size_bytes: 200,
+                stored_size_bytes: 200,
                 created_at: 100,
                 last_modified: 200,
                 config_summary: None,

@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::oci::digest::Digest;
+use crate::oci::manifest::{
+    SizedDescriptor, extract_sized_referenced_descriptors, stored_size_bytes,
+    stored_size_from_descriptors,
+};
 
 pub(crate) fn now_epoch() -> u64 {
     std::time::SystemTime::now()
@@ -37,7 +41,8 @@ pub(crate) fn build_manifest_summaries(
             digest: digest.clone(),
             media_type: entry.content_type.clone(),
             artifact_type: entry.artifact_type.clone(),
-            size_bytes: entry.size_bytes,
+            stored_size_bytes: manifest_stored_size_bytes(entry),
+            manifest_size_bytes: entry.manifest_size_bytes,
             created_at: entry.created_at,
             last_modified: entry.last_modified,
             tags,
@@ -48,6 +53,58 @@ pub(crate) fn build_manifest_summaries(
         });
     }
     summaries
+}
+
+pub(crate) fn manifest_stored_size_bytes(entry: &ManifestEntry) -> u64 {
+    let descriptors = sized_descriptors_from_entry(entry);
+    if descriptors.is_empty() {
+        if entry.stored_size_bytes > 0 {
+            entry.stored_size_bytes
+        } else {
+            entry.manifest_size_bytes
+        }
+    } else {
+        stored_size_from_descriptors(descriptors)
+    }
+}
+
+pub(crate) fn repository_manifest_size_bytes(
+    repo_manifests: &BTreeMap<String, ManifestEntry>,
+) -> u64 {
+    repo_manifests
+        .values()
+        .map(|entry| entry.manifest_size_bytes)
+        .sum()
+}
+
+pub(crate) fn repository_stored_size_bytes(
+    repo_manifests: &BTreeMap<String, ManifestEntry>,
+) -> u64 {
+    let mut by_digest: BTreeMap<String, u64> = BTreeMap::new();
+    let mut fallback_size = 0;
+
+    for entry in repo_manifests.values() {
+        let descriptors = sized_descriptors_from_entry(entry);
+        if descriptors.is_empty() {
+            fallback_size += entry.stored_size_bytes.max(entry.manifest_size_bytes);
+            continue;
+        }
+
+        for descriptor in descriptors {
+            by_digest
+                .entry(descriptor.digest.to_string())
+                .and_modify(|size| *size = (*size).max(descriptor.size))
+                .or_insert(descriptor.size);
+        }
+    }
+
+    by_digest.values().sum::<u64>() + fallback_size
+}
+
+fn sized_descriptors_from_entry(entry: &ManifestEntry) -> Vec<SizedDescriptor> {
+    serde_json::from_slice::<serde_json::Value>(&entry.body)
+        .map(|value| extract_sized_referenced_descriptors(&value))
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +126,9 @@ pub struct ManifestEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<serde_json::Value>,
     #[serde(default)]
-    pub size_bytes: u64,
+    pub stored_size_bytes: u64,
+    #[serde(default)]
+    pub manifest_size_bytes: u64,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
@@ -88,7 +147,8 @@ impl ManifestEntry {
         body: Vec<u8>,
         referenced_blobs: Vec<Digest>,
     ) -> Self {
-        let size_bytes = body.len() as u64;
+        let manifest_size_bytes = body.len() as u64;
+        let stored_size_bytes = stored_size_bytes(parsed);
         let digest = Digest::sha256(&body);
         let subject = crate::oci::manifest::extract_subject_digest(parsed);
         let artifact_type = crate::oci::manifest::extract_artifact_type(parsed);
@@ -103,7 +163,8 @@ impl ManifestEntry {
             subject,
             artifact_type,
             annotations,
-            size_bytes,
+            stored_size_bytes,
+            manifest_size_bytes,
             created_at: now,
             last_modified: now,
             config_summary,
@@ -672,7 +733,8 @@ pub struct RepositorySummary {
     pub name: String,
     pub tag_count: usize,
     pub manifest_count: usize,
-    pub size_bytes: u64,
+    pub stored_size_bytes: u64,
+    pub manifest_size_bytes: u64,
     pub last_modified: u64,
 }
 
@@ -681,7 +743,8 @@ pub struct ManifestSummary {
     pub digest: String,
     pub media_type: String,
     pub artifact_type: Option<String>,
-    pub size_bytes: u64,
+    pub stored_size_bytes: u64,
+    pub manifest_size_bytes: u64,
     pub created_at: u64,
     pub last_modified: u64,
     pub tags: Vec<String>,
@@ -770,6 +833,86 @@ pub(crate) fn sync_job_blocks_trigger(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn digest(id: u64) -> String {
+        format!("sha256:{id:064x}")
+    }
+
+    fn image_manifest_body(config_id: u64, config_size: u64, layers: &[(u64, u64)]) -> Vec<u8> {
+        serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": digest(config_id),
+                "size": config_size
+            },
+            "layers": layers
+                .iter()
+                .map(|(digest_id, size)| serde_json::json!({
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "digest": digest(*digest_id),
+                    "size": size
+                }))
+                .collect::<Vec<_>>()
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn manifest_entry(body: Vec<u8>) -> ManifestEntry {
+        let parsed = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        let referenced_blobs = crate::oci::manifest::extract_referenced_digests(&parsed);
+        ManifestEntry::from_parsed_json(
+            &parsed,
+            "application/vnd.oci.image.manifest.v1+json".to_string(),
+            body,
+            referenced_blobs,
+        )
+    }
+
+    #[test]
+    fn manifest_summary_reports_stored_and_manifest_sizes() {
+        let body = image_manifest_body(1, 2, &[(2, 4), (2, 4)]);
+        let manifest_size = body.len() as u64;
+        let entry = manifest_entry(body);
+        let mut manifests = std::collections::BTreeMap::new();
+        manifests.insert(entry.digest.to_string(), entry);
+
+        let summaries = build_manifest_summaries(&manifests, None);
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].stored_size_bytes, 6);
+        assert_eq!(summaries[0].manifest_size_bytes, manifest_size);
+    }
+
+    #[test]
+    fn manifest_summary_preserves_zero_byte_descriptor_size() {
+        let body = image_manifest_body(1, 0, &[]);
+        let manifest_size = body.len() as u64;
+        let entry = manifest_entry(body);
+        let mut manifests = std::collections::BTreeMap::new();
+        manifests.insert(entry.digest.to_string(), entry);
+
+        let summaries = build_manifest_summaries(&manifests, None);
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].stored_size_bytes, 0);
+        assert_eq!(summaries[0].manifest_size_bytes, manifest_size);
+    }
+
+    #[test]
+    fn repository_stored_size_dedupes_shared_blob_descriptors() {
+        let first = manifest_entry(image_manifest_body(1, 2, &[(2, 4)]));
+        let second = manifest_entry(image_manifest_body(1, 2, &[(3, 8)]));
+        let manifest_size = first.manifest_size_bytes + second.manifest_size_bytes;
+        let mut manifests = std::collections::BTreeMap::new();
+        manifests.insert(first.digest.to_string(), first);
+        manifests.insert(second.digest.to_string(), second);
+
+        assert_eq!(repository_stored_size_bytes(&manifests), 14);
+        assert_eq!(repository_manifest_size_bytes(&manifests), manifest_size);
+    }
 
     fn run() -> SyncJobRun {
         SyncJobRun::running(

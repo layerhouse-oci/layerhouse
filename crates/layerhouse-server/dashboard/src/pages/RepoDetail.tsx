@@ -37,7 +37,7 @@ function expandedContent(repo: string, manifest: ManifestSummary) {
     return t("repo.expanded.config", {
       digest: configValue(manifest, "config_digest") ?? "-",
       layers: configValue(manifest, "layer_count") ?? "0",
-      size: formatBytes(Number(configValue(manifest, "layer_size_bytes") ?? 0)),
+      size: formatBytes(manifest.stored_size_bytes),
     });
   }
   if (kind === "wasm") {
@@ -250,8 +250,8 @@ export default function RepoDetail() {
           <select value={sort()} onChange={(e) => setSort(e.currentTarget.value)}>
             <option value="updated_desc">{t("repos.sort.recent")}</option>
             <option value="updated_asc">{t("repos.sort.oldest")}</option>
-            <option value="size_desc">{t("repo.sort.largest")}</option>
-            <option value="size_asc">{t("repo.sort.smallest")}</option>
+            <option value="stored_size_desc">{t("repo.sort.largest")}</option>
+            <option value="stored_size_asc">{t("repo.sort.smallest")}</option>
             <option value="digest_asc">{t("repo.sort.digest")}</option>
             <option value="tag_count_desc">{t("repos.sort.tags")}</option>
           </select>
@@ -350,7 +350,7 @@ export default function RepoDetail() {
                               </Show>
                             </div>
                           </td>
-                          <td>{formatBytes(manifest.size_bytes)}</td>
+                          <td>{formatBytes(manifest.stored_size_bytes)}</td>
                           <td>{formatAgo(manifest.last_modified)}</td>
                           <td onClick={(e) => e.stopPropagation()}>
                             <div class="row-actions">

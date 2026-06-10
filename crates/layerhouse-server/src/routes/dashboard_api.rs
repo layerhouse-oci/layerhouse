@@ -69,8 +69,8 @@ struct ManifestQuery {
     tagged: Option<bool>,
     platform: Option<String>,
     media_type: Option<String>,
-    size_min: Option<u64>,
-    size_max: Option<u64>,
+    stored_size_min: Option<u64>,
+    stored_size_max: Option<u64>,
     created_after: Option<String>,
     created_before: Option<String>,
     sort: Option<String>,
@@ -89,7 +89,8 @@ struct ManifestDetailResponse {
     digest: String,
     media_type: String,
     artifact_type: Option<String>,
-    size_bytes: u64,
+    stored_size_bytes: u64,
+    manifest_size_bytes: u64,
     created_at: u64,
     last_modified: u64,
     tags: Vec<String>,
@@ -384,11 +385,11 @@ async fn list_manifests<M: ManifestStore, B: BlobStore>(
     if let Some(platform) = query.platform.as_deref() {
         manifests.retain(|item| search_blob(item).contains(&platform.to_lowercase()));
     }
-    if let Some(min) = query.size_min {
-        manifests.retain(|item| item.size_bytes >= min);
+    if let Some(min) = query.stored_size_min {
+        manifests.retain(|item| item.stored_size_bytes >= min);
     }
-    if let Some(max) = query.size_max {
-        manifests.retain(|item| item.size_bytes <= max);
+    if let Some(max) = query.stored_size_max {
+        manifests.retain(|item| item.stored_size_bytes <= max);
     }
     if let Some(created_after) = query.created_after.as_deref() {
         let lower = parse_rfc3339_epoch(created_after, "created_after")?;
@@ -401,8 +402,8 @@ async fn list_manifests<M: ManifestStore, B: BlobStore>(
 
     match query.sort.as_deref().unwrap_or("updated_desc") {
         "updated_asc" => manifests.sort_by_key(|item| item.last_modified),
-        "size_desc" => manifests.sort_by_key(|item| Reverse(item.size_bytes)),
-        "size_asc" => manifests.sort_by_key(|item| item.size_bytes),
+        "stored_size_desc" => manifests.sort_by_key(|item| Reverse(item.stored_size_bytes)),
+        "stored_size_asc" => manifests.sort_by_key(|item| item.stored_size_bytes),
         "digest_asc" => manifests.sort_by(|a, b| a.digest.cmp(&b.digest)),
         "tag_count_desc" => manifests.sort_by_key(|item| Reverse(item.tags.len())),
         _ => manifests.sort_by_key(|item| Reverse(item.last_modified)),
@@ -449,7 +450,8 @@ async fn get_manifest<M: ManifestStore, B: BlobStore>(
         digest: manifest.digest,
         media_type: manifest.media_type,
         artifact_type: manifest.artifact_type,
-        size_bytes: manifest.size_bytes,
+        stored_size_bytes: manifest.stored_size_bytes,
+        manifest_size_bytes: manifest.manifest_size_bytes,
         created_at: manifest.created_at,
         last_modified: manifest.last_modified,
         tags: manifest.tags,
@@ -738,7 +740,8 @@ mod tests {
             digest: "sha256:abc".to_string(),
             media_type: media_type.to_string(),
             artifact_type: artifact_type.map(ToString::to_string),
-            size_bytes: 1,
+            stored_size_bytes: 1,
+            manifest_size_bytes: 2,
             created_at: 1,
             last_modified: 1,
             tags: vec!["latest".to_string()],
@@ -812,11 +815,126 @@ mod tests {
             subject: None,
             artifact_type: Some("application/vnd.oci.image.config.v1+json".to_string()),
             annotations: None,
-            size_bytes: 2,
+            stored_size_bytes: 0,
+            manifest_size_bytes: 2,
             created_at,
             last_modified: created_at,
             config_summary: None,
         }
+    }
+
+    fn descriptor_digest(id: u64) -> String {
+        format!("sha256:{id:064x}")
+    }
+
+    fn sized_manifest(config_id: u64, layer_id: u64, layer_size: u64) -> ManifestEntry {
+        let body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": descriptor_digest(config_id),
+                "size": 2
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "digest": descriptor_digest(layer_id),
+                    "size": layer_size
+                }
+            ]
+        })
+        .to_string()
+        .into_bytes();
+        let parsed = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        let referenced_blobs = crate::oci::manifest::extract_referenced_digests(&parsed);
+        ManifestEntry::from_parsed_json(
+            &parsed,
+            "application/vnd.oci.image.manifest.v1+json".to_string(),
+            body,
+            referenced_blobs,
+        )
+    }
+
+    #[tokio::test]
+    async fn repository_dashboard_api_returns_explicit_size_fields() {
+        let state = test_state();
+        let small = sized_manifest(1, 2, 4);
+        let large = sized_manifest(1, 3, 8);
+        let expected_manifest_size = small.manifest_size_bytes + large.manifest_size_bytes;
+
+        state
+            .core
+            .metadata
+            .put_manifest("repo/size", "small", small)
+            .await
+            .unwrap();
+        state
+            .core
+            .metadata
+            .put_manifest("repo/size", "large", large)
+            .await
+            .unwrap();
+
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/repositories?q=repo/size")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let repo = data["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|repo| repo["name"].as_str() == Some("repo/size"))
+            .unwrap();
+        assert_eq!(repo["stored_size_bytes"].as_u64(), Some(14));
+        assert_eq!(
+            repo["manifest_size_bytes"].as_u64(),
+            Some(expected_manifest_size)
+        );
+        assert!(repo.get("size_bytes").is_none());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/repositories/repo/size/manifests?sort=stored_size_asc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let manifests = data["manifests"].as_array().unwrap();
+        let stored_sizes: Vec<u64> = manifests
+            .iter()
+            .map(|manifest| manifest["stored_size_bytes"].as_u64().unwrap())
+            .collect();
+        assert_eq!(stored_sizes, vec![6, 10]);
+        assert!(
+            manifests
+                .iter()
+                .all(|manifest| manifest["manifest_size_bytes"].as_u64().unwrap() > 0)
+        );
+        assert!(
+            manifests
+                .iter()
+                .all(|manifest| manifest.get("size_bytes").is_none())
+        );
     }
 
     #[tokio::test]

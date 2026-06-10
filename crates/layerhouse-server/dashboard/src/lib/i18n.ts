@@ -323,7 +323,7 @@ const en: Messages = {
   "repo.deleteTagError": "Failed to delete tag",
   "repo.deleteDigestError": "Failed to delete digest",
   "repo.deleteBatchError": "Failed to delete selected digests",
-  "repo.expanded.config": "Config digest: {digest}\nLayer count: {layers}\nTotal layer size: {size}",
+  "repo.expanded.config": "Config digest: {digest}\nLayer count: {layers}\nTotal size: {size}",
   "repo.type.unknown": "Unknown",
 
   "mirror.eyebrow": "Automation",

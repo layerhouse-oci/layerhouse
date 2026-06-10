@@ -194,8 +194,8 @@ export function fetchRepositoryManifests(
     tagged?: boolean;
     platform?: string;
     media_type?: string;
-    size_min?: number;
-    size_max?: number;
+    stored_size_min?: number;
+    stored_size_max?: number;
     created_after?: string;
     created_before?: string;
     sort?: string;
