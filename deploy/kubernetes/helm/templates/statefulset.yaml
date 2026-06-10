@@ -174,7 +174,7 @@ spec:
                 path: tls.crt
               - key: tls.key
                 path: tls.key
-              {{- if .Values.certManager.enabled }}
+              {{- if .Values.certManager.raft.enabled }}
               - key: ca.crt
                 path: server-ca.crt
               - key: ca.crt

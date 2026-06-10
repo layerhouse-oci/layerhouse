@@ -81,11 +81,18 @@ auth:
       scopes: ["repository:*:*"]
 
 certManager:
-  enabled: false
-  issuerRef:
-    name: ""
-    kind: ClusterIssuer
-    group: cert-manager.io
+  server:
+    enabled: false
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+      group: cert-manager.io
+  raft:
+    enabled: false
+    issuerRef:
+      name: ""
+      kind: Issuer
+      group: cert-manager.io
 
 resources:
   requests:

@@ -249,8 +249,10 @@ sudo systemctl restart containerd
 
 ### Preconditions And Environment
 
-- Helm install uses `certManager.enabled=true`.
-- cert-manager is installed and the issuer used by Layerhouse is Ready.
+- Helm install uses `certManager.server.enabled=true` and
+  `certManager.raft.enabled=true`.
+- cert-manager is installed, the public server issuer is Ready, and the private
+  Raft issuer is Ready.
 - The test cluster can tolerate pod restarts if projected Secrets need reload.
 
 ```bash
@@ -271,9 +273,9 @@ kubectl -n "$NAMESPACE" get secret layerhouse-server-tls -o jsonpath='{.data.ca\
 kubectl -n "$NAMESPACE" get secret layerhouse-server-tls -o jsonpath='{.data.tls\.crt}' | base64 -d > "$WORK/server-before.crt"
 kubectl -n "$NAMESPACE" get secret layerhouse-raft-mtls -o jsonpath='{.data.tls\.crt}' | base64 -d > "$WORK/raft-before.crt"
 
-cmctl renew -n "$NAMESPACE" layerhouse-server
+cmctl renew -n "$NAMESPACE" layerhouse-server-tls
 cmctl renew -n "$NAMESPACE" layerhouse-raft
-kubectl -n "$NAMESPACE" wait --for=condition=Ready certificate/layerhouse-server --timeout=3m
+kubectl -n "$NAMESPACE" wait --for=condition=Ready certificate/layerhouse-server-tls --timeout=3m
 kubectl -n "$NAMESPACE" wait --for=condition=Ready certificate/layerhouse-raft --timeout=3m
 
 kubectl -n "$NAMESPACE" rollout restart statefulset/layerhouse
