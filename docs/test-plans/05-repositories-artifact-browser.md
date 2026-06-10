@@ -57,9 +57,10 @@ Prepare a repository fixture with:
 
 **Expected**:
 - Rows represent repository namespaces.
-- Columns include Repository, Tags, Last Modified, and Actions.
+- Columns include Repository, Tags, Digests, Size, Updated, and Actions.
 - Repository-level type badges are not shown.
 - Tag count excludes untagged manifests.
+- Size is displayed from `stored_size_bytes`, not raw manifest JSON length.
 - Clicking repository name opens `#/repos/{name}` with path remainder decoded.
 
 ### R2. Repository Search, Filters, Sort, Pagination
@@ -168,7 +169,7 @@ Prepare a repository fixture with:
 - Clicking again collapses.
 - In selection mode, row click no longer expands.
 - Helm expanded row shows copyable `helm install` one-liner.
-- Image expanded row shows config digest, layer count, and total size.
+- Image expanded row shows config digest, layer count, and stored total size.
 - WASM expanded row shows module metadata.
 - Unknown expanded row shows raw JSON manifest viewer.
 
@@ -176,9 +177,9 @@ Prepare a repository fixture with:
 
 **Steps**:
 1. Search by digest prefix, tag name, artifact type, and config summary.
-2. Filter by Type, Tag state, Tag exact/glob, platform, size, media type, and
-   created time using `created_after` and `created_before`.
-3. Sort by Recently updated, Size, Digest, and Tag count.
+2. Filter by Type, Tag state, Tag exact/glob, platform, stored size, media
+   type, and created time using `created_after` and `created_before`.
+3. Sort by Recently updated, Stored Size, Digest, and Tag count.
 4. Inspect requests.
 
 **Expected**:
@@ -255,9 +256,10 @@ Prepare a repository fixture with:
 **Expected**:
 - Dashboard uses `/api/v1/*` for enriched repository data.
 - `/v2/*` remains OCI-spec-only for OCI clients.
-- Repository list returns name, tag count, and last modified.
-- Manifest list returns digest rows with tags, type, size, timestamps, and
-  config summary.
+- Repository list returns name, tag count, manifest count, `stored_size_bytes`,
+  `manifest_size_bytes`, and last modified.
+- Manifest list returns digest rows with tags, type, `stored_size_bytes`,
+  `manifest_size_bytes`, timestamps, and config summary.
 - Untagged manifests return empty `tags`.
 - Delete responses return affected counts.
 

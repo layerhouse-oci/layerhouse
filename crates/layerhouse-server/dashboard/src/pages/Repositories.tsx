@@ -168,7 +168,7 @@ export default function Repositories() {
                       </td>
                       <td>{repo.tag_count}</td>
                       <td>{repo.manifest_count}</td>
-                      <td>{formatBytes(repo.size_bytes)}</td>
+                      <td>{formatBytes(repo.stored_size_bytes)}</td>
                       <td>{formatAgo(repo.last_modified)}</td>
                       <td>
                         <div class="row-actions">
@@ -207,7 +207,7 @@ export default function Repositories() {
               <div class="fact-grid">
                 <div><span>{t("repos.manifests")}</span><strong>{repo().manifest_count}</strong></div>
                 <div><span>{t("common.tags")}</span><strong>{repo().tag_count}</strong></div>
-                <div><span>{t("repos.storedSize")}</span><strong>{formatBytes(repo().size_bytes)}</strong></div>
+                <div><span>{t("repos.storedSize")}</span><strong>{formatBytes(repo().stored_size_bytes)}</strong></div>
               </div>
               <div class="modal-actions">
                 <button class="btn" disabled={deleting()} onClick={() => setPendingDelete(null)}>

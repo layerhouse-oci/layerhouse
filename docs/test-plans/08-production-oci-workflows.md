@@ -165,10 +165,10 @@ testing a different environment.
 4. Call `GET /api/v1/repositories/{name}/manifests/{digest}/raw`.
 
 **Expected**:
-- Repository summaries include tag count, manifest count, size, and last
-  modified data.
+- Repository summaries include tag count, manifest count,
+  `stored_size_bytes`, `manifest_size_bytes`, and last modified data.
 - Detail APIs are digest-first: each row is one manifest digest, with tags
-  attached to the row.
+  attached to the row, plus `stored_size_bytes` and `manifest_size_bytes`.
 - Raw manifest bytes parse as valid JSON.
 - Type/media metadata is stable enough for the dashboard to classify or show as
   unknown.
