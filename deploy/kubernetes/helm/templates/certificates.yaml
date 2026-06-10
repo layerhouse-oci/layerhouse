@@ -1,22 +1,24 @@
-{{- if .Values.certManager.enabled }}
+{{- if .Values.certManager.server.enabled }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: {{ include "layerhouse.fullname" . }}-server
+  name: {{ .Values.server.tls.existingSecret }}
   namespace: {{ include "layerhouse.namespace" . }}
 spec:
   secretName: {{ .Values.server.tls.existingSecret }}
   issuerRef:
-    name: {{ required "certManager.issuerRef.name is required when certManager.enabled=true" .Values.certManager.issuerRef.name }}
-    kind: {{ .Values.certManager.issuerRef.kind }}
-    group: {{ .Values.certManager.issuerRef.group }}
+    name: {{ required "certManager.server.issuerRef.name is required when certManager.server.enabled=true" .Values.certManager.server.issuerRef.name }}
+    kind: {{ .Values.certManager.server.issuerRef.kind }}
+    group: {{ .Values.certManager.server.issuerRef.group }}
   dnsNames:
-    - {{ include "layerhouse.fullname" . }}.{{ include "layerhouse.namespace" . }}.svc
-    - {{ include "layerhouse.fullname" . }}.{{ include "layerhouse.namespace" . }}.svc.cluster.local
-    {{- range .Values.server.tls.dnsNames }}
+    {{- range required "server.tls.dnsNames must contain at least one DNS name when certManager.server.enabled=true" .Values.server.tls.dnsNames }}
     - {{ . | quote }}
     {{- end }}
+{{- end }}
+{{- if and .Values.certManager.server.enabled .Values.certManager.raft.enabled }}
 ---
+{{- end }}
+{{- if .Values.certManager.raft.enabled }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -25,9 +27,9 @@ metadata:
 spec:
   secretName: {{ .Values.raft.tls.existingSecret }}
   issuerRef:
-    name: {{ required "certManager.issuerRef.name is required when certManager.enabled=true" .Values.certManager.issuerRef.name }}
-    kind: {{ .Values.certManager.issuerRef.kind }}
-    group: {{ .Values.certManager.issuerRef.group }}
+    name: {{ required "certManager.raft.issuerRef.name is required when certManager.raft.enabled=true" .Values.certManager.raft.issuerRef.name }}
+    kind: {{ .Values.certManager.raft.issuerRef.kind }}
+    group: {{ .Values.certManager.raft.issuerRef.group }}
   usages:
     - server auth
     - client auth

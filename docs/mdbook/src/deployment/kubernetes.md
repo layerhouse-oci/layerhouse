@@ -35,6 +35,9 @@ The Helm chart is at `deploy/kubernetes/helm/`.
 - Kubernetes Secret with S3 credentials
 - TLS Secret for the public registry listener (optional but recommended)
 - Raft mTLS Secret (optional but recommended)
+- Use separate certificate issuers for public registry TLS and internal Raft
+  mTLS. Public ACME issuers should only issue public DNS names; Raft `.svc`
+  names should be issued by a private CA.
 
 ## Install
 
@@ -60,6 +63,39 @@ helm install layerhouse ./deploy/kubernetes/helm \
   --set storage.s3.endpoint=https://s3.example.internal \
   --set storage.s3.bucket=layerhouse
 ```
+
+### With cert-manager
+
+```yaml
+server:
+  tls:
+    existingSecret: layerhouse-server-tls
+    dnsNames:
+      - registry.example.com
+
+raft:
+  tls:
+    existingSecret: layerhouse-raft-mtls
+
+certManager:
+  server:
+    enabled: true
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+      group: cert-manager.io
+  raft:
+    enabled: true
+    issuerRef:
+      name: layerhouse-raft-ca
+      kind: Issuer
+      group: cert-manager.io
+```
+
+`layerhouse-raft-mtls` is the active Raft mTLS Secret name. A manually generated
+`Opaque` Secret with `server-ca.crt` and `client-ca.crt` is still supported for
+air-gapped installs, but normal Kubernetes installs should let cert-manager own
+the Secret and mount `ca.crt` for both trust paths.
 
 ## Defaults
 
