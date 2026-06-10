@@ -416,8 +416,9 @@ wait_for_cluster_leader() {
 #### 5.6 Snapshot schema compatibility
 
 **Precondition**: RustFS contains an older `raft-snapshots/<node-id>/latest.bin`
-whose manifest entries are missing newer metadata fields such as `size_bytes`,
-`created_at`, `last_modified`, or `config_summary`.
+whose manifest entries are missing newer metadata fields such as
+`stored_size_bytes`, `manifest_size_bytes`, `created_at`, `last_modified`, or
+`config_summary`.
 
 **Steps**:
 1. Start the existing RustFS volume without deleting S3 data.
@@ -429,10 +430,12 @@ whose manifest entries are missing newer metadata fields such as `size_bytes`,
 5. Check leader health on all three ports.
 
 **Expected**:
-- Nodes do not crash with JSON errors such as `missing field size_bytes`.
+- Nodes do not crash with JSON errors such as `missing field stored_size_bytes`
+  or `missing field manifest_size_bytes`.
 - Restore normalizes missing manifest metadata with safe defaults.
-- Manifest list APIs return nonzero `size_bytes`, `created_at`, and
-  `last_modified` when the manifest body is available.
+- Manifest list APIs return explicit `stored_size_bytes`,
+  `manifest_size_bytes`, `created_at`, and `last_modified` when the manifest
+  body is available.
 - The compose cluster still reaches three running nodes and exactly one leader.
 - Operators are not required to wipe the RustFS volume for local schema changes.
 

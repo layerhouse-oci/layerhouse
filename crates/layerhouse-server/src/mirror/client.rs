@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
+use crate::oci::manifest::extract_sized_referenced_descriptors;
 
 /// Strip credentials and path from a proxy URL for safe logging.
 fn redact_proxy_url(url: &str) -> String {
@@ -37,6 +38,7 @@ use crate::store::metadata::{OutboundProxy, OutboundProxyProtocol};
 const MANIFEST_ACCEPT: &str = "\
     application/vnd.oci.image.manifest.v1+json, \
     application/vnd.oci.image.index.v1+json, \
+    application/vnd.oci.artifact.manifest.v1+json, \
     application/vnd.docker.distribution.manifest.v2+json, \
     application/vnd.docker.distribution.manifest.list.v2+json, \
     */*";
@@ -903,35 +905,13 @@ pub fn is_index_manifest(content_type: &str) -> bool {
 }
 
 pub fn extract_blob_descriptors(manifest: &serde_json::Value) -> Vec<BlobDescriptor> {
-    let mut blobs = Vec::new();
-
-    if let Some(config) = manifest.get("config")
-        && let (Some(digest), Some(size)) = (
-            config.get("digest").and_then(|d| d.as_str()),
-            config.get("size").and_then(|s| s.as_u64()),
-        )
-    {
-        blobs.push(BlobDescriptor {
-            digest: digest.to_string(),
-            size,
-        });
-    }
-
-    if let Some(layers) = manifest.get("layers").and_then(|l| l.as_array()) {
-        for layer in layers {
-            if let (Some(digest), Some(size)) = (
-                layer.get("digest").and_then(|d| d.as_str()),
-                layer.get("size").and_then(|s| s.as_u64()),
-            ) {
-                blobs.push(BlobDescriptor {
-                    digest: digest.to_string(),
-                    size,
-                });
-            }
-        }
-    }
-
-    blobs
+    extract_sized_referenced_descriptors(manifest)
+        .into_iter()
+        .map(|descriptor| BlobDescriptor {
+            digest: descriptor.digest.to_string(),
+            size: descriptor.size,
+        })
+        .collect()
 }
 
 pub fn extract_child_manifests(index: &serde_json::Value) -> Vec<BlobDescriptor> {

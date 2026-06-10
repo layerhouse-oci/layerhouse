@@ -64,7 +64,8 @@ export interface RepositorySummary {
   name: string;
   tag_count: number;
   manifest_count: number;
-  size_bytes: number;
+  stored_size_bytes: number;
+  manifest_size_bytes: number;
   last_modified: number;
 }
 
@@ -78,7 +79,8 @@ export interface ManifestSummary {
   digest: string;
   media_type: string;
   artifact_type: string | null;
-  size_bytes: number;
+  stored_size_bytes: number;
+  manifest_size_bytes: number;
   created_at: number;
   last_modified: number;
   tags: string[];
