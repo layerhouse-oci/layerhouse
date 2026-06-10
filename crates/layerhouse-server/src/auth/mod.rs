@@ -610,6 +610,39 @@ impl AuthService {
     pub async fn jwks_metrics(&self) -> JwksMetrics {
         self.jwks_cache.read().await.metrics()
     }
+
+    /// Build an `AuthService` offline, with the given permission mappings and
+    /// no live OIDC discovery/JWKS. For tests that need a real `AuthService`
+    /// instance (e.g. route-level permission enforcement) without network/S3.
+    #[cfg(test)]
+    pub(crate) fn for_test(permissions: Vec<crate::config::PermissionMapping>) -> Self {
+        use base64::Engine as _;
+        let mut config = tests::auth_config();
+        config.permissions = permissions;
+        let signing_key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&config.token_signing_keys[0])
+            .expect("valid signing key");
+        let session_key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&config.session_encryption_key)
+            .expect("valid session key");
+        let session_key: [u8; 32] = session_key_bytes.try_into().expect("32-byte session key");
+        let permission_resolver = PermissionResolver::new(&config.permissions);
+        Self {
+            discovery: RwLock::new(OidcDiscovery {
+                authorization_endpoint: String::new(),
+                token_endpoint: String::new(),
+                jwks_uri: String::new(),
+                end_session_endpoint: None,
+            }),
+            jwks_cache: Arc::new(RwLock::new(JwksCache::empty())),
+            jwks_s3_cache: None,
+            permission_resolver,
+            token_signing_key: jsonwebtoken::EncodingKey::from_secret(&signing_key_bytes),
+            token_verification_key: jsonwebtoken::DecodingKey::from_secret(&signing_key_bytes),
+            session_key,
+            config,
+        }
+    }
 }
 
 pub(crate) struct CookieFlags {
@@ -685,7 +718,7 @@ mod tests {
     use super::{AuthService, CachedJwksDocument, JwksCache, jwks};
     use crate::config::{AuthConfig, PermissionMapping};
 
-    fn auth_config() -> AuthConfig {
+    pub(super) fn auth_config() -> AuthConfig {
         AuthConfig {
             issuer_url: "https://idp.example.test/oauth2/openid/layerhouse".to_string(),
             issuer_internal_url: None,

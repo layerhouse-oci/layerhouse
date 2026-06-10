@@ -383,10 +383,12 @@ async fn resolve_oci_action<M: ManifestStore>(
     };
     match metadata.get_manifest(&name, &reference).await {
         Ok(Some(_)) => OciAction::Update,
-        // Absent, or a lookup error we treat as absent: challenge/charge the
-        // lower tier. A genuine overwrite that slips through as Create is still
-        // gated by the create grant, and the manifest PUT itself revalidates.
-        _ => OciAction::Create,
+        Ok(None) => OciAction::Create,
+        // Lookup error: fail closed to the higher tier. We cannot prove the tag
+        // is absent, so challenge/charge Update rather than silently
+        // downgrading to Create. The write-time re-check in `put_manifest`
+        // enforces the same boundary against the committed state.
+        Err(_) => OciAction::Update,
     }
 }
 

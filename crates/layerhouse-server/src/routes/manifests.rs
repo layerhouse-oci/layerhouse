@@ -5,6 +5,8 @@ use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
+use crate::auth::permissions::OciAction;
+use crate::auth::token::AuthIdentity;
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
 use crate::oci::manifest;
@@ -162,6 +164,7 @@ async fn put_manifest<M: RegistryStore, B: BlobStore>(
     reference: &str,
     req: Request<Body>,
 ) -> Result<Response, LayerhouseError> {
+    let identity = req.extensions().get::<AuthIdentity>().cloned();
     let headers = req.headers().clone();
     let body = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
         .await
@@ -189,6 +192,30 @@ async fn put_manifest<M: RegistryStore, B: BlobStore>(
     for (i, result) in results.into_iter().enumerate() {
         if result.is_err() {
             return Err(LayerhouseError::ManifestBlobUnknown(digests[i].to_string()));
+        }
+    }
+
+    // Write-time action re-check. The middleware resolved Create vs Update from
+    // a metadata lookup *before* the body was read, leaving a TOCTOU window: a
+    // request challenged/authorized as Create can still race to overwrite an
+    // existing tag. Re-resolve existence here and, if this is an overwrite,
+    // require the Update tier against the caller's identity before committing.
+    // Skipped entirely when auth is disabled (no AuthService).
+    if let Some(auth) = state.auth.as_ref() {
+        let overwrite = state
+            .core
+            .metadata
+            .get_manifest(name, reference)
+            .await?
+            .is_some();
+        if overwrite {
+            let identity = identity.ok_or_else(|| LayerhouseError::Unauthorized {
+                message: "authentication required".to_string(),
+                realm: None,
+                service: None,
+                scope: None,
+            })?;
+            auth.check_permission(&identity, name, OciAction::Update)?;
         }
     }
 
@@ -246,7 +273,7 @@ async fn delete_manifest<M: RegistryStore, B: BlobStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::test_state;
+    use crate::routes::{test_state, test_state_with_auth};
     use crate::store::metadata::{
         MirrorConfigStore, OutboundProxy, ProxyCache, ProxyCacheTagValidation, WarmFilter,
     };
@@ -1011,5 +1038,121 @@ mod tests {
         .unwrap_or_else(|e| e.into_response());
         // DELETE is idempotent
         assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+    }
+
+    fn empty_manifest_put(
+        name: &str,
+        reference: &str,
+        identity: Option<AuthIdentity>,
+    ) -> Request<Body> {
+        let body = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{},"layers":[]}"#.to_vec();
+        let mut req = Request::builder()
+            .uri(format!("/v2/{}/manifests/{}", name, reference))
+            .method(Method::PUT)
+            .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            .body(Body::from(body))
+            .unwrap();
+        if let Some(identity) = identity {
+            req.extensions_mut().insert(identity);
+        }
+        req
+    }
+
+    fn identity_with_scopes(scopes: Vec<String>) -> AuthIdentity {
+        AuthIdentity {
+            subject: "user-1".to_string(),
+            username: Some("alice".to_string()),
+            display_name: None,
+            email: None,
+            groups: Vec::new(),
+            scopes,
+            token_type: crate::auth::token::TokenType::PersonalAccess,
+        }
+    }
+
+    // A create-only grant can push a brand-new tag, but the write-time re-check
+    // blocks the same identity from overwriting the now-existing tag — closing
+    // the TOCTOU window left by the middleware's pre-body action resolution.
+    #[tokio::test]
+    async fn put_manifest_overwrite_denied_without_update_grant() {
+        let state = test_state_with_auth(vec![]);
+        let create_only =
+            identity_with_scopes(vec!["repository:team-a/app:pull,create".to_string()]);
+
+        // First push: tag is absent, so this is a Create — allowed.
+        let response = dispatch(
+            state.clone(),
+            &Method::PUT,
+            "team-a/app",
+            "v1",
+            empty_manifest_put("team-a/app", "v1", Some(create_only.clone())),
+        )
+        .await
+        .unwrap_or_else(|e| e.into_response());
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+
+        // Second push: tag now exists, so this is an overwrite (Update) — the
+        // create-only grant must be rejected at write time.
+        let response = dispatch(
+            state.clone(),
+            &Method::PUT,
+            "team-a/app",
+            "v1",
+            empty_manifest_put("team-a/app", "v1", Some(create_only)),
+        )
+        .await
+        .unwrap_or_else(|e| e.into_response());
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    // An update-tier grant overwrites an existing tag successfully.
+    #[tokio::test]
+    async fn put_manifest_overwrite_allowed_with_update_grant() {
+        let state = test_state_with_auth(vec![]);
+        let updater =
+            identity_with_scopes(vec!["repository:team-a/app:pull,create,update".to_string()]);
+
+        let response = dispatch(
+            state.clone(),
+            &Method::PUT,
+            "team-a/app",
+            "v1",
+            empty_manifest_put("team-a/app", "v1", Some(updater.clone())),
+        )
+        .await
+        .unwrap_or_else(|e| e.into_response());
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+
+        let response = dispatch(
+            state,
+            &Method::PUT,
+            "team-a/app",
+            "v1",
+            empty_manifest_put("team-a/app", "v1", Some(updater)),
+        )
+        .await
+        .unwrap_or_else(|e| e.into_response());
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    }
+
+    // Personal namespace grants the full ladder, so overwrites are allowed
+    // without any explicit scope.
+    #[tokio::test]
+    async fn put_manifest_overwrite_allowed_in_personal_namespace() {
+        let state = test_state_with_auth(vec![]);
+        let owner = identity_with_scopes(Vec::new());
+
+        for _ in 0..2 {
+            let response = dispatch(
+                state.clone(),
+                &Method::PUT,
+                "users/alice/app",
+                "v1",
+                empty_manifest_put("users/alice/app", "v1", Some(owner.clone())),
+            )
+            .await
+            .unwrap_or_else(|e| e.into_response());
+            assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+        }
     }
 }

@@ -69,6 +69,29 @@ pub(crate) fn test_state() -> Arc<
     })
 }
 
+#[cfg(test)]
+pub(crate) fn test_state_with_auth(
+    permissions: Vec<crate::config::PermissionMapping>,
+) -> Arc<
+    AppState<crate::store::metadata::InMemoryMetadataStore, crate::store::blob::InMemoryBlobStore>,
+> {
+    Arc::new(AppState {
+        core: RegistryCore {
+            metadata: crate::store::metadata::InMemoryMetadataStore::default(),
+            blobs: crate::store::blob::InMemoryBlobStore::default(),
+            uploads: UploadTracker::default(),
+            upload_semaphore: tokio::sync::Semaphore::new(8),
+        },
+        mirror: MirrorManager::new(),
+        gc_status: Arc::new(tokio::sync::RwLock::new(crate::gc::GcStatus::default())),
+        raft: None,
+        raft_tls: None,
+        auth: Some(Arc::new(crate::auth::AuthService::for_test(permissions))),
+        server_tls_enabled: false,
+        cookie_secure_mode: CookieSecureMode::Disabled,
+    })
+}
+
 pub fn build_router<M: MetadataStore, B: BlobStore>(
     state: Arc<AppState<M, B>>,
     include_raft_status: bool,
