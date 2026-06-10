@@ -13,8 +13,8 @@ use openraft::TokioRuntime;
 use serde::{Deserialize, Serialize};
 
 use crate::store::metadata::{
-    BlobDeleteStatus, DeleteCounts, MirrorRule, PersonalAccessToken, ProxyCache, SyncJob,
-    SyncJobRun, WarmImage,
+    BlobDeleteStatus, DeleteCounts, MirrorRule, PersonalAccessToken, ProxyCache,
+    ProxyCacheTagValidation, SyncJob, SyncJobRun, WarmImage,
 };
 
 openraft::declare_raft_types!(
@@ -98,6 +98,7 @@ pub enum MirrorConfigRequest {
     PutProxyCache(ProxyCache),
     DeleteProxyCache { id: String },
     TriggerProxyCacheWarm { id: String },
+    PutProxyCacheTagValidation(ProxyCacheTagValidation),
     PutWarmImage(WarmImage),
     DeleteWarmImage { id: String },
 }

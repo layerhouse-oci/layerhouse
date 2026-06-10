@@ -18,8 +18,10 @@ use crate::oci::manifest::extract_referenced_digests;
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion,
     ManifestEntry, ManifestSummary, MirrorRule, PersonalAccessToken, ProxyCache, ReferrerEntry,
-    RepositorySummary, SyncJob, SyncJobKind, SyncJobRun, SyncJobStatus, WarmImage, mirror_rule_job,
-    now_epoch, proxy_cache_warm_job, sync_job_blocks_trigger,
+    RepositorySummary, SyncJob, SyncJobKind, SyncJobRun, SyncJobStatus, WarmImage,
+    clear_proxy_cache_tag_validations_for_cache, clear_proxy_cache_tag_validations_for_repository,
+    clear_proxy_cache_tag_validations_for_tag, get_proxy_cache_tag_validation, mirror_rule_job,
+    now_epoch, proxy_cache_warm_job, put_proxy_cache_tag_validation, sync_job_blocks_trigger,
 };
 
 const SNAPSHOT_VERSION: u32 = 4;
@@ -42,6 +44,8 @@ pub struct StateMachineData {
     pub mirror_rules: BTreeMap<String, MirrorRule>,
     #[serde(default)]
     pub proxy_caches: BTreeMap<String, ProxyCache>,
+    #[serde(default)]
+    pub proxy_cache_tag_validations: crate::store::metadata::ProxyCacheTagValidations,
     #[serde(default)]
     pub warm_images: BTreeMap<String, WarmImage>,
     #[serde(default)]
@@ -146,6 +150,11 @@ impl StateMachine {
 
                 let is_digest = reference.contains(':');
                 if !is_digest {
+                    clear_proxy_cache_tag_validations_for_tag(
+                        &mut data.proxy_cache_tag_validations,
+                        &name,
+                        &reference,
+                    );
                     data.tags
                         .entry(name)
                         .or_default()
@@ -162,8 +171,22 @@ impl StateMachine {
                 if let Some(entry) = removed.as_ref() {
                     data.decrement_blob_refs(entry);
                 }
+                let mut removed_tags = Vec::new();
                 if let Some(repo_tags) = data.tags.get_mut(&name) {
-                    repo_tags.retain(|_, d| *d != digest);
+                    repo_tags.retain(|tag, d| {
+                        let keep = *d != digest;
+                        if !keep {
+                            removed_tags.push(tag.clone());
+                        }
+                        keep
+                    });
+                }
+                for tag in removed_tags {
+                    clear_proxy_cache_tag_validations_for_tag(
+                        &mut data.proxy_cache_tag_validations,
+                        &name,
+                        &tag,
+                    );
                 }
                 ManifestResponse::Ok
             }
@@ -180,6 +203,13 @@ impl StateMachine {
                         }
                     })
                     .is_some();
+                if removed {
+                    clear_proxy_cache_tag_validations_for_tag(
+                        &mut data.proxy_cache_tag_validations,
+                        &name,
+                        &tag,
+                    );
+                }
                 ManifestResponse::Bool(removed)
             }
             ManifestRequest::DeleteRepository { name } => {
@@ -191,6 +221,10 @@ impl StateMachine {
                 }
                 let deleted_manifests = removed.map(|m| m.len()).unwrap_or(0);
                 let deleted_tags = data.tags.remove(&name).map(|t| t.len()).unwrap_or(0);
+                clear_proxy_cache_tag_validations_for_repository(
+                    &mut data.proxy_cache_tag_validations,
+                    &name,
+                );
                 ManifestResponse::DeleteCounts(DeleteCounts {
                     deleted_manifests,
                     deleted_tags,
@@ -212,10 +246,24 @@ impl StateMachine {
                 for entry in &removed {
                     data.decrement_blob_refs(entry);
                 }
+                let mut removed_tags = Vec::new();
                 if let Some(repo_tags) = data.tags.get_mut(&name) {
                     let before = repo_tags.len();
-                    repo_tags.retain(|_, digest| !digest_set.contains(digest));
+                    repo_tags.retain(|tag, digest| {
+                        let keep = !digest_set.contains(digest);
+                        if !keep {
+                            removed_tags.push(tag.clone());
+                        }
+                        keep
+                    });
                     deleted_tags = before.saturating_sub(repo_tags.len());
+                }
+                for tag in removed_tags {
+                    clear_proxy_cache_tag_validations_for_tag(
+                        &mut data.proxy_cache_tag_validations,
+                        &name,
+                        &tag,
+                    );
                 }
                 ManifestResponse::DeleteCounts(DeleteCounts {
                     deleted_manifests,
@@ -278,11 +326,19 @@ impl StateMachine {
                 MirrorConfigResponse::SyncJob(Some(job))
             }
             MirrorConfigRequest::PutProxyCache(cache) => {
+                clear_proxy_cache_tag_validations_for_cache(
+                    &mut data.proxy_cache_tag_validations,
+                    &cache.id,
+                );
                 data.proxy_caches.insert(cache.id.clone(), cache);
                 MirrorConfigResponse::Ok
             }
             MirrorConfigRequest::DeleteProxyCache { id } => {
                 data.proxy_caches.remove(&id);
+                clear_proxy_cache_tag_validations_for_cache(
+                    &mut data.proxy_cache_tag_validations,
+                    &id,
+                );
                 MirrorConfigResponse::Ok
             }
             MirrorConfigRequest::TriggerProxyCacheWarm { id } => {
@@ -300,6 +356,10 @@ impl StateMachine {
                 let job = proxy_cache_warm_job(&cache, now);
                 data.sync_jobs.insert(job.id.clone(), job.clone());
                 MirrorConfigResponse::SyncJob(Some(job))
+            }
+            MirrorConfigRequest::PutProxyCacheTagValidation(validation) => {
+                put_proxy_cache_tag_validation(&mut data.proxy_cache_tag_validations, validation);
+                MirrorConfigResponse::Ok
             }
             MirrorConfigRequest::PutWarmImage(image) => {
                 data.warm_images.insert(image.id.clone(), image);
@@ -735,6 +795,15 @@ impl StateMachineData {
         self.proxy_caches.get(id).cloned()
     }
 
+    pub fn get_proxy_cache_tag_validation(
+        &self,
+        cache_id: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Option<crate::store::metadata::ProxyCacheTagValidation> {
+        get_proxy_cache_tag_validation(&self.proxy_cache_tag_validations, cache_id, repository, tag)
+    }
+
     pub fn list_warm_images(&self) -> Vec<WarmImage> {
         self.warm_images.values().cloned().collect()
     }
@@ -1038,6 +1107,116 @@ mod tests {
             Response::Token(TokenResponse::Bool(true))
         ));
         assert!(data.list_personal_access_tokens("subject-a").is_empty());
+    }
+
+    fn proxy_cache(id: &str) -> ProxyCache {
+        ProxyCache {
+            id: id.to_string(),
+            local_prefix: "cache/app".to_string(),
+            upstream_registry: "registry.example".to_string(),
+            upstream_prefix: Some("upstream/app".to_string()),
+            warm_filters: vec![crate::store::metadata::WarmFilter::None],
+            warm_schedule: None,
+            plain_http: false,
+            insecure_tls: false,
+            outbound_proxy: crate::store::metadata::OutboundProxy::default(),
+            username: None,
+            password: None,
+            created_at: 1,
+        }
+    }
+
+    fn proxy_validation(
+        cache_id: &str,
+        repository: &str,
+        tag: &str,
+    ) -> crate::store::metadata::ProxyCacheTagValidation {
+        crate::store::metadata::ProxyCacheTagValidation {
+            cache_id: cache_id.to_string(),
+            repository: repository.to_string(),
+            tag: tag.to_string(),
+            upstream_digest: digest(70),
+            last_validated_at: 42,
+        }
+    }
+
+    #[test]
+    fn proxy_cache_tag_validation_persists_and_cache_cleanup_clears_it() {
+        let mut data = StateMachineData::default();
+
+        StateMachine::apply_request(
+            &mut data,
+            Request::MirrorConfig(MirrorConfigRequest::PutProxyCacheTagValidation(
+                proxy_validation("docker", "cache/app", "latest"),
+            )),
+        );
+        let found = data
+            .get_proxy_cache_tag_validation("docker", "cache/app", "latest")
+            .expect("validation should exist");
+        assert_eq!(found.last_validated_at, 42);
+
+        StateMachine::apply_request(
+            &mut data,
+            Request::MirrorConfig(MirrorConfigRequest::PutProxyCache(proxy_cache("docker"))),
+        );
+        assert!(
+            data.get_proxy_cache_tag_validation("docker", "cache/app", "latest")
+                .is_none()
+        );
+
+        StateMachine::apply_request(
+            &mut data,
+            Request::MirrorConfig(MirrorConfigRequest::PutProxyCacheTagValidation(
+                proxy_validation("docker", "cache/app", "latest"),
+            )),
+        );
+        StateMachine::apply_request(
+            &mut data,
+            Request::MirrorConfig(MirrorConfigRequest::DeleteProxyCache {
+                id: "docker".to_string(),
+            }),
+        );
+        assert!(
+            data.get_proxy_cache_tag_validation("docker", "cache/app", "latest")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn proxy_cache_tag_validation_is_cleared_by_manifest_deletes() {
+        let mut data = StateMachineData::default();
+        let manifest = digest(71);
+
+        StateMachine::apply_request(&mut data, put_manifest("latest", &manifest, &[]));
+        StateMachine::apply_request(
+            &mut data,
+            Request::MirrorConfig(MirrorConfigRequest::PutProxyCacheTagValidation(
+                proxy_validation("docker", "repo", "latest"),
+            )),
+        );
+        StateMachine::apply_request(
+            &mut data,
+            Request::Manifest(ManifestRequest::DeleteManifests {
+                name: "repo".to_string(),
+                digests: vec![manifest],
+            }),
+        );
+
+        assert!(
+            data.get_proxy_cache_tag_validation("docker", "repo", "latest")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn proxy_cache_tag_validations_default_when_restoring_snapshot_json() {
+        let data: StateMachineData = serde_json::from_value(serde_json::json!({
+            "manifests": {},
+            "tags": {}
+        }))
+        .expect("state machine data should deserialize");
+
+        assert!(data.proxy_cache_tag_validations.is_empty());
     }
 
     // ── Shared read tests against StateMachineData ────────────────────

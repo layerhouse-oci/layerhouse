@@ -17,8 +17,8 @@ use crate::raft::network;
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion, HelmStore,
     JobStore, ManifestEntry, ManifestStore, ManifestSummary, MirrorConfigStore, MirrorRule,
-    PersonalAccessToken, ProxyCache, ReferrerEntry, RepositorySummary, SyncJob, SyncJobRun,
-    TokenStore, WarmImage,
+    PersonalAccessToken, ProxyCache, ProxyCacheTagValidation, ReferrerEntry, RepositorySummary,
+    SyncJob, SyncJobRun, TokenStore, WarmImage,
 };
 
 const FOLLOWER_READ_LAG_THRESHOLD: u64 = 100;
@@ -439,6 +439,26 @@ impl MirrorConfigStore for RaftMetadataStore {
             )),
             _ => Ok(None),
         }
+    }
+
+    async fn get_proxy_cache_tag_validation(
+        &self,
+        cache_id: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<Option<ProxyCacheTagValidation>, LayerhouseError> {
+        self.emit_read_metrics("get_proxy_cache_tag_validation");
+        let state = self.state.read().await;
+        Ok(state.get_proxy_cache_tag_validation(cache_id, repository, tag))
+    }
+
+    async fn put_proxy_cache_tag_validation(
+        &self,
+        validation: ProxyCacheTagValidation,
+    ) -> Result<(), LayerhouseError> {
+        self.write_mirror_config(MirrorConfigRequest::PutProxyCacheTagValidation(validation))
+            .await?;
+        Ok(())
     }
 
     async fn list_warm_images(&self) -> Result<Vec<WarmImage>, LayerhouseError> {

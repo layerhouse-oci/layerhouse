@@ -239,16 +239,41 @@ dashboard surfaces.
 1. Create proxy cache rule.
 2. Pull an uncached manifest through the local prefix.
 3. Pull the same manifest again.
-4. Trigger Warm now.
+4. Force the cached tag validation record older than 24 hours and pull the tag
+   again with unchanged upstream content.
+5. Change the upstream tag digest and pull the stale cached tag again.
+6. Make upstream validation fail and pull a stale cached tag.
+7. Pull the cached manifest by digest.
+8. Trigger Warm now.
 
 **Expected**:
 - First pull fetches upstream, stores locally, and serves content.
-- Second pull serves local cached content.
+- Repeated tag pulls inside the 24-hour validation window serve local cached
+  content without contacting upstream.
+- Stale cached tag pulls validate upstream with `HEAD`; unchanged upstream
+  content refreshes validation metadata without downloading the manifest again.
+- If the upstream tag digest changed, the proxy cache downloads and stores the
+  new manifest before serving it.
+- If upstream validation or update fails while a local tag exists, the last
+  cached manifest is served and the validation remains due.
+- Literal `latest` is not special; every non-digest tag follows the same
+  ECR-style validation rule.
+- Digest pulls bypass tag validation and serve immutable local content when
+  present.
 - Cache key is manifest digest.
 - Blob storage uses shared S3.
 - Warm now calls `POST /api/v1/admin/proxy-cache/{id}/warm`.
 - Warm filters resolve to concrete upstream tag names before pulling manifests.
 - Automated coverage includes scheduled proxy-cache warm job construction.
+- Focused automated validation from `layerhouse/` uses one Cargo test filter per
+  command:
+
+  ```bash
+  cargo test -p layerhouse-server mirror::
+  cargo test -p layerhouse-server routes::manifests::
+  cargo test -p layerhouse-server store::metadata::
+  cargo test -p layerhouse-server raft::state_machine::
+  ```
 
 ### P5. Proxy Cache Delete Modal
 

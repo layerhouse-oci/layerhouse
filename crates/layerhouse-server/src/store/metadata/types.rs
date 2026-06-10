@@ -297,6 +297,76 @@ pub struct ProxyCache {
     pub created_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyCacheTagValidation {
+    pub cache_id: String,
+    pub repository: String,
+    pub tag: String,
+    pub upstream_digest: String,
+    pub last_validated_at: u64,
+}
+
+pub type ProxyCacheTagValidations =
+    BTreeMap<String, BTreeMap<String, BTreeMap<String, ProxyCacheTagValidation>>>;
+
+pub(crate) fn get_proxy_cache_tag_validation(
+    validations: &ProxyCacheTagValidations,
+    cache_id: &str,
+    repository: &str,
+    tag: &str,
+) -> Option<ProxyCacheTagValidation> {
+    validations
+        .get(cache_id)?
+        .get(repository)?
+        .get(tag)
+        .cloned()
+}
+
+pub(crate) fn put_proxy_cache_tag_validation(
+    validations: &mut ProxyCacheTagValidations,
+    validation: ProxyCacheTagValidation,
+) {
+    validations
+        .entry(validation.cache_id.clone())
+        .or_default()
+        .entry(validation.repository.clone())
+        .or_default()
+        .insert(validation.tag.clone(), validation);
+}
+
+pub(crate) fn clear_proxy_cache_tag_validations_for_cache(
+    validations: &mut ProxyCacheTagValidations,
+    cache_id: &str,
+) {
+    validations.remove(cache_id);
+}
+
+pub(crate) fn clear_proxy_cache_tag_validations_for_repository(
+    validations: &mut ProxyCacheTagValidations,
+    repository: &str,
+) {
+    validations.retain(|_, repos| {
+        repos.remove(repository);
+        !repos.is_empty()
+    });
+}
+
+pub(crate) fn clear_proxy_cache_tag_validations_for_tag(
+    validations: &mut ProxyCacheTagValidations,
+    repository: &str,
+    tag: &str,
+) {
+    validations.retain(|_, repos| {
+        if let Some(tags) = repos.get_mut(repository) {
+            tags.remove(tag);
+            if tags.is_empty() {
+                repos.remove(repository);
+            }
+        }
+        !repos.is_empty()
+    });
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyCachePublic {
     pub id: String,

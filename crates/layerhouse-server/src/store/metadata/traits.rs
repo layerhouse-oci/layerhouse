@@ -108,6 +108,16 @@ pub trait MirrorConfigStore: Send + Sync + 'static {
     async fn put_proxy_cache(&self, cache: ProxyCache) -> Result<(), LayerhouseError>;
     async fn delete_proxy_cache(&self, id: &str) -> Result<(), LayerhouseError>;
     async fn trigger_proxy_cache_warm(&self, id: &str) -> Result<Option<SyncJob>, LayerhouseError>;
+    async fn get_proxy_cache_tag_validation(
+        &self,
+        cache_id: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<Option<ProxyCacheTagValidation>, LayerhouseError>;
+    async fn put_proxy_cache_tag_validation(
+        &self,
+        validation: ProxyCacheTagValidation,
+    ) -> Result<(), LayerhouseError>;
 
     // Warm image CRUD
     async fn list_warm_images(&self) -> Result<Vec<WarmImage>, LayerhouseError>;

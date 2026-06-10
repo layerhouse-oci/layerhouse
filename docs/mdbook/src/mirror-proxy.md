@@ -48,6 +48,33 @@ upstream_registry = "docker.io"
 warm_filters = [{ type = "all" }]
 ```
 
+### Tag Validation
+
+Proxy-cache tag validation follows Amazon ECR pull-through cache behavior:
+
+- A cached non-digest tag is validated against upstream at most once per
+  24-hour window.
+- Pulls inside the validation window serve the local cached manifest without
+  contacting upstream.
+- When the validation window expires, layerhouse sends an upstream `HEAD`.
+  If the upstream digest is unchanged, layerhouse refreshes only the validation
+  timestamp and serves the cached manifest.
+- If the upstream digest changed, layerhouse fetches and stores the new manifest,
+  updates the local tag mapping, records the new validation timestamp, and serves
+  the new manifest.
+- If upstream validation or refresh fails while a local cached tag exists,
+  layerhouse serves the last cached manifest and leaves validation due for the
+  next pull.
+
+This policy applies to every non-digest tag reference. The literal tag `latest`
+is not special. Digest references are immutable and bypass proxy-cache tag
+validation, serving local content when present.
+
+The 24-hour interval is fixed for now and has no public admin API or config
+field. ECR's referrer artifact refresh cadence is not implemented by this
+policy. Scheduled mirror rules remain schedule-driven; proxy-cache tag
+validation affects only pull-through cache reads.
+
 ## Warm-Up
 
 Proxy caches support warm-up — pre-fetching images on a schedule before clients request

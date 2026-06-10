@@ -81,7 +81,20 @@ async fn resolve_manifest_for_response<M: RegistryStore, B: BlobStore>(
     include_body: bool,
 ) -> Result<ManifestResponseParts, LayerhouseError> {
     match state.core.metadata.get_manifest(name, reference).await? {
-        Some(entry) => Ok(ManifestResponseParts::from_entry(entry, include_body)),
+        Some(entry) => {
+            if let Some(validated) = Box::pin(state.mirror.validate_cached_proxy_tag(
+                name,
+                reference,
+                entry.clone(),
+                &state.core.metadata,
+                &state.core.blobs,
+            ))
+            .await?
+            {
+                return Ok(ManifestResponseParts::from_entry(validated, include_body));
+            }
+            Ok(ManifestResponseParts::from_entry(entry, include_body))
+        }
         None if include_body => {
             let pulled = Box::pin(state.mirror.pull_manifest_lazy(
                 name,
@@ -234,14 +247,17 @@ async fn delete_manifest<M: RegistryStore, B: BlobStore>(
 mod tests {
     use super::*;
     use crate::routes::test_state;
-    use crate::store::metadata::{MirrorConfigStore, OutboundProxy, ProxyCache, WarmFilter};
+    use crate::store::metadata::{
+        MirrorConfigStore, OutboundProxy, ProxyCache, ProxyCacheTagValidation, WarmFilter,
+    };
     use axum::body::Body;
     use axum::extract::State;
     use axum::http::{HeaderValue, Method, Request, StatusCode, header};
     use axum::response::IntoResponse;
     use axum::routing::get;
     use bytes::Bytes;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn request(method: Method, reference: &str) -> Request<Body> {
         Request::builder()
@@ -433,6 +449,119 @@ mod tests {
         (addr.to_string(), capture)
     }
 
+    #[derive(Clone)]
+    struct MutableManifestCapture {
+        body: Arc<StdMutex<Bytes>>,
+        head_fails: Arc<AtomicBool>,
+        get_fails: Arc<AtomicBool>,
+        heads: Arc<AtomicUsize>,
+        gets: Arc<AtomicUsize>,
+    }
+
+    impl MutableManifestCapture {
+        fn new(body: Bytes) -> Self {
+            Self {
+                body: Arc::new(StdMutex::new(body)),
+                head_fails: Arc::new(AtomicBool::new(false)),
+                get_fails: Arc::new(AtomicBool::new(false)),
+                heads: Arc::new(AtomicUsize::new(0)),
+                gets: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn set_body(&self, body: Bytes) {
+            *self.body.lock().expect("mutable manifest lock") = body;
+        }
+
+        fn body(&self) -> Bytes {
+            self.body.lock().expect("mutable manifest lock").clone()
+        }
+
+        fn digest(&self) -> String {
+            Digest::sha256(&self.body()).to_string()
+        }
+
+        fn reset_counts(&self) {
+            self.heads.store(0, Ordering::SeqCst);
+            self.gets.store(0, Ordering::SeqCst);
+        }
+    }
+
+    fn tiny_manifest_body(label: &str) -> Bytes {
+        Bytes::from(format!(
+            r#"{{
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {{
+                    "mediaType": "application/vnd.oci.empty.v1+json",
+                    "digest": "sha256:{:064x}",
+                    "size": 2
+                }},
+                "layers": [],
+                "annotations": {{ "test.label": "{}" }}
+            }}"#,
+            label.bytes().map(u64::from).sum::<u64>(),
+            label
+        ))
+    }
+
+    fn mutable_manifest_response(
+        status: StatusCode,
+        body: Option<Bytes>,
+        digest: &str,
+    ) -> Response {
+        let content_length = body.as_ref().map(|body| body.len()).unwrap_or(0);
+        manifest_response(
+            status,
+            body,
+            Some(digest),
+            "application/vnd.oci.image.manifest.v1+json",
+            content_length,
+        )
+    }
+
+    async fn start_mutable_manifest_registry() -> (String, MutableManifestCapture) {
+        let capture = MutableManifestCapture::new(tiny_manifest_body("v1"));
+        let app = axum::Router::new()
+            .route("/v2/", get(|| async { StatusCode::OK }))
+            .route(
+                "/v2/upstream/app/manifests/{reference}",
+                get(|State(capture): State<MutableManifestCapture>| async move {
+                    capture.gets.fetch_add(1, Ordering::SeqCst);
+                    if capture.get_fails.load(Ordering::SeqCst) {
+                        return StatusCode::BAD_GATEWAY.into_response();
+                    }
+                    let body = capture.body();
+                    let digest = Digest::sha256(&body).to_string();
+                    mutable_manifest_response(StatusCode::OK, Some(body), &digest)
+                })
+                .head(
+                    |State(capture): State<MutableManifestCapture>| async move {
+                        capture.heads.fetch_add(1, Ordering::SeqCst);
+                        if capture.head_fails.load(Ordering::SeqCst) {
+                            return StatusCode::BAD_GATEWAY.into_response();
+                        }
+                        let body = capture.body();
+                        let digest = Digest::sha256(&body).to_string();
+                        mutable_manifest_response(StatusCode::OK, None, &digest)
+                    },
+                ),
+            )
+            .with_state(capture.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mutable registry");
+        let addr = listener.local_addr().expect("mutable registry addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mutable registry");
+        });
+
+        (addr.to_string(), capture)
+    }
+
     type TestAppState = Arc<
         crate::routes::AppState<
             crate::store::metadata::InMemoryMetadataStore,
@@ -550,6 +679,56 @@ mod tests {
         assert_eq!(capture.blob_gets.load(Ordering::SeqCst), 1);
     }
 
+    async fn get_manifest_response(state: TestAppState, name: &str, reference: &str) -> Response {
+        dispatch(
+            state,
+            &Method::GET,
+            name,
+            reference,
+            manifest_request(Method::GET, name, reference),
+        )
+        .await
+        .unwrap_or_else(|e| e.into_response())
+    }
+
+    async fn head_manifest_response(state: TestAppState, name: &str, reference: &str) -> Response {
+        dispatch(
+            state,
+            &Method::HEAD,
+            name,
+            reference,
+            manifest_request(Method::HEAD, name, reference),
+        )
+        .await
+        .unwrap_or_else(|e| e.into_response())
+    }
+
+    async fn response_body(response: Response) -> Bytes {
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("response body")
+    }
+
+    async fn seed_stale_proxy_validation(
+        state: &TestAppState,
+        name: &str,
+        tag: &str,
+        upstream_digest: String,
+    ) {
+        state
+            .core
+            .metadata
+            .put_proxy_cache_tag_validation(ProxyCacheTagValidation {
+                cache_id: "docker".to_string(),
+                repository: name.to_string(),
+                tag: tag.to_string(),
+                upstream_digest,
+                last_validated_at: 1,
+            })
+            .await
+            .expect("seed stale proxy validation");
+    }
+
     #[tokio::test]
     async fn get_nonexistent_manifest_returns_404() {
         let state = test_state();
@@ -640,6 +819,140 @@ mod tests {
         assert_child_get(state.clone(), capture.clone(), name).await;
         assert_blob_head(state.clone(), capture.clone(), name).await;
         assert_blob_get(state, capture, name).await;
+    }
+
+    #[tokio::test]
+    async fn proxy_cache_fresh_tag_validation_serves_cached_manifest() {
+        let (registry, capture) = start_mutable_manifest_registry().await;
+        let state = test_state();
+        put_docker_proxy_cache(&state, registry).await;
+        let name = "mirror/docker/upstream/app";
+
+        let first = get_manifest_response(state.clone(), name, "stable").await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(response_body(first).await, tiny_manifest_body("v1"));
+        assert!(capture.heads.load(Ordering::SeqCst) >= 1);
+        assert_eq!(capture.gets.load(Ordering::SeqCst), 1);
+
+        capture.reset_counts();
+        let second = get_manifest_response(state.clone(), name, "stable").await;
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(response_body(second).await, tiny_manifest_body("v1"));
+        let head = head_manifest_response(state, name, "stable").await;
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(response_body(head).await.is_empty());
+        assert_eq!(capture.heads.load(Ordering::SeqCst), 0);
+        assert_eq!(capture.gets.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn proxy_cache_stale_validation_same_digest_updates_timestamp_with_head_only() {
+        let (registry, capture) = start_mutable_manifest_registry().await;
+        let state = test_state();
+        put_docker_proxy_cache(&state, registry).await;
+        let name = "mirror/docker/upstream/app";
+
+        let first = get_manifest_response(state.clone(), name, "stable").await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let digest = capture.digest();
+        seed_stale_proxy_validation(&state, name, "stable", digest.clone()).await;
+
+        capture.reset_counts();
+        let second = get_manifest_response(state.clone(), name, "stable").await;
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(response_body(second).await, tiny_manifest_body("v1"));
+        assert!(capture.heads.load(Ordering::SeqCst) >= 1);
+        assert_eq!(capture.gets.load(Ordering::SeqCst), 0);
+
+        let validation = state
+            .core
+            .metadata
+            .get_proxy_cache_tag_validation("docker", name, "stable")
+            .await
+            .expect("validation lookup")
+            .expect("validation should be stored");
+        assert_eq!(validation.upstream_digest, digest);
+        assert!(validation.last_validated_at > 1);
+    }
+
+    #[tokio::test]
+    async fn proxy_cache_stale_validation_changed_digest_refreshes_manifest() {
+        let (registry, capture) = start_mutable_manifest_registry().await;
+        let state = test_state();
+        put_docker_proxy_cache(&state, registry).await;
+        let name = "mirror/docker/upstream/app";
+
+        let first = get_manifest_response(state.clone(), name, "latest").await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let old_digest = capture.digest();
+        seed_stale_proxy_validation(&state, name, "latest", old_digest).await;
+        capture.set_body(tiny_manifest_body("v2"));
+
+        capture.reset_counts();
+        let second = get_manifest_response(state.clone(), name, "latest").await;
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(response_body(second).await, tiny_manifest_body("v2"));
+        assert_eq!(capture.heads.load(Ordering::SeqCst), 1);
+        assert_eq!(capture.gets.load(Ordering::SeqCst), 1);
+
+        let validation = state
+            .core
+            .metadata
+            .get_proxy_cache_tag_validation("docker", name, "latest")
+            .await
+            .expect("validation lookup")
+            .expect("validation should be stored");
+        assert_eq!(validation.upstream_digest, capture.digest());
+    }
+
+    #[tokio::test]
+    async fn proxy_cache_stale_validation_failure_serves_cached_manifest() {
+        let (registry, capture) = start_mutable_manifest_registry().await;
+        let state = test_state();
+        put_docker_proxy_cache(&state, registry).await;
+        let name = "mirror/docker/upstream/app";
+
+        let first = get_manifest_response(state.clone(), name, "latest").await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let old_digest = capture.digest();
+        seed_stale_proxy_validation(&state, name, "latest", old_digest).await;
+        capture.set_body(tiny_manifest_body("v2"));
+        capture.head_fails.store(true, Ordering::SeqCst);
+
+        capture.reset_counts();
+        let second = get_manifest_response(state.clone(), name, "latest").await;
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(response_body(second).await, tiny_manifest_body("v1"));
+        assert!(capture.heads.load(Ordering::SeqCst) >= 1);
+        assert_eq!(capture.gets.load(Ordering::SeqCst), 0);
+
+        let validation = state
+            .core
+            .metadata
+            .get_proxy_cache_tag_validation("docker", name, "latest")
+            .await
+            .expect("validation lookup")
+            .expect("stale validation should remain");
+        assert_eq!(validation.last_validated_at, 1);
+    }
+
+    #[tokio::test]
+    async fn proxy_cache_digest_reference_bypasses_tag_validation() {
+        let (registry, capture) = start_mutable_manifest_registry().await;
+        let state = test_state();
+        put_docker_proxy_cache(&state, registry).await;
+        let name = "mirror/docker/upstream/app";
+
+        let first = get_manifest_response(state.clone(), name, "latest").await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let digest = capture.digest();
+
+        capture.reset_counts();
+        let by_digest = get_manifest_response(state, name, &digest).await;
+        assert_eq!(by_digest.status(), StatusCode::OK);
+        assert_eq!(response_body(by_digest).await, tiny_manifest_body("v1"));
+        assert_eq!(capture.heads.load(Ordering::SeqCst), 0);
+        assert_eq!(capture.gets.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

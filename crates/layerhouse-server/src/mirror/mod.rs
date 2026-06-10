@@ -16,7 +16,7 @@ use crate::store::blob::BlobStore;
 #[allow(unused_imports)]
 use crate::store::metadata::{
     ManifestEntry, ManifestStore, MirrorConfigStore, MirrorDirection, MirrorRule, MirrorStrategy,
-    ProxyCache, RegistryStore, WarmFilter, now_epoch,
+    ProxyCache, ProxyCacheTagValidation, RegistryStore, WarmFilter, now_epoch,
 };
 
 use client::{
@@ -25,6 +25,7 @@ use client::{
 };
 
 const RULES_CACHE_TTL_SECS: u64 = 30;
+const PROXY_CACHE_TAG_VALIDATION_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Clone, Copy)]
 enum PullMode {
@@ -39,6 +40,50 @@ impl PullMode {
             Self::Lazy => "lazy",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ProxyCacheValidationTarget {
+    cache_id: String,
+    repository: String,
+    tag: String,
+}
+
+impl ProxyCacheValidationTarget {
+    fn for_reference(cache_id: String, repository: &str, reference: &str) -> Option<Self> {
+        if is_digest_reference(reference) {
+            return None;
+        }
+        Some(Self {
+            cache_id,
+            repository: repository.to_string(),
+            tag: reference.to_string(),
+        })
+    }
+}
+
+struct PullContext<'a, M, B> {
+    repo_name: &'a str,
+    reference: &'a str,
+    upstream: &'a UpstreamRef,
+    metadata: &'a M,
+    blobs: &'a B,
+    mode: PullMode,
+    validation_target: Option<&'a ProxyCacheValidationTarget>,
+}
+
+fn is_digest_reference(reference: &str) -> bool {
+    Digest::from_str_checked(reference).is_some()
+}
+
+fn proxy_cache_tag_validation_is_fresh(
+    validation: &ProxyCacheTagValidation,
+    local_digest: &str,
+    now: u64,
+) -> bool {
+    validation.upstream_digest == local_digest
+        && now.saturating_sub(validation.last_validated_at)
+            < PROXY_CACHE_TAG_VALIDATION_INTERVAL_SECS
 }
 
 pub struct ResolvedMirrorJob {
@@ -525,6 +570,124 @@ impl MirrorManager {
             .await
     }
 
+    pub async fn validate_cached_proxy_tag<M: RegistryStore, B: BlobStore>(
+        &self,
+        repo_name: &str,
+        reference: &str,
+        local: ManifestEntry,
+        metadata: &M,
+        blobs: &B,
+    ) -> Result<Option<ManifestEntry>, LayerhouseError> {
+        let caches = self.get_proxy_caches(metadata).await?;
+        let Some((cache, upstream_repo)) = Self::match_proxy_cache(&caches, repo_name) else {
+            return Ok(None);
+        };
+        let Some(validation_target) =
+            ProxyCacheValidationTarget::for_reference(cache.id.clone(), repo_name, reference)
+        else {
+            return Ok(None);
+        };
+
+        let local_digest = local.digest.to_string();
+        if let Some(validation) = metadata
+            .get_proxy_cache_tag_validation(&cache.id, repo_name, reference)
+            .await?
+            && proxy_cache_tag_validation_is_fresh(&validation, &local_digest, now_epoch())
+        {
+            return Ok(Some(local));
+        }
+
+        let dedup_key = format!(
+            "proxy-cache:validate:{}:{}:{}",
+            validation_target.cache_id, repo_name, reference
+        );
+
+        {
+            let mut inflight = self.inflight.lock().await;
+            if let Some(notify) = inflight.get(&dedup_key) {
+                let notify = notify.clone();
+                drop(inflight);
+                notify.notified().await;
+                return Ok(Some(
+                    metadata
+                        .get_manifest(repo_name, reference)
+                        .await?
+                        .unwrap_or(local),
+                ));
+            }
+            let notify = Arc::new(tokio::sync::Notify::new());
+            inflight.insert(dedup_key.clone(), notify);
+        }
+
+        let upstream = Self::make_proxy_upstream_ref(cache, &upstream_repo);
+        let ctx = PullContext {
+            repo_name,
+            reference,
+            upstream: &upstream,
+            metadata,
+            blobs,
+            mode: PullMode::Lazy,
+            validation_target: Some(&validation_target),
+        };
+        let result = self
+            .validate_cached_proxy_tag_inner(local.clone(), ctx)
+            .await;
+
+        let notify = self.inflight.lock().await.remove(&dedup_key);
+        if let Some(notify) = notify {
+            notify.notify_waiters();
+        }
+
+        match result {
+            Ok(entry) => Ok(Some(entry)),
+            Err(err) => {
+                tracing::warn!(
+                    "proxy cache validation failed for {}:{}; serving stale cached manifest: {}",
+                    repo_name,
+                    reference,
+                    err
+                );
+                Ok(Some(
+                    metadata
+                        .get_manifest(repo_name, reference)
+                        .await?
+                        .unwrap_or(local),
+                ))
+            }
+        }
+    }
+
+    async fn validate_cached_proxy_tag_inner<M: RegistryStore, B: BlobStore>(
+        &self,
+        local: ManifestEntry,
+        ctx: PullContext<'_, M, B>,
+    ) -> Result<ManifestEntry, LayerhouseError> {
+        self.client.ensure_auth(ctx.upstream).await?;
+        let upstream_head = self
+            .client
+            .head_manifest(ctx.upstream, ctx.reference)
+            .await?;
+        let Some(upstream_head) = upstream_head else {
+            return Err(LayerhouseError::ManifestUnknown(ctx.reference.to_string()));
+        };
+
+        if local.digest.to_string() == upstream_head.digest {
+            if let Some(validation_target) = ctx.validation_target {
+                self.record_proxy_cache_tag_validation(
+                    ctx.metadata,
+                    validation_target,
+                    &upstream_head.digest,
+                )
+                .await?;
+            }
+            return Ok(local);
+        }
+
+        let refreshed = self.do_pull_after_head(&ctx, upstream_head).await?;
+
+        refreshed.ok_or_else(|| LayerhouseError::ManifestUnknown(ctx.reference.to_string()))
+    }
+
     async fn pull_manifest_with_mode<M: RegistryStore, B: BlobStore>(
         &self,
         repo_name: &str,
@@ -586,9 +749,18 @@ impl MirrorManager {
         }
 
         let upstream = Self::make_proxy_upstream_ref(cache, &upstream_repo);
-        let result = self
-            .do_pull(repo_name, reference, &upstream, metadata, blobs, mode)
-            .await;
+        let validation_target =
+            ProxyCacheValidationTarget::for_reference(cache.id.clone(), repo_name, reference);
+        let ctx = PullContext {
+            repo_name,
+            reference,
+            upstream: &upstream,
+            metadata,
+            blobs,
+            mode,
+            validation_target: validation_target.as_ref(),
+        };
+        let result = self.do_pull(ctx).await;
 
         let notify = self.inflight.lock().await.remove(&dedup_key);
         if let Some(notify) = notify {
@@ -631,9 +803,16 @@ impl MirrorManager {
         }
 
         let upstream = Self::make_upstream_ref(rule, &upstream_repo);
-        let result = self
-            .do_pull(repo_name, reference, &upstream, metadata, blobs, mode)
-            .await;
+        let ctx = PullContext {
+            repo_name,
+            reference,
+            upstream: &upstream,
+            metadata,
+            blobs,
+            mode,
+            validation_target: None,
+        };
+        let result = self.do_pull(ctx).await;
 
         let notify = self.inflight.lock().await.remove(&dedup_key);
         if let Some(notify) = notify {
@@ -767,72 +946,128 @@ impl MirrorManager {
 
     async fn do_pull<M: RegistryStore, B: BlobStore>(
         &self,
-        repo_name: &str,
-        reference: &str,
-        upstream: &UpstreamRef,
-        metadata: &M,
-        blobs: &B,
-        mode: PullMode,
+        ctx: PullContext<'_, M, B>,
     ) -> Result<Option<ManifestEntry>, LayerhouseError> {
-        self.client.ensure_auth(upstream).await?;
+        self.client.ensure_auth(ctx.upstream).await?;
 
-        let upstream_head = self.client.head_manifest(upstream, reference).await?;
+        let upstream_head = self
+            .client
+            .head_manifest(ctx.upstream, ctx.reference)
+            .await?;
         let Some(upstream_head) = upstream_head else {
             tracing::warn!(
                 "upstream manifest not found: {}/{}:{} ({}://{}/v2/{}/manifests/{})",
-                upstream.registry,
-                upstream.repository,
-                reference,
-                upstream.scheme,
-                upstream.registry,
-                upstream.repository,
-                reference,
+                ctx.upstream.registry,
+                ctx.upstream.repository,
+                ctx.reference,
+                ctx.upstream.scheme,
+                ctx.upstream.registry,
+                ctx.upstream.repository,
+                ctx.reference,
             );
             return Ok(None);
         };
 
-        if let Ok(Some(local)) = metadata.get_manifest(repo_name, reference).await
+        self.do_pull_after_head(&ctx, upstream_head).await
+    }
+
+    async fn do_pull_after_head<M: RegistryStore, B: BlobStore>(
+        &self,
+        ctx: &PullContext<'_, M, B>,
+        upstream_head: client::ManifestHead,
+    ) -> Result<Option<ManifestEntry>, LayerhouseError> {
+        if let Ok(Some(local)) = ctx
+            .metadata
+            .get_manifest(ctx.repo_name, ctx.reference)
+            .await
             && local.digest.to_string() == upstream_head.digest
         {
-            if let PullMode::Eager = mode {
+            if let PullMode::Eager = ctx.mode {
                 let manifest_data = client::ManifestData {
                     body: local.body.clone(),
                     content_type: local.content_type.clone(),
                     digest: local.digest.to_string(),
                 };
                 self.store_manifest_recursive(
-                    repo_name,
-                    reference,
+                    ctx.repo_name,
+                    ctx.reference,
                     &manifest_data,
-                    upstream,
-                    metadata,
-                    blobs,
+                    ctx.upstream,
+                    ctx.metadata,
+                    ctx.blobs,
+                )
+                .await?;
+            }
+            if let Some(validation_target) = ctx.validation_target {
+                self.record_proxy_cache_tag_validation(
+                    ctx.metadata,
+                    validation_target,
+                    &upstream_head.digest,
                 )
                 .await?;
             }
             return Ok(Some(local));
         }
 
-        let manifest_data = self.client.get_manifest(upstream, reference).await?;
-        match mode {
+        let manifest_data = self
+            .client
+            .get_manifest(ctx.upstream, ctx.reference)
+            .await?;
+        match ctx.mode {
             PullMode::Eager => {
                 self.store_manifest_recursive(
-                    repo_name,
-                    reference,
+                    ctx.repo_name,
+                    ctx.reference,
                     &manifest_data,
-                    upstream,
-                    metadata,
-                    blobs,
+                    ctx.upstream,
+                    ctx.metadata,
+                    ctx.blobs,
                 )
                 .await?;
             }
             PullMode::Lazy => {
-                self.store_manifest_only(repo_name, reference, &manifest_data, metadata)
-                    .await?;
+                self.store_manifest_only(
+                    ctx.repo_name,
+                    ctx.reference,
+                    &manifest_data,
+                    ctx.metadata,
+                )
+                .await?;
             }
         }
 
-        metadata.get_manifest(repo_name, reference).await
+        let entry = ctx
+            .metadata
+            .get_manifest(ctx.repo_name, ctx.reference)
+            .await?;
+        if let Some(validation_target) = ctx.validation_target
+            && entry.is_some()
+        {
+            self.record_proxy_cache_tag_validation(
+                ctx.metadata,
+                validation_target,
+                &upstream_head.digest,
+            )
+            .await?;
+        }
+        Ok(entry)
+    }
+
+    async fn record_proxy_cache_tag_validation<M: MirrorConfigStore>(
+        &self,
+        metadata: &M,
+        target: &ProxyCacheValidationTarget,
+        upstream_digest: &str,
+    ) -> Result<(), LayerhouseError> {
+        metadata
+            .put_proxy_cache_tag_validation(ProxyCacheTagValidation {
+                cache_id: target.cache_id.clone(),
+                repository: target.repository.clone(),
+                tag: target.tag.clone(),
+                upstream_digest: upstream_digest.to_string(),
+                last_validated_at: now_epoch(),
+            })
+            .await
     }
 
     async fn store_manifest_only<M: ManifestStore>(

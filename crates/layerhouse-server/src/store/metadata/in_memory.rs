@@ -21,6 +21,7 @@ struct InMemoryState {
     blob_delete_requests: BTreeMap<String, u64>,
     mirror_rules: BTreeMap<String, MirrorRule>,
     proxy_caches: BTreeMap<String, ProxyCache>,
+    proxy_cache_tag_validations: ProxyCacheTagValidations,
     warm_images: BTreeMap<String, WarmImage>,
     sync_jobs: BTreeMap<String, SyncJob>,
     sync_job_runs: BTreeMap<String, Vec<SyncJobRun>>,
@@ -108,6 +109,11 @@ impl ManifestStore for InMemoryMetadataStore {
 
         let is_digest = reference.contains(':');
         if !is_digest {
+            clear_proxy_cache_tag_validations_for_tag(
+                &mut state.proxy_cache_tag_validations,
+                name,
+                reference,
+            );
             state
                 .tags
                 .entry(name.to_string())
@@ -128,8 +134,22 @@ impl ManifestStore for InMemoryMetadataStore {
             state.decrement_blob_refs(&entry);
         }
 
+        let mut removed_tags = Vec::new();
         if let Some(repo_tags) = state.tags.get_mut(name) {
-            repo_tags.retain(|_, d| d.to_string() != digest_str);
+            repo_tags.retain(|tag, d| {
+                let keep = d.to_string() != digest_str;
+                if !keep {
+                    removed_tags.push(tag.clone());
+                }
+                keep
+            });
+        }
+        for tag in removed_tags {
+            clear_proxy_cache_tag_validations_for_tag(
+                &mut state.proxy_cache_tag_validations,
+                name,
+                &tag,
+            );
         }
 
         Ok(())
@@ -247,6 +267,11 @@ impl ManifestStore for InMemoryMetadataStore {
             .unwrap_or(false);
         if matches {
             repo_tags.remove(tag);
+            clear_proxy_cache_tag_validations_for_tag(
+                &mut state.proxy_cache_tag_validations,
+                name,
+                tag,
+            );
             Ok(true)
         } else {
             Ok(false)
@@ -263,6 +288,10 @@ impl ManifestStore for InMemoryMetadataStore {
         }
         let deleted_manifests = removed.map(|m| m.len()).unwrap_or(0);
         let deleted_tags = state.tags.remove(name).map(|t| t.len()).unwrap_or(0);
+        clear_proxy_cache_tag_validations_for_repository(
+            &mut state.proxy_cache_tag_validations,
+            name,
+        );
         Ok(DeleteCounts {
             deleted_manifests,
             deleted_tags,
@@ -293,10 +322,24 @@ impl ManifestStore for InMemoryMetadataStore {
             state.decrement_blob_refs(entry);
         }
 
+        let mut removed_tags = Vec::new();
         if let Some(repo_tags) = state.tags.get_mut(name) {
             let before = repo_tags.len();
-            repo_tags.retain(|_, digest| !digest_set.contains(&digest.to_string()));
+            repo_tags.retain(|tag, digest| {
+                let keep = !digest_set.contains(&digest.to_string());
+                if !keep {
+                    removed_tags.push(tag.clone());
+                }
+                keep
+            });
             deleted_tags = before.saturating_sub(repo_tags.len());
+        }
+        for tag in removed_tags {
+            clear_proxy_cache_tag_validations_for_tag(
+                &mut state.proxy_cache_tag_validations,
+                name,
+                &tag,
+            );
         }
 
         Ok(DeleteCounts {
@@ -457,6 +500,10 @@ impl MirrorConfigStore for InMemoryMetadataStore {
 
     async fn put_proxy_cache(&self, cache: ProxyCache) -> Result<(), LayerhouseError> {
         let mut state = self.inner.write().await;
+        clear_proxy_cache_tag_validations_for_cache(
+            &mut state.proxy_cache_tag_validations,
+            &cache.id,
+        );
         state.proxy_caches.insert(cache.id.clone(), cache);
         Ok(())
     }
@@ -464,6 +511,7 @@ impl MirrorConfigStore for InMemoryMetadataStore {
     async fn delete_proxy_cache(&self, id: &str) -> Result<(), LayerhouseError> {
         let mut state = self.inner.write().await;
         state.proxy_caches.remove(id);
+        clear_proxy_cache_tag_validations_for_cache(&mut state.proxy_cache_tag_validations, id);
         Ok(())
     }
 
@@ -486,6 +534,30 @@ impl MirrorConfigStore for InMemoryMetadataStore {
         let job = proxy_cache_warm_job(&cache, now);
         state.sync_jobs.insert(job.id.clone(), job.clone());
         Ok(Some(job))
+    }
+
+    async fn get_proxy_cache_tag_validation(
+        &self,
+        cache_id: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<Option<ProxyCacheTagValidation>, LayerhouseError> {
+        let state = self.inner.read().await;
+        Ok(get_proxy_cache_tag_validation(
+            &state.proxy_cache_tag_validations,
+            cache_id,
+            repository,
+            tag,
+        ))
+    }
+
+    async fn put_proxy_cache_tag_validation(
+        &self,
+        validation: ProxyCacheTagValidation,
+    ) -> Result<(), LayerhouseError> {
+        let mut state = self.inner.write().await;
+        put_proxy_cache_tag_validation(&mut state.proxy_cache_tag_validations, validation);
+        Ok(())
     }
 
     // Warm image CRUD
@@ -676,6 +748,35 @@ impl TokenStore for InMemoryMetadataStore {
 mod tests {
     use super::*;
 
+    fn proxy_cache(id: &str) -> ProxyCache {
+        ProxyCache {
+            id: id.to_string(),
+            local_prefix: "cache/app".to_string(),
+            upstream_registry: "registry.example".to_string(),
+            upstream_prefix: Some("upstream/app".to_string()),
+            warm_filters: vec![WarmFilter::None],
+            warm_schedule: None,
+            plain_http: false,
+            insecure_tls: false,
+            outbound_proxy: OutboundProxy::default(),
+            username: None,
+            password: None,
+            created_at: 1,
+        }
+    }
+
+    fn validation(cache_id: &str, repository: &str, tag: &str) -> ProxyCacheTagValidation {
+        ProxyCacheTagValidation {
+            cache_id: cache_id.to_string(),
+            repository: repository.to_string(),
+            tag: tag.to_string(),
+            upstream_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            last_validated_at: 42,
+        }
+    }
+
     #[tokio::test]
     async fn inmemory_get_manifest() {
         shared_read_tests::assert_get_manifest(&InMemoryMetadataStore::default()).await;
@@ -694,6 +795,72 @@ mod tests {
     #[tokio::test]
     async fn inmemory_list_manifest_summaries() {
         shared_read_tests::assert_list_manifest_summaries(&InMemoryMetadataStore::default()).await;
+    }
+
+    #[tokio::test]
+    async fn inmemory_proxy_cache_tag_validation_persists_and_cache_cleanup_clears_it() {
+        let store = InMemoryMetadataStore::default();
+        store
+            .put_proxy_cache_tag_validation(validation("docker", "cache/app", "latest"))
+            .await
+            .unwrap();
+
+        let found = store
+            .get_proxy_cache_tag_validation("docker", "cache/app", "latest")
+            .await
+            .unwrap()
+            .expect("validation should exist");
+        assert_eq!(found.last_validated_at, 42);
+
+        store.put_proxy_cache(proxy_cache("docker")).await.unwrap();
+        assert!(
+            store
+                .get_proxy_cache_tag_validation("docker", "cache/app", "latest")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        store
+            .put_proxy_cache_tag_validation(validation("docker", "cache/app", "latest"))
+            .await
+            .unwrap();
+        store.delete_proxy_cache("docker").await.unwrap();
+        assert!(
+            store
+                .get_proxy_cache_tag_validation("docker", "cache/app", "latest")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn inmemory_proxy_cache_tag_validation_is_cleared_by_tag_mutations() {
+        let store = InMemoryMetadataStore::default();
+        let (entry, _) = shared_read_tests::seed_entry();
+        store
+            .put_manifest("cache/app", "latest", entry.clone())
+            .await
+            .unwrap();
+        store
+            .put_proxy_cache_tag_validation(validation("docker", "cache/app", "latest"))
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .delete_tag("cache/app", &entry.digest, "latest")
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .get_proxy_cache_tag_validation("docker", "cache/app", "latest")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }
 

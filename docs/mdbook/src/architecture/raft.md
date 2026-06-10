@@ -52,6 +52,8 @@ The state machine stores all metadata in memory using `BTreeMap` keyed by string
 - `blob_ref_counts` — digest → reference count
 - `mirror_rules` — rule ID → mirror rule
 - `proxy_caches` — cache ID → proxy cache
+- `proxy_cache_tag_validations` — cache ID → repository → tag → upstream digest
+  and last validation time
 - `personal_access_tokens` — token ID → PAT
 - `helm_charts` — chart name → chart metadata
 
