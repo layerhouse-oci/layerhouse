@@ -359,7 +359,10 @@ async fn create_repository<M: ManifestStore + RepositoryStore, B: BlobStore>(
             &name,
             crate::auth::permissions::OciAction::Create,
         )?;
-        identity.username.clone().or(Some(identity.subject.clone()))
+        identity
+            .username
+            .clone()
+            .or_else(|| Some(identity.subject.as_str().to_string()))
     } else {
         identity.and_then(|Extension(i)| i.username.clone())
     };
@@ -1208,7 +1211,7 @@ mod tests {
 
     fn identity(scopes: Vec<String>) -> AuthIdentity {
         AuthIdentity {
-            subject: "user-1".to_string(),
+            subject: crate::auth::identity::Subject::new("user-1"),
             username: Some("alice".to_string()),
             display_name: None,
             email: None,

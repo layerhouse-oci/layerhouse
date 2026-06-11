@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod identity;
 pub mod jwks;
 pub mod middleware;
 pub mod oauth2;
@@ -17,6 +18,7 @@ use crate::error::LayerhouseError;
 use crate::store::metadata::TokenStore;
 
 use self::discovery::OidcDiscovery;
+use self::identity::Subject;
 use self::jwks::{CachedJwksDocument, JwksCache, JwksMetrics, JwksS3Cache};
 use self::permissions::PermissionResolver;
 use self::token::{AuthIdentity, TokenType};
@@ -379,7 +381,7 @@ impl AuthService {
         }
 
         Ok(AuthIdentity {
-            subject: pat.subject,
+            subject: Subject::new(pat.subject),
             username: pat.username,
             display_name: None,
             email: None,
@@ -407,7 +409,7 @@ impl AuthService {
         let username = claims.username();
         let email = claims.email();
         Ok(AuthIdentity {
-            subject: claims.subject,
+            subject: Subject::new(claims.subject),
             username,
             display_name,
             email,
@@ -515,7 +517,7 @@ impl AuthService {
         let user_groups = claims.extract_groups(&self.config.group_claim);
 
         Ok(AuthIdentity {
-            subject: claims.subject,
+            subject: Subject::new(claims.subject),
             username,
             display_name,
             email,
@@ -568,7 +570,7 @@ impl AuthService {
         let exp = (now + chrono::Duration::hours(1)).timestamp() as usize;
 
         let claims = token::TokenClaims {
-            subject: identity.subject.clone(),
+            subject: identity.subject.as_str().to_string(),
             exp,
             aud: None,
             groups: Some(identity.groups.clone()),

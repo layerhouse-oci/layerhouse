@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::auth::identity::Subject;
 use crate::oci::digest::Digest;
 use crate::oci::manifest::{
     SizedDescriptor, extract_sized_referenced_descriptors, stored_size_bytes,
     stored_size_from_descriptors,
 };
+use crate::store::metadata::typed_id::OrgId;
 
 pub(crate) fn now_epoch() -> u64 {
     std::time::SystemTime::now()
@@ -268,6 +270,56 @@ pub enum Visibility {
     #[default]
     Private,
     PublicPull,
+}
+
+/// Owning principal of a namespace. Users own by immutable OIDC `subject`;
+/// orgs own by the Layerhouse-generated `OrgId`. Authorization decisions key
+/// on the variant, never on the surface handle, so a username rename never
+/// shifts ownership.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum Owner {
+    User(Subject),
+    Org(OrgId),
+}
+
+/// A claimed first-segment handle. The `(handle, owner)` pair is the unit of
+/// namespace ownership: pushes under `<handle>/...` are gated on the owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct Namespace {
+    pub handle: String,
+    pub owner: Owner,
+    pub created_at: u64,
+}
+
+/// Tombstone for a previously claimed handle. Recorded when a namespace is
+/// released so reclaim is admin-gated and the prior-owner UX context (frozen
+/// label, release reason, timestamp) survives the deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct ReleasedHandle {
+    pub handle: String,
+    pub prior_owner: Owner,
+    /// Frozen username/org-name at the moment of release. Stored explicitly
+    /// because the IdP-side label is mutable and may diverge after release.
+    pub prior_owner_label: String,
+    pub released_at: u64,
+    pub released_by: Subject,
+    pub release_reason: ReleaseReason,
+}
+
+/// Why a handle was released. Drives the reclaim UX (rename promises a
+/// follow-up `Namespace` row at the new handle; admin-revoke triggers an
+/// admin-only reclaim path; owner-deleted is the self-serve case).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum ReleaseReason {
+    OwnerDeleted,
+    AdminRevoked,
+    Renamed { new_handle: String },
 }
 
 /// A first-class repository object ("shadow repository"). Unlike a manifest
