@@ -8,7 +8,8 @@ use tracing::{debug, warn};
 use super::state_machine::StateMachineData;
 use super::{
     JobRequest, JobResponse, ManifestRequest, ManifestResponse, MirrorConfigRequest,
-    MirrorConfigResponse, RaftInstance, Request, Response, TokenRequest, TokenResponse,
+    MirrorConfigResponse, RaftInstance, RepositoryRequest, RepositoryResponse, Request, Response,
+    TokenRequest, TokenResponse,
 };
 use crate::config::RaftTlsConfig;
 use crate::error::LayerhouseError;
@@ -17,8 +18,8 @@ use crate::raft::network;
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion, HelmStore,
     JobStore, ManifestEntry, ManifestStore, ManifestSummary, MirrorConfigStore, MirrorRule,
-    PersonalAccessToken, ProxyCache, ProxyCacheTagValidation, ReferrerEntry, RepositorySummary,
-    SyncJob, SyncJobRun, TokenStore, WarmImage,
+    PersonalAccessToken, ProxyCache, ProxyCacheTagValidation, ReferrerEntry, Repository,
+    RepositoryStore, RepositorySummary, SyncJob, SyncJobRun, TokenStore, WarmImage,
 };
 
 const FOLLOWER_READ_LAG_THRESHOLD: u64 = 100;
@@ -141,6 +142,19 @@ impl RaftMetadataStore {
             Response::Token(r) => Ok(r),
             other => Err(LayerhouseError::Internal(format!(
                 "unexpected token response: {:?}",
+                other
+            ))),
+        }
+    }
+
+    async fn write_repository(
+        &self,
+        req: RepositoryRequest,
+    ) -> Result<RepositoryResponse, LayerhouseError> {
+        match self.write(Request::Repository(req)).await? {
+            Response::Repository(r) => Ok(r),
+            other => Err(LayerhouseError::Internal(format!(
+                "unexpected repository response: {:?}",
                 other
             ))),
         }
@@ -616,6 +630,33 @@ impl TokenStore for RaftMetadataStore {
             TokenResponse::Ok => Err(LayerhouseError::Internal(
                 "unexpected response for delete_personal_access_token".to_string(),
             )),
+        }
+    }
+}
+
+#[async_trait]
+impl RepositoryStore for RaftMetadataStore {
+    async fn get_repository(&self, name: &str) -> Result<Option<Repository>, LayerhouseError> {
+        self.emit_read_metrics("get_repository");
+        let state = self.state.read().await;
+        Ok(state.get_repository(name))
+    }
+
+    async fn put_repository(&self, repo: Repository) -> Result<(), LayerhouseError> {
+        self.write_repository(RepositoryRequest::PutRepository(repo))
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_repository_meta(&self, name: &str) -> Result<bool, LayerhouseError> {
+        let resp = self
+            .write_repository(RepositoryRequest::DeleteRepository {
+                name: name.to_string(),
+            })
+            .await?;
+        match resp {
+            RepositoryResponse::Bool(deleted) => Ok(deleted),
+            RepositoryResponse::Ok => Ok(false),
         }
     }
 }

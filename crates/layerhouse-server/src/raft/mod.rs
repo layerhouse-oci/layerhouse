@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::metadata::{
     BlobDeleteStatus, DeleteCounts, MirrorRule, PersonalAccessToken, ProxyCache,
-    ProxyCacheTagValidation, SyncJob, SyncJobRun, WarmImage,
+    ProxyCacheTagValidation, Repository, SyncJob, SyncJobRun, WarmImage,
 };
 
 openraft::declare_raft_types!(
@@ -143,6 +143,20 @@ pub enum TokenResponse {
     Bool(bool),
 }
 
+// ── Repository domain ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RepositoryRequest {
+    PutRepository(Repository),
+    DeleteRepository { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RepositoryResponse {
+    Ok,
+    Bool(bool),
+}
+
 // ── Outer wrappers (for OpenRaft TypeConfig) ─────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +165,7 @@ pub enum Request {
     MirrorConfig(MirrorConfigRequest),
     Job(JobRequest),
     Token(TokenRequest),
+    Repository(RepositoryRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,4 +174,5 @@ pub enum Response {
     MirrorConfig(MirrorConfigResponse),
     Job(JobResponse),
     Token(TokenResponse),
+    Repository(RepositoryResponse),
 }

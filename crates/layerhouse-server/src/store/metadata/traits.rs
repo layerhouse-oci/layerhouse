@@ -174,7 +174,6 @@ pub trait TokenStore: Send + Sync + 'static {
 // ── Helm charts ───────────────────────────────────────────────────────
 
 #[async_trait]
-#[async_trait]
 pub trait HelmStore: Send + Sync + 'static {
     async fn list_helm_charts(&self) -> Result<Vec<HelmChart>, LayerhouseError>;
     async fn list_helm_chart_versions(
@@ -184,6 +183,16 @@ pub trait HelmStore: Send + Sync + 'static {
 }
 
 // ── Domain supertrait aliases ─────────────────────────────────────────
+
+/// First-class repository ("shadow repository") CRUD. A `Repository` can exist
+/// before any blob is pushed and carries human metadata (description, owner,
+/// visibility). Persisted via Raft consensus, same as the other metadata.
+#[async_trait]
+pub trait RepositoryStore: Send + Sync + 'static {
+    async fn get_repository(&self, name: &str) -> Result<Option<Repository>, LayerhouseError>;
+    async fn put_repository(&self, repo: Repository) -> Result<(), LayerhouseError>;
+    async fn delete_repository_meta(&self, name: &str) -> Result<bool, LayerhouseError>;
+}
 
 /// OCI registry core: manifest CRUD + mirror config + blob lifecycle.
 pub trait RegistryStore: ManifestStore + MirrorConfigStore {}
@@ -200,11 +209,14 @@ impl<T: ManifestStore + MirrorConfigStore + JobStore> SchedulerStore for T {}
 // ── Supertrait for backward compatibility ─────────────────────────────
 
 pub trait MetadataStore:
-    ManifestStore + MirrorConfigStore + JobStore + TokenStore + HelmStore
+    ManifestStore + MirrorConfigStore + JobStore + TokenStore + HelmStore + RepositoryStore
 {
 }
 
-impl<T: ManifestStore + MirrorConfigStore + JobStore + TokenStore + HelmStore> MetadataStore for T {}
+impl<T: ManifestStore + MirrorConfigStore + JobStore + TokenStore + HelmStore + RepositoryStore>
+    MetadataStore for T
+{
+}
 
 #[derive(Debug, Clone)]
 pub struct ReferrerEntry {

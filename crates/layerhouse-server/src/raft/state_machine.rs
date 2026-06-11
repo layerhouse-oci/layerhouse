@@ -11,7 +11,8 @@ use tokio::sync::RwLock;
 
 use super::{
     JobRequest, JobResponse, ManifestRequest, ManifestResponse, MirrorConfigRequest,
-    MirrorConfigResponse, Request, Response, TokenRequest, TokenResponse, TypeConfig,
+    MirrorConfigResponse, RepositoryRequest, RepositoryResponse, Request, Response, TokenRequest,
+    TokenResponse, TypeConfig,
 };
 use crate::oci::digest::Digest;
 use crate::oci::manifest::extract_referenced_digests;
@@ -98,6 +99,7 @@ impl StateMachine {
             Request::MirrorConfig(r) => Response::MirrorConfig(Self::apply_mirror_config(data, r)),
             Request::Job(r) => Response::Job(Self::apply_job(data, r)),
             Request::Token(r) => Response::Token(Self::apply_token(data, r)),
+            Request::Repository(r) => Response::Repository(Self::apply_repository(data, r)),
         }
     }
 
@@ -456,6 +458,19 @@ impl StateMachine {
             }
         }
     }
+
+    fn apply_repository(data: &mut StateMachineData, req: RepositoryRequest) -> RepositoryResponse {
+        match req {
+            RepositoryRequest::PutRepository(repo) => {
+                data.repositories.insert(repo.name.clone(), repo);
+                RepositoryResponse::Ok
+            }
+            RepositoryRequest::DeleteRepository { name } => {
+                let removed = data.repositories.remove(&name).is_some();
+                RepositoryResponse::Bool(removed)
+            }
+        }
+    }
 }
 
 impl openraft::storage::RaftStateMachine<TypeConfig> for StateMachine {
@@ -748,6 +763,7 @@ impl StateMachineData {
                 .map(|m| m.last_modified)
                 .max()
                 .unwrap_or(0);
+            let meta = self.repositories.get(name);
             summaries.push(RepositorySummary {
                 name: name.clone(),
                 tag_count,
@@ -755,6 +771,28 @@ impl StateMachineData {
                 stored_size_bytes,
                 manifest_size_bytes,
                 last_modified,
+                description: meta.map(|r| r.description.clone()).unwrap_or_default(),
+                owner: meta.and_then(|r| r.owner.clone()),
+                visibility: meta.map(|r| r.visibility).unwrap_or_default(),
+            });
+        }
+        // Include shadow repositories that exist as first-class objects but have
+        // no pushed manifests yet, so they appear in the listing immediately
+        // after creation.
+        for (name, repo) in &self.repositories {
+            if self.manifests.contains_key(name) {
+                continue;
+            }
+            summaries.push(RepositorySummary {
+                name: name.clone(),
+                tag_count: 0,
+                manifest_count: 0,
+                stored_size_bytes: 0,
+                manifest_size_bytes: 0,
+                last_modified: repo.created_at,
+                description: repo.description.clone(),
+                owner: repo.owner.clone(),
+                visibility: repo.visibility,
             });
         }
         summaries
@@ -807,6 +845,10 @@ impl StateMachineData {
 
     pub fn get_mirror_rule(&self, id: &str) -> Option<MirrorRule> {
         self.mirror_rules.get(id).cloned()
+    }
+
+    pub fn get_repository(&self, name: &str) -> Option<Repository> {
+        self.repositories.get(name).cloned()
     }
 
     pub fn list_proxy_caches(&self) -> Vec<ProxyCache> {
