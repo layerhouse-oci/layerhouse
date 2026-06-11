@@ -26,6 +26,7 @@ struct InMemoryState {
     sync_jobs: BTreeMap<String, SyncJob>,
     sync_job_runs: BTreeMap<String, Vec<SyncJobRun>>,
     personal_access_tokens: BTreeMap<String, PersonalAccessToken>,
+    repositories: BTreeMap<String, Repository>,
 }
 
 #[cfg(test)]
@@ -220,6 +221,7 @@ impl ManifestStore for InMemoryMetadataStore {
                 .map(|m| m.last_modified)
                 .max()
                 .unwrap_or(0);
+            let meta = state.repositories.get(name);
             summaries.push(RepositorySummary {
                 name: name.clone(),
                 tag_count,
@@ -227,6 +229,27 @@ impl ManifestStore for InMemoryMetadataStore {
                 stored_size_bytes,
                 manifest_size_bytes,
                 last_modified,
+                description: meta.map(|r| r.description.clone()).unwrap_or_default(),
+                owner: meta.and_then(|r| r.owner.clone()),
+                visibility: meta.map(|r| r.visibility).unwrap_or_default(),
+            });
+        }
+
+        // Shadow repositories with no pushed manifests still appear in the list.
+        for (name, repo) in &state.repositories {
+            if state.manifests.contains_key(name) {
+                continue;
+            }
+            summaries.push(RepositorySummary {
+                name: name.clone(),
+                tag_count: 0,
+                manifest_count: 0,
+                stored_size_bytes: 0,
+                manifest_size_bytes: 0,
+                last_modified: repo.created_at,
+                description: repo.description.clone(),
+                owner: repo.owner.clone(),
+                visibility: repo.visibility,
             });
         }
 
@@ -743,6 +766,26 @@ impl TokenStore for InMemoryMetadataStore {
             state.personal_access_tokens.remove(id);
         }
         Ok(should_delete)
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl RepositoryStore for InMemoryMetadataStore {
+    async fn get_repository(&self, name: &str) -> Result<Option<Repository>, LayerhouseError> {
+        let state = self.inner.read().await;
+        Ok(state.repositories.get(name).cloned())
+    }
+
+    async fn put_repository(&self, repo: Repository) -> Result<(), LayerhouseError> {
+        let mut state = self.inner.write().await;
+        state.repositories.insert(repo.name.clone(), repo);
+        Ok(())
+    }
+
+    async fn delete_repository_meta(&self, name: &str) -> Result<bool, LayerhouseError> {
+        let mut state = self.inner.write().await;
+        Ok(state.repositories.remove(name).is_some())
     }
 }
 

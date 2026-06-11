@@ -13,16 +13,22 @@ use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
 use crate::raft::membership;
 use crate::store::blob::BlobStore;
-use crate::store::metadata::{DeleteCounts, ManifestStore, ManifestSummary, RepositorySummary};
+use crate::store::metadata::{
+    DeleteCounts, ManifestStore, ManifestSummary, Repository, RepositoryStore, RepositorySummary,
+    Visibility,
+};
 
 use super::{AppState, percent_decode};
 
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 200;
 
-pub fn routes<M: ManifestStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
+pub fn routes<M: ManifestStore + RepositoryStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
     Router::new()
-        .route("/api/v1/repositories", get(list_repositories::<M, B>))
+        .route(
+            "/api/v1/repositories",
+            get(list_repositories::<M, B>).post(create_repository::<M, B>),
+        )
         .route(
             "/api/v1/repositories/{*path}",
             any(repository_dispatch::<M, B>),
@@ -158,7 +164,7 @@ fn parse_rfc3339_epoch(value: &str, field: &str) -> Result<u64, LayerhouseError>
         .map_err(|_| LayerhouseError::NameInvalid(format!("{} must be after 1970-01-01", field)))
 }
 
-async fn repository_dispatch<M: ManifestStore, B: BlobStore>(
+async fn repository_dispatch<M: ManifestStore + RepositoryStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     Path(path): Path<String>,
     req: Request<Body>,
@@ -169,7 +175,7 @@ async fn repository_dispatch<M: ManifestStore, B: BlobStore>(
     }
 }
 
-async fn repository_dispatch_result<M: ManifestStore, B: BlobStore>(
+async fn repository_dispatch_result<M: ManifestStore + RepositoryStore, B: BlobStore>(
     state: Arc<AppState<M, B>>,
     path: String,
     req: Request<Body>,
@@ -178,6 +184,12 @@ async fn repository_dispatch_result<M: ManifestStore, B: BlobStore>(
     let uri = req.uri().clone();
     let path = path.trim_end_matches('/');
     let parts: Vec<&str> = path.split('/').collect();
+
+    let identity: Option<Extension<crate::auth::token::AuthIdentity>> = req
+        .extensions()
+        .get::<crate::auth::token::AuthIdentity>()
+        .cloned()
+        .map(Extension);
 
     if method == Method::POST && path.ends_with("/manifests:batch-delete") {
         let name = path
@@ -189,13 +201,13 @@ async fn repository_dispatch_result<M: ManifestStore, B: BlobStore>(
             .map_err(|e| LayerhouseError::NameInvalid(e.to_string()))?;
         let req: BatchDeleteRequest = serde_json::from_slice(&body)
             .map_err(|e| LayerhouseError::NameInvalid(e.to_string()))?;
-        return batch_delete_manifests(State(state), Path(name), Json(req))
+        return batch_delete_manifests(State(state), identity, Path(name), Json(req))
             .await
             .map(IntoResponse::into_response);
     }
 
     if method == Method::DELETE && !parts.is_empty() && !parts.contains(&"manifests") {
-        return delete_repository(State(state), Path(path.to_string()))
+        return delete_repository(State(state), identity, Path(path.to_string()))
             .await
             .map(IntoResponse::into_response);
     }
@@ -216,11 +228,13 @@ async fn repository_dispatch_result<M: ManifestStore, B: BlobStore>(
         (Method::GET, [digest]) => get_manifest(State(state), Path((name, (*digest).to_string())))
             .await
             .map(IntoResponse::into_response),
-        (Method::DELETE, [digest]) => {
-            delete_manifest(State(state), Path((name, (*digest).to_string())))
-                .await
-                .map(IntoResponse::into_response)
-        }
+        (Method::DELETE, [digest]) => delete_manifest(
+            State(state),
+            identity.clone(),
+            Path((name, (*digest).to_string())),
+        )
+        .await
+        .map(IntoResponse::into_response),
         (Method::GET, [digest, "raw"]) => {
             get_raw_manifest(State(state), Path((name, (*digest).to_string())))
                 .await
@@ -228,6 +242,7 @@ async fn repository_dispatch_result<M: ManifestStore, B: BlobStore>(
         }
         (Method::DELETE, [digest, "tags", tag]) => delete_tag(
             State(state),
+            identity.clone(),
             Path((name, (*digest).to_string(), percent_decode(tag))),
         )
         .await
@@ -307,6 +322,141 @@ async fn list_repositories<M: ManifestStore, B: BlobStore>(
         has_more,
         next,
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateRepositoryRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    visibility: Visibility,
+}
+
+/// Create a first-class ("shadow") repository that can exist before any blob is
+/// pushed. Requires `Create` permission on the target path; the personal
+/// namespace (`users/<username>/*`) grants this implicitly. The caller becomes
+/// the owner.
+async fn create_repository<M: ManifestStore + RepositoryStore, B: BlobStore>(
+    State(state): State<Arc<AppState<M, B>>>,
+    identity: Option<Extension<crate::auth::token::AuthIdentity>>,
+    Json(req): Json<CreateRepositoryRequest>,
+) -> Result<Response, LayerhouseError> {
+    let name = req.name.trim().to_string();
+    validate_repository_name(&name)?;
+
+    let owner = if let Some(auth) = state.auth.as_ref() {
+        let Some(Extension(identity)) = identity else {
+            return Err(LayerhouseError::Unauthorized {
+                message: "authentication required".to_string(),
+                realm: None,
+                service: None,
+                scope: None,
+            });
+        };
+        auth.check_permission(
+            &identity,
+            &name,
+            crate::auth::permissions::OciAction::Create,
+        )?;
+        identity.username.clone().or(Some(identity.subject.clone()))
+    } else {
+        identity.and_then(|Extension(i)| i.username.clone())
+    };
+
+    if state.core.metadata.get_repository(&name).await?.is_some() {
+        return Err(LayerhouseError::Conflict(format!(
+            "repository already exists: {}",
+            name
+        )));
+    }
+
+    let repo = Repository {
+        name: name.clone(),
+        description: req.description.trim().to_string(),
+        owner,
+        visibility: req.visibility,
+        created_at: crate::store::metadata::now_epoch(),
+    };
+    state.core.metadata.put_repository(repo.clone()).await?;
+
+    Ok((StatusCode::CREATED, Json(repo)).into_response())
+}
+
+fn require_delete_permission(
+    auth: &Option<Arc<crate::auth::AuthService>>,
+    identity: Option<&Extension<crate::auth::token::AuthIdentity>>,
+    name: &str,
+) -> Result<(), LayerhouseError> {
+    let Some(auth) = auth.as_ref() else {
+        return Ok(());
+    };
+    let Some(Extension(identity)) = identity else {
+        return Err(LayerhouseError::Unauthorized {
+            message: "authentication required".to_string(),
+            realm: None,
+            service: None,
+            scope: None,
+        });
+    };
+    auth.check_permission(identity, name, crate::auth::permissions::OciAction::Delete)?;
+    Ok(())
+}
+
+/// Validate an OCI repository name against the Distribution Spec grammar:
+/// lowercase path components separated by `/`, each component matching
+/// `[a-z0-9]+(?:(?:[._]|__|[-]*)[a-z0-9]+)*`.
+fn validate_repository_name(name: &str) -> Result<(), LayerhouseError> {
+    if name.is_empty() {
+        return Err(LayerhouseError::NameInvalid(
+            "repository name is required".to_string(),
+        ));
+    }
+    if name.len() > 255 {
+        return Err(LayerhouseError::NameInvalid(
+            "repository name exceeds 255 characters".to_string(),
+        ));
+    }
+    for component in name.split('/') {
+        if !is_valid_name_component(component) {
+            return Err(LayerhouseError::NameInvalid(format!(
+                "invalid repository name component: {}",
+                component
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_name_component(component: &str) -> bool {
+    if component.is_empty() {
+        return false;
+    }
+    let bytes = component.as_bytes();
+    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    // Must start and end with an alphanumeric.
+    if !is_alnum(bytes[0]) || !is_alnum(bytes[bytes.len() - 1]) {
+        return false;
+    }
+    // Between alphanumerics, the only valid separator runs are `.`, `_`, `__`,
+    // or one-or-more `-`. Any other run (e.g. `..`, `_._`, `_-`) is invalid.
+    let mut i = 0;
+    while i < bytes.len() {
+        if is_alnum(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && !is_alnum(bytes[i]) {
+            i += 1;
+        }
+        let run = &component[start..i];
+        let valid = run == "." || run == "_" || run == "__" || run.bytes().all(|b| b == b'-');
+        if !valid {
+            return false;
+        }
+    }
+    true
 }
 
 fn type_matches(item: &ManifestSummary, kind: &str) -> bool {
@@ -496,11 +646,13 @@ async fn get_raw_manifest<M: ManifestStore, B: BlobStore>(
     Ok(Json(body))
 }
 
-async fn delete_tag<M: ManifestStore, B: BlobStore>(
+async fn delete_tag<M: ManifestStore + RepositoryStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
+    identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path((name, digest, tag)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
+    require_delete_permission(&state.auth, identity.as_ref(), &name)?;
     let digest = Digest::from_str_checked(&digest)
         .ok_or_else(|| LayerhouseError::DigestInvalid(digest.clone()))?;
     if !state.core.metadata.delete_tag(&name, &digest, &tag).await? {
@@ -509,11 +661,13 @@ async fn delete_tag<M: ManifestStore, B: BlobStore>(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn delete_manifest<M: ManifestStore, B: BlobStore>(
+async fn delete_manifest<M: ManifestStore + RepositoryStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
+    identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path((name, digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
+    require_delete_permission(&state.auth, identity.as_ref(), &name)?;
     let digest = Digest::from_str_checked(&digest)
         .ok_or_else(|| LayerhouseError::DigestInvalid(digest.clone()))?;
     let counts = state
@@ -524,12 +678,14 @@ async fn delete_manifest<M: ManifestStore, B: BlobStore>(
     Ok(Json(counts))
 }
 
-async fn batch_delete_manifests<M: ManifestStore, B: BlobStore>(
+async fn batch_delete_manifests<M: ManifestStore + RepositoryStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
+    identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path(name): Path<String>,
     Json(req): Json<BatchDeleteRequest>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
+    require_delete_permission(&state.auth, identity.as_ref(), &name)?;
     let digests: Result<Vec<_>, _> = req
         .digests
         .iter()
@@ -546,12 +702,17 @@ async fn batch_delete_manifests<M: ManifestStore, B: BlobStore>(
     Ok(Json(counts))
 }
 
-async fn delete_repository<M: ManifestStore, B: BlobStore>(
+async fn delete_repository<M: ManifestStore + RepositoryStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
+    identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
+    require_delete_permission(&state.auth, identity.as_ref(), &name)?;
     let counts: DeleteCounts = state.core.metadata.delete_repository(&name).await?;
+    // Also drop any first-class repository metadata so a deleted repo does not
+    // linger as an empty shadow entry.
+    state.core.metadata.delete_repository_meta(&name).await?;
     Ok(Json(counts))
 }
 
@@ -747,6 +908,7 @@ async fn cluster_remove<M: ManifestStore, B: BlobStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::token::AuthIdentity;
     use crate::store::blob::InMemoryBlobStore;
     use crate::store::metadata::{InMemoryMetadataStore, ManifestEntry, ManifestStore};
     use axum::body::Body;
@@ -1009,5 +1171,186 @@ mod tests {
             "sha256:0000000000000000000000000000000000000000000000000000000000000002"
         );
         assert_eq!(data.manifests[0].tags, vec!["inside"]);
+    }
+
+    #[test]
+    fn validates_repository_names() {
+        assert!(validate_repository_name("team-a/app").is_ok());
+        assert!(validate_repository_name("users/alice/my_app").is_ok());
+        assert!(validate_repository_name("a/b/c.d/e__f").is_ok());
+        assert!(validate_repository_name("library/ubuntu").is_ok());
+
+        assert!(validate_repository_name("").is_err());
+        assert!(validate_repository_name("Team-A/app").is_err()); // uppercase
+        assert!(validate_repository_name("team-a/").is_err()); // empty component
+        assert!(validate_repository_name("/team-a").is_err());
+        assert!(validate_repository_name("team-a//app").is_err());
+        assert!(validate_repository_name(".app").is_err()); // leading separator
+        assert!(validate_repository_name("app.").is_err()); // trailing separator
+        assert!(validate_repository_name("a..b").is_err()); // double dot
+        assert!(validate_repository_name("a___b").is_err()); // triple underscore
+    }
+
+    use crate::routes::test_state_with_auth;
+
+    fn post_repository(body: serde_json::Value, identity: Option<AuthIdentity>) -> Request<Body> {
+        let mut req = Request::builder()
+            .uri("/api/v1/repositories")
+            .method(Method::POST)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        if let Some(identity) = identity {
+            req.extensions_mut().insert(identity);
+        }
+        req
+    }
+
+    fn identity(scopes: Vec<String>) -> AuthIdentity {
+        AuthIdentity {
+            subject: "user-1".to_string(),
+            username: Some("alice".to_string()),
+            display_name: None,
+            email: None,
+            groups: Vec::new(),
+            scopes,
+            token_type: crate::auth::token::TokenType::PersonalAccess,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_repository_in_personal_namespace_succeeds() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        let response = app
+            .oneshot(post_repository(
+                serde_json::json!({
+                    "name": "users/alice/app",
+                    "description": "my app",
+                    "visibility": "public_pull"
+                }),
+                Some(identity(Vec::new())),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data["name"], "users/alice/app");
+        assert_eq!(data["description"], "my app");
+        assert_eq!(data["owner"], "alice");
+        assert_eq!(data["visibility"], "public_pull");
+
+        // The shadow repo shows up in the listing even with no pushed content.
+        let stored = state
+            .core
+            .metadata
+            .get_repository("users/alice/app")
+            .await
+            .unwrap();
+        assert!(stored.is_some());
+    }
+
+    #[tokio::test]
+    async fn create_repository_denied_without_create_grant() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(post_repository(
+                serde_json::json!({ "name": "team-a/app" }),
+                Some(identity(vec!["repository:team-a/app:pull".to_string()])),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn create_repository_conflict_when_exists() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let first = app
+            .clone()
+            .oneshot(post_repository(
+                serde_json::json!({ "name": "users/alice/app" }),
+                Some(identity(Vec::new())),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let second = app
+            .oneshot(post_repository(
+                serde_json::json!({ "name": "users/alice/app" }),
+                Some(identity(Vec::new())),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn create_repository_requires_identity_when_auth_enabled() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(post_repository(
+                serde_json::json!({ "name": "users/alice/app" }),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn shadow_repository_appears_in_listing() {
+        let state = test_state();
+        state
+            .core
+            .metadata
+            .put_repository(crate::store::metadata::Repository {
+                name: "users/alice/empty".to_string(),
+                description: "nothing pushed yet".to_string(),
+                owner: Some("alice".to_string()),
+                visibility: Visibility::Private,
+                created_at: 123,
+            })
+            .await
+            .unwrap();
+
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/repositories?q=users/alice/empty")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let repo = data["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"].as_str() == Some("users/alice/empty"))
+            .unwrap();
+        assert_eq!(repo["manifest_count"].as_u64(), Some(0));
+        assert_eq!(repo["description"], "nothing pushed yet");
+        assert_eq!(repo["owner"], "alice");
     }
 }

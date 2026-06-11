@@ -809,6 +809,15 @@ pub struct RepositorySummary {
     pub stored_size_bytes: u64,
     pub manifest_size_bytes: u64,
     pub last_modified: u64,
+    /// Shadow-repository metadata, populated when a first-class `Repository`
+    /// object exists for this name. Defaults are used for repos that only have
+    /// pushed content and no explicit metadata.
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
