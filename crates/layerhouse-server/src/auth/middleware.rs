@@ -181,7 +181,7 @@ fn authenticate_session_cookies(
         // JWKS validation. The tokens were verified once at login and the
         // encrypted cookie is trusted for the session lifetime (max 1 hour).
         return Ok(super::token::AuthIdentity {
-            subject: session.subject,
+            subject: super::identity::Subject::new(session.subject),
             username: session.username,
             display_name: session.display_name,
             email: session.email,

@@ -1,11 +1,15 @@
 //! Metadata store traits and types.
 //!
-//! This module is split into three sub-modules for maintainability:
+//! This module is split into several sub-modules for maintainability:
 //! - `types`: domain types (ManifestEntry, MirrorRule, SyncJob, etc.)
 //! - `traits`: trait definitions (ManifestStore, MirrorConfigStore, etc.)
+//! - `typed_id`: prefixed Layerhouse-internal identifiers (`OrgId`, ...)
+//! - `handle`: handle and repository-path grammar validators
 //! - `in_memory`: test-only InMemoryMetadataStore implementation
 
+pub mod handle;
 pub mod traits;
+pub mod typed_id;
 pub mod types;
 
 #[cfg(test)]

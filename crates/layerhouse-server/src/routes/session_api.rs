@@ -65,7 +65,7 @@ async fn get_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
 
     Ok(Json(SessionResponse {
         auth_enabled: true,
-        subject: Some(identity.subject),
+        subject: Some(identity.subject.into_string()),
         username: identity.username,
         display_name: identity.display_name,
         email: identity.email,

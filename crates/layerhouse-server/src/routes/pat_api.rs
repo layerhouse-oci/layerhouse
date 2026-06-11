@@ -58,7 +58,7 @@ async fn list_tokens<M: TokenStore, B: BlobStore>(
     let tokens = state
         .core
         .metadata
-        .list_personal_access_tokens(&identity.subject)
+        .list_personal_access_tokens(identity.subject.as_str())
         .await?;
     let items: Vec<PatListItem> = tokens
         .iter()
@@ -100,7 +100,7 @@ async fn create_token<M: TokenStore, B: BlobStore>(
 
     let pat = PersonalAccessToken {
         id: uuid::Uuid::new_v4().to_string(),
-        subject: identity.subject.clone(),
+        subject: identity.subject.as_str().to_string(),
         username: identity.username.clone(),
         name: req.name.clone(),
         token_hash,
@@ -139,7 +139,7 @@ async fn revoke_token<M: TokenStore, B: BlobStore>(
     let deleted = state
         .core
         .metadata
-        .delete_personal_access_token(&id, &identity.subject)
+        .delete_personal_access_token(&id, identity.subject.as_str())
         .await?;
     if deleted {
         Ok(StatusCode::NO_CONTENT)

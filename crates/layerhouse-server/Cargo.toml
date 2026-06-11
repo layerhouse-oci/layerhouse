@@ -13,7 +13,7 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 thiserror.workspace = true
-uuid = { workspace = true, features = ["v4"] }
+uuid = { workspace = true, features = ["v4", "v7"] }
 sha2.workspace = true
 hex.workspace = true
 bytes.workspace = true

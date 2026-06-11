@@ -1060,7 +1060,7 @@ mod tests {
 
     fn identity_with_scopes(scopes: Vec<String>) -> AuthIdentity {
         AuthIdentity {
-            subject: "user-1".to_string(),
+            subject: crate::auth::identity::Subject::new("user-1"),
             username: Some("alice".to_string()),
             display_name: None,
             email: None,

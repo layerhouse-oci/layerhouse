@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+use crate::auth::identity::Subject;
+
 #[derive(Debug, Clone)]
 pub struct AuthIdentity {
-    pub subject: String,
+    pub subject: Subject,
     pub username: Option<String>,
     pub display_name: Option<String>,
     pub email: Option<String>,
