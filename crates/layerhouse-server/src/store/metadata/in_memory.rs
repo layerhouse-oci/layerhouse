@@ -1,6 +1,8 @@
 use super::{traits::*, types::*};
+use crate::auth::identity::Subject;
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
+use crate::raft::{NamespaceRequest, NamespaceResponse};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 
@@ -27,6 +29,8 @@ struct InMemoryState {
     sync_job_runs: BTreeMap<String, Vec<SyncJobRun>>,
     personal_access_tokens: BTreeMap<String, PersonalAccessToken>,
     repositories: BTreeMap<String, Repository>,
+    namespaces: BTreeMap<String, Namespace>,
+    released_handles: BTreeMap<String, ReleasedHandle>,
 }
 
 #[cfg(test)]
@@ -46,6 +50,33 @@ impl InMemoryState {
                 }
             }
         }
+    }
+
+    /// Drive a namespace mutation through the shared core so the test double's
+    /// claim / release / revoke rules cannot drift from the Raft apply path.
+    fn apply_namespace(
+        &mut self,
+        req: NamespaceRequest,
+    ) -> Result<NamespaceResponse, LayerhouseError> {
+        let Self {
+            namespaces,
+            released_handles,
+            manifests,
+            tags,
+            repositories,
+            ..
+        } = self;
+        crate::raft::state_machine::apply_namespace_core(
+            namespaces,
+            released_handles,
+            req,
+            |handle| {
+                let prefix = format!("{handle}/");
+                manifests.keys().any(|k| k.starts_with(&prefix))
+                    || tags.keys().any(|k| k.starts_with(&prefix))
+                    || repositories.keys().any(|k| k.starts_with(&prefix))
+            },
+        )
     }
 }
 
@@ -790,6 +821,81 @@ impl RepositoryStore for InMemoryMetadataStore {
 }
 
 #[cfg(test)]
+#[async_trait]
+impl NamespaceStore for InMemoryMetadataStore {
+    async fn get_namespace(&self, handle: &str) -> Result<Option<Namespace>, LayerhouseError> {
+        let state = self.inner.read().await;
+        Ok(state.namespaces.get(handle).cloned())
+    }
+
+    async fn list_namespaces(&self) -> Result<Vec<Namespace>, LayerhouseError> {
+        let state = self.inner.read().await;
+        Ok(state.namespaces.values().cloned().collect())
+    }
+
+    async fn get_released_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<ReleasedHandle>, LayerhouseError> {
+        let state = self.inner.read().await;
+        Ok(state.released_handles.get(handle).cloned())
+    }
+
+    async fn claim_namespace(
+        &self,
+        handle: &str,
+        owner: Owner,
+        owner_label: &str,
+        actor: Subject,
+        admin_override: bool,
+        now: u64,
+    ) -> Result<(), LayerhouseError> {
+        let mut state = self.inner.write().await;
+        state.apply_namespace(NamespaceRequest::Claim {
+            handle: handle.to_string(),
+            owner,
+            owner_label: owner_label.to_string(),
+            actor,
+            admin_override,
+            now,
+        })?;
+        Ok(())
+    }
+
+    async fn release_namespace(
+        &self,
+        handle: &str,
+        actor: Subject,
+        reason: ReleaseReason,
+        now: u64,
+    ) -> Result<(), LayerhouseError> {
+        let mut state = self.inner.write().await;
+        state.apply_namespace(NamespaceRequest::Delete {
+            handle: handle.to_string(),
+            actor,
+            reason,
+            now,
+        })?;
+        Ok(())
+    }
+
+    async fn admin_revoke_namespace(
+        &self,
+        handle: &str,
+        actor: Subject,
+        now: u64,
+    ) -> Result<(), LayerhouseError> {
+        let mut state = self.inner.write().await;
+        state.apply_namespace(NamespaceRequest::AdminRevoke {
+            handle: handle.to_string(),
+            actor,
+            now,
+        })?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -906,6 +1012,226 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn user_owner(subject: &str) -> Owner {
+        Owner::User(Subject::new(subject))
+    }
+
+    #[tokio::test]
+    async fn namespace_claim_persists_and_reads_back() {
+        let store = InMemoryMetadataStore::default();
+        store
+            .claim_namespace(
+                "alice",
+                user_owner("subject-alice"),
+                "alice",
+                Subject::new("subject-alice"),
+                false,
+                100,
+            )
+            .await
+            .unwrap();
+
+        let ns = store
+            .get_namespace("alice")
+            .await
+            .unwrap()
+            .expect("claimed");
+        assert_eq!(ns.handle, "alice");
+        assert_eq!(ns.owner_label, "alice");
+        assert_eq!(ns.created_at, 100);
+        assert_eq!(ns.owner, user_owner("subject-alice"));
+        assert_eq!(store.list_namespaces().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn namespace_claim_conflict_is_rejected_without_leaking_owner() {
+        let store = InMemoryMetadataStore::default();
+        store
+            .claim_namespace(
+                "alice",
+                user_owner("subject-alice"),
+                "alice",
+                Subject::new("subject-alice"),
+                false,
+                100,
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .claim_namespace(
+                "alice",
+                user_owner("subject-bob"),
+                "bob",
+                Subject::new("subject-bob"),
+                false,
+                101,
+            )
+            .await
+            .expect_err("second claim must conflict");
+        let msg = err.to_string();
+        assert!(msg.contains("already claimed"), "got: {msg}");
+        // Conflict must not leak the prior owner's subject id.
+        assert!(!msg.contains("subject-alice"), "leaked owner id: {msg}");
+    }
+
+    #[tokio::test]
+    async fn namespace_release_records_tombstone_and_blocks_silent_reclaim() {
+        let store = InMemoryMetadataStore::default();
+        store
+            .claim_namespace(
+                "alice",
+                user_owner("subject-alice"),
+                "alice",
+                Subject::new("subject-alice"),
+                false,
+                100,
+            )
+            .await
+            .unwrap();
+        store
+            .release_namespace(
+                "alice",
+                Subject::new("subject-alice"),
+                ReleaseReason::OwnerDeleted,
+                200,
+            )
+            .await
+            .unwrap();
+
+        assert!(store.get_namespace("alice").await.unwrap().is_none());
+        let tomb = store
+            .get_released_handle("alice")
+            .await
+            .unwrap()
+            .expect("tombstone");
+        assert_eq!(tomb.prior_owner_label, "alice");
+        assert!(matches!(tomb.release_reason, ReleaseReason::OwnerDeleted));
+
+        // Re-claim without admin override is rejected by the tombstone.
+        let err = store
+            .claim_namespace(
+                "alice",
+                user_owner("subject-bob"),
+                "bob",
+                Subject::new("subject-bob"),
+                false,
+                300,
+            )
+            .await
+            .expect_err("reclaim must require admin override");
+        assert!(err.to_string().contains("admin override"));
+    }
+
+    #[tokio::test]
+    async fn namespace_release_rejected_while_content_remains() {
+        let store = InMemoryMetadataStore::default();
+        store
+            .claim_namespace(
+                "alice",
+                user_owner("subject-alice"),
+                "alice",
+                Subject::new("subject-alice"),
+                false,
+                100,
+            )
+            .await
+            .unwrap();
+        let (entry, _) = shared_read_tests::seed_entry();
+        store
+            .put_manifest("alice/app", "latest", entry)
+            .await
+            .unwrap();
+
+        let err = store
+            .release_namespace(
+                "alice",
+                Subject::new("subject-alice"),
+                ReleaseReason::OwnerDeleted,
+                200,
+            )
+            .await
+            .expect_err("release must be blocked by remaining content");
+        assert!(err.to_string().contains("delete them before releasing"));
+        // The namespace is restored on the failed release.
+        assert!(store.get_namespace("alice").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn namespace_admin_override_reclaims_released_handle() {
+        let store = InMemoryMetadataStore::default();
+        store
+            .claim_namespace(
+                "alice",
+                user_owner("subject-alice"),
+                "alice",
+                Subject::new("subject-alice"),
+                false,
+                100,
+            )
+            .await
+            .unwrap();
+        store
+            .release_namespace(
+                "alice",
+                Subject::new("subject-alice"),
+                ReleaseReason::OwnerDeleted,
+                200,
+            )
+            .await
+            .unwrap();
+
+        store
+            .claim_namespace(
+                "alice",
+                user_owner("subject-bob"),
+                "bob",
+                Subject::new("subject-admin"),
+                true,
+                300,
+            )
+            .await
+            .unwrap();
+
+        let ns = store
+            .get_namespace("alice")
+            .await
+            .unwrap()
+            .expect("reclaimed");
+        assert_eq!(ns.owner, user_owner("subject-bob"));
+        // Tombstone is consumed by the override reclaim.
+        assert!(store.get_released_handle("alice").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn namespace_admin_revoke_records_tombstone() {
+        let store = InMemoryMetadataStore::default();
+        store
+            .claim_namespace(
+                "alice",
+                user_owner("subject-alice"),
+                "alice",
+                Subject::new("subject-alice"),
+                false,
+                100,
+            )
+            .await
+            .unwrap();
+        store
+            .admin_revoke_namespace("alice", Subject::new("subject-admin"), 200)
+            .await
+            .unwrap();
+
+        assert!(store.get_namespace("alice").await.unwrap().is_none());
+        let tomb = store
+            .get_released_handle("alice")
+            .await
+            .unwrap()
+            .expect("tombstone");
+        assert!(matches!(tomb.release_reason, ReleaseReason::AdminRevoked));
+        assert_eq!(tomb.released_by, "subject-admin");
     }
 }
 

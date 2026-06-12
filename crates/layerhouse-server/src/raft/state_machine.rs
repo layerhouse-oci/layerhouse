@@ -123,7 +123,7 @@ impl StateMachine {
                 Ok(r) => Response::Repository(r),
                 Err(e) => Response::Error(e.to_string()),
             },
-            Request::Namespace(r) => match Self::apply_namespace(data, r) {
+            Request::Namespace(r) => match apply_namespace(data, r) {
                 Ok(r) => Response::Namespace(r),
                 Err(e) => Response::Error(e.to_string()),
             },
@@ -509,107 +509,142 @@ impl StateMachine {
             }
         }
     }
+}
 
-    fn apply_namespace(
-        data: &mut StateMachineData,
-        req: NamespaceRequest,
-    ) -> Result<NamespaceResponse, LayerhouseError> {
-        match req {
-            NamespaceRequest::Claim {
-                handle,
-                owner,
-                owner_label,
-                actor,
-                admin_override,
-                now,
-            } => {
-                validate_handle(&handle)?;
-                if data.namespaces.contains_key(&handle) {
-                    // Conflict body intentionally omits the prior owner id —
-                    // exposing it would leak cross-tenant subject/org ids to
-                    // an unrelated caller. Surface the kind only.
-                    let owner_kind = match data.namespaces.get(&handle).map(|n| &n.owner) {
-                        Some(crate::store::metadata::Owner::User(_)) => "user",
-                        Some(crate::store::metadata::Owner::Org(_)) => "org",
-                        None => "unknown",
-                    };
-                    return Err(LayerhouseError::Internal(format!(
-                        "handle {handle:?} is already claimed by a {owner_kind}"
-                    )));
-                }
-                if let Some(tomb) = data.released_handles.get(&handle) {
-                    if !admin_override {
-                        return Err(LayerhouseError::Internal(format!(
-                            "handle {handle:?} was previously released ({}); reclaim requires admin override",
-                            release_reason_label(&tomb.release_reason)
-                        )));
-                    }
-                    data.released_handles.remove(&handle);
-                }
-                let _ = actor;
-                data.namespaces.insert(
-                    handle.clone(),
-                    Namespace {
-                        handle,
-                        owner,
-                        owner_label,
-                        created_at: now,
-                    },
-                );
-                Ok(NamespaceResponse::Ok)
-            }
-            NamespaceRequest::Delete {
-                handle,
-                actor,
-                reason,
-                now,
-            } => {
-                let Some(ns) = data.namespaces.remove(&handle) else {
-                    return Err(LayerhouseError::Internal(format!(
-                        "handle {handle:?} is not currently claimed"
-                    )));
+/// Apply a namespace mutation against the full state machine data. Thin wrapper
+/// over [`apply_namespace_core`]: it splits out the namespace/tombstone maps
+/// (mutated) from the content collections (read-only) so the core logic has a
+/// single home and the test-only in-memory store can drive the exact same
+/// claim / release / revoke rules without re-implementing them.
+pub(crate) fn apply_namespace(
+    data: &mut StateMachineData,
+    req: NamespaceRequest,
+) -> Result<NamespaceResponse, LayerhouseError> {
+    let StateMachineData {
+        namespaces,
+        released_handles,
+        manifests,
+        tags,
+        repositories,
+        ..
+    } = data;
+    apply_namespace_core(namespaces, released_handles, req, |handle| {
+        let prefix = format!("{handle}/");
+        any_key_with_prefix(manifests, &prefix)
+            || any_key_with_prefix(tags, &prefix)
+            || any_key_with_prefix(repositories, &prefix)
+    })
+}
+
+/// Core claim / release / revoke logic, parameterized over the two namespace
+/// maps and a `has_content` predicate. Both the Raft apply path and the
+/// in-memory test double call this so the conflict-detection and tombstone
+/// rules cannot drift between them.
+///
+/// `has_content` reports whether any apply-tracked content still lives under
+/// the handle; release is rejected while it returns true so callers must delete
+/// repositories first (avoids unbounded Raft commits at release time).
+pub(crate) fn apply_namespace_core(
+    namespaces: &mut BTreeMap<String, Namespace>,
+    released_handles: &mut BTreeMap<String, ReleasedHandle>,
+    req: NamespaceRequest,
+    has_content: impl Fn(&str) -> bool,
+) -> Result<NamespaceResponse, LayerhouseError> {
+    match req {
+        NamespaceRequest::Claim {
+            handle,
+            owner,
+            owner_label,
+            actor,
+            admin_override,
+            now,
+        } => {
+            validate_handle(&handle)?;
+            if namespaces.contains_key(&handle) {
+                // Conflict body intentionally omits the prior owner id —
+                // exposing it would leak cross-tenant subject/org ids to
+                // an unrelated caller. Surface the kind only.
+                let owner_kind = match namespaces.get(&handle).map(|n| &n.owner) {
+                    Some(crate::store::metadata::Owner::User(_)) => "user",
+                    Some(crate::store::metadata::Owner::Org(_)) => "org",
+                    None => "unknown",
                 };
-                if namespace_has_content(data, &handle) {
-                    // Restore the namespace — release is rejected when content
-                    // remains so the caller must explicitly delete repos first
-                    // (avoids unbounded Raft commits at release time).
-                    data.namespaces.insert(handle.clone(), ns);
+                return Err(LayerhouseError::Internal(format!(
+                    "handle {handle:?} is already claimed by a {owner_kind}"
+                )));
+            }
+            if let Some(tomb) = released_handles.get(&handle) {
+                if !admin_override {
                     return Err(LayerhouseError::Internal(format!(
-                        "handle {handle:?} still owns repositories or manifests; delete them before releasing"
+                        "handle {handle:?} was previously released ({}); reclaim requires admin override",
+                        release_reason_label(&tomb.release_reason)
                     )));
                 }
-                data.released_handles.insert(
-                    handle.clone(),
-                    ReleasedHandle {
-                        handle: handle.clone(),
-                        prior_owner: ns.owner,
-                        prior_owner_label: ns.owner_label,
-                        released_at: now,
-                        released_by: actor,
-                        release_reason: reason,
-                    },
-                );
-                Ok(NamespaceResponse::Ok)
+                released_handles.remove(&handle);
             }
-            NamespaceRequest::AdminRevoke { handle, actor, now } => {
-                let Some(ns) = data.namespaces.remove(&handle) else {
-                    return Err(LayerhouseError::Internal(format!(
-                        "handle {handle:?} is not currently claimed"
-                    )));
-                };
-                data.released_handles.insert(
-                    handle.clone(),
-                    ReleasedHandle {
-                        handle: handle.clone(),
-                        prior_owner: ns.owner,
-                        prior_owner_label: ns.owner_label,
-                        released_at: now,
-                        released_by: actor,
-                        release_reason: ReleaseReason::AdminRevoked,
-                    },
-                );
-                Ok(NamespaceResponse::Ok)
+            let _ = actor;
+            namespaces.insert(
+                handle.clone(),
+                Namespace {
+                    handle,
+                    owner,
+                    owner_label,
+                    created_at: now,
+                },
+            );
+            Ok(NamespaceResponse::Ok)
+        }
+        NamespaceRequest::Delete {
+            handle,
+            actor,
+            reason,
+            now,
+        } => {
+            let Some(ns) = namespaces.remove(&handle) else {
+                return Err(LayerhouseError::Internal(format!(
+                    "handle {handle:?} is not currently claimed"
+                )));
+            };
+            if has_content(&handle) {
+                // Restore the namespace — release is rejected when content
+                // remains so the caller must explicitly delete repos first
+                // (avoids unbounded Raft commits at release time).
+                namespaces.insert(handle.clone(), ns);
+                return Err(LayerhouseError::Internal(format!(
+                    "handle {handle:?} still owns repositories or manifests; delete them before releasing"
+                )));
             }
+            released_handles.insert(
+                handle.clone(),
+                ReleasedHandle {
+                    handle: handle.clone(),
+                    prior_owner: ns.owner,
+                    prior_owner_label: ns.owner_label,
+                    released_at: now,
+                    released_by: actor,
+                    release_reason: reason,
+                },
+            );
+            Ok(NamespaceResponse::Ok)
+        }
+        NamespaceRequest::AdminRevoke { handle, actor, now } => {
+            let Some(ns) = namespaces.remove(&handle) else {
+                return Err(LayerhouseError::Internal(format!(
+                    "handle {handle:?} is not currently claimed"
+                )));
+            };
+            released_handles.insert(
+                handle.clone(),
+                ReleasedHandle {
+                    handle: handle.clone(),
+                    prior_owner: ns.owner,
+                    prior_owner_label: ns.owner_label,
+                    released_at: now,
+                    released_by: actor,
+                    release_reason: ReleaseReason::AdminRevoked,
+                },
+            );
+            Ok(NamespaceResponse::Ok)
         }
     }
 }
@@ -631,21 +666,18 @@ fn require_live_namespace(
     Ok(())
 }
 
-/// True if any apply-tracked content under `handle` would be orphaned by
-/// releasing the namespace. The union here mirrors the write paths gated by
-/// `require_live_namespace`.
+/// True if any key in `map` begins with `prefix`. Used to detect apply-tracked
+/// content (`<handle>/...`) still living under a namespace.
 ///
-/// Scoped configuration state — sync jobs, mirror rules, proxy caches, warm
-/// images — is not yet considered here because those collections store free-
-/// form ids without a structural handle field. When the namespace routes land
-/// and those configs gain a `handle` association, fold them into this check
-/// (and into `require_live_namespace`) so admin-reclaim cannot inherit the
-/// previous owner's automation.
-fn namespace_has_content(data: &StateMachineData, handle: &str) -> bool {
-    let prefix = format!("{handle}/");
-    data.manifests.keys().any(|k| k.starts_with(&prefix))
-        || data.tags.keys().any(|k| k.starts_with(&prefix))
-        || data.repositories.keys().any(|k| k.starts_with(&prefix))
+/// The union of manifests + tags + repositories mirrors the write paths gated
+/// by `require_live_namespace`. Scoped configuration state — sync jobs, mirror
+/// rules, proxy caches, warm images — is not yet considered because those
+/// collections store free-form ids without a structural handle field. When the
+/// namespace routes land and those configs gain a `handle` association, fold
+/// them into the release-time content check (and into `require_live_namespace`)
+/// so admin-reclaim cannot inherit the previous owner's automation.
+fn any_key_with_prefix<V>(map: &BTreeMap<String, V>, prefix: &str) -> bool {
+    map.keys().any(|k| k.starts_with(prefix))
 }
 
 fn release_reason_label(reason: &ReleaseReason) -> &'static str {
@@ -1026,6 +1058,22 @@ impl StateMachineData {
 
     pub fn get_repository(&self, name: &str) -> Option<Repository> {
         self.repositories.get(name).cloned()
+    }
+
+    pub fn get_namespace(&self, handle: &str) -> Option<Namespace> {
+        self.namespaces.get(handle).cloned()
+    }
+
+    // Consumed by the namespace listing route in a follow-up.
+    #[allow(dead_code)]
+    pub fn list_namespaces(&self) -> Vec<Namespace> {
+        self.namespaces.values().cloned().collect()
+    }
+
+    // Consumed by the reclaim/reserved-handle flow in a follow-up.
+    #[allow(dead_code)]
+    pub fn get_released_handle(&self, handle: &str) -> Option<ReleasedHandle> {
+        self.released_handles.get(handle).cloned()
     }
 
     pub fn list_proxy_caches(&self) -> Vec<ProxyCache> {

@@ -8,9 +8,10 @@ use tracing::{debug, warn};
 use super::state_machine::StateMachineData;
 use super::{
     JobRequest, JobResponse, ManifestRequest, ManifestResponse, MirrorConfigRequest,
-    MirrorConfigResponse, RaftInstance, RepositoryRequest, RepositoryResponse, Request, Response,
-    TokenRequest, TokenResponse,
+    MirrorConfigResponse, NamespaceRequest, NamespaceResponse, RaftInstance, RepositoryRequest,
+    RepositoryResponse, Request, Response, TokenRequest, TokenResponse,
 };
+use crate::auth::identity::Subject;
 use crate::config::RaftTlsConfig;
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
@@ -18,8 +19,9 @@ use crate::raft::network;
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion, HelmStore,
     JobStore, ManifestEntry, ManifestStore, ManifestSummary, MirrorConfigStore, MirrorRule,
-    PersonalAccessToken, ProxyCache, ProxyCacheTagValidation, ReferrerEntry, Repository,
-    RepositoryStore, RepositorySummary, SyncJob, SyncJobRun, TokenStore, WarmImage,
+    Namespace, NamespaceStore, Owner, PersonalAccessToken, ProxyCache, ProxyCacheTagValidation,
+    ReferrerEntry, ReleaseReason, ReleasedHandle, Repository, RepositoryStore, RepositorySummary,
+    SyncJob, SyncJobRun, TokenStore, WarmImage,
 };
 
 const FOLLOWER_READ_LAG_THRESHOLD: u64 = 100;
@@ -162,6 +164,23 @@ impl RaftMetadataStore {
             Response::Repository(r) => Ok(r),
             other => Err(LayerhouseError::Internal(format!(
                 "unexpected repository response: {:?}",
+                other
+            ))),
+        }
+    }
+
+    // Consumed by the namespace routes and the check_permission rewrite in a
+    // follow-up; the write path is wired here so the store boundary lands
+    // whole.
+    #[allow(dead_code)]
+    async fn write_namespace(
+        &self,
+        req: NamespaceRequest,
+    ) -> Result<NamespaceResponse, LayerhouseError> {
+        match self.write(Request::Namespace(req)).await? {
+            Response::Namespace(r) => Ok(r),
+            other => Err(LayerhouseError::Internal(format!(
+                "unexpected namespace response: {:?}",
                 other
             ))),
         }
@@ -665,5 +684,86 @@ impl RepositoryStore for RaftMetadataStore {
             RepositoryResponse::Bool(deleted) => Ok(deleted),
             RepositoryResponse::Ok => Ok(false),
         }
+    }
+}
+
+// Namespace reads/writes are consumed by the namespace routes and the
+// check_permission rewrite in a follow-up; landing the full store impl here
+// keeps the trait boundary complete.
+#[allow(dead_code)]
+#[async_trait]
+impl NamespaceStore for RaftMetadataStore {
+    async fn get_namespace(&self, handle: &str) -> Result<Option<Namespace>, LayerhouseError> {
+        self.emit_read_metrics("get_namespace");
+        let state = self.state.read().await;
+        Ok(state.get_namespace(handle))
+    }
+
+    async fn list_namespaces(&self) -> Result<Vec<Namespace>, LayerhouseError> {
+        self.emit_read_metrics("list_namespaces");
+        let state = self.state.read().await;
+        Ok(state.list_namespaces())
+    }
+
+    async fn get_released_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<ReleasedHandle>, LayerhouseError> {
+        self.emit_read_metrics("get_released_handle");
+        let state = self.state.read().await;
+        Ok(state.get_released_handle(handle))
+    }
+
+    async fn claim_namespace(
+        &self,
+        handle: &str,
+        owner: Owner,
+        owner_label: &str,
+        actor: Subject,
+        admin_override: bool,
+        now: u64,
+    ) -> Result<(), LayerhouseError> {
+        self.write_namespace(NamespaceRequest::Claim {
+            handle: handle.to_string(),
+            owner,
+            owner_label: owner_label.to_string(),
+            actor,
+            admin_override,
+            now,
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn release_namespace(
+        &self,
+        handle: &str,
+        actor: Subject,
+        reason: ReleaseReason,
+        now: u64,
+    ) -> Result<(), LayerhouseError> {
+        self.write_namespace(NamespaceRequest::Delete {
+            handle: handle.to_string(),
+            actor,
+            reason,
+            now,
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn admin_revoke_namespace(
+        &self,
+        handle: &str,
+        actor: Subject,
+        now: u64,
+    ) -> Result<(), LayerhouseError> {
+        self.write_namespace(NamespaceRequest::AdminRevoke {
+            handle: handle.to_string(),
+            actor,
+            now,
+        })
+        .await?;
+        Ok(())
     }
 }

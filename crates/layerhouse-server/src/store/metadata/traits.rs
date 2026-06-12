@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use super::types::*;
+use crate::auth::identity::Subject;
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
 
@@ -194,6 +195,53 @@ pub trait RepositoryStore: Send + Sync + 'static {
     async fn delete_repository_meta(&self, name: &str) -> Result<bool, LayerhouseError>;
 }
 
+/// Namespace (first-segment handle) ownership. A live `Namespace` entry is the
+/// authority that gates every content write under `<handle>/...`; a released
+/// handle leaves a `ReleasedHandle` tombstone that blocks silent re-claim
+/// unless an admin overrides. Claim/release/revoke carry the acting `Subject`
+/// and a leader-minted timestamp because apply must stay deterministic across
+/// followers.
+///
+/// The methods land ahead of their consumers (namespace routes and the
+/// check_permission rewrite) so the store boundary is defined in one place;
+/// `#[allow(dead_code)]` covers the gap until those follow-ups wire them in.
+#[allow(dead_code)]
+#[async_trait]
+pub trait NamespaceStore: Send + Sync + 'static {
+    async fn get_namespace(&self, handle: &str) -> Result<Option<Namespace>, LayerhouseError>;
+    async fn list_namespaces(&self) -> Result<Vec<Namespace>, LayerhouseError>;
+    async fn get_released_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<ReleasedHandle>, LayerhouseError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_namespace(
+        &self,
+        handle: &str,
+        owner: Owner,
+        owner_label: &str,
+        actor: Subject,
+        admin_override: bool,
+        now: u64,
+    ) -> Result<(), LayerhouseError>;
+
+    async fn release_namespace(
+        &self,
+        handle: &str,
+        actor: Subject,
+        reason: ReleaseReason,
+        now: u64,
+    ) -> Result<(), LayerhouseError>;
+
+    async fn admin_revoke_namespace(
+        &self,
+        handle: &str,
+        actor: Subject,
+        now: u64,
+    ) -> Result<(), LayerhouseError>;
+}
+
 /// OCI registry core: manifest CRUD + mirror config + blob lifecycle.
 pub trait RegistryStore: ManifestStore + MirrorConfigStore {}
 impl<T: ManifestStore + MirrorConfigStore> RegistryStore for T {}
@@ -209,12 +257,25 @@ impl<T: ManifestStore + MirrorConfigStore + JobStore> SchedulerStore for T {}
 // ── Supertrait for backward compatibility ─────────────────────────────
 
 pub trait MetadataStore:
-    ManifestStore + MirrorConfigStore + JobStore + TokenStore + HelmStore + RepositoryStore
+    ManifestStore
+    + MirrorConfigStore
+    + JobStore
+    + TokenStore
+    + HelmStore
+    + RepositoryStore
+    + NamespaceStore
 {
 }
 
-impl<T: ManifestStore + MirrorConfigStore + JobStore + TokenStore + HelmStore + RepositoryStore>
-    MetadataStore for T
+impl<
+    T: ManifestStore
+        + MirrorConfigStore
+        + JobStore
+        + TokenStore
+        + HelmStore
+        + RepositoryStore
+        + NamespaceStore,
+> MetadataStore for T
 {
 }
 
