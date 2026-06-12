@@ -17,7 +17,7 @@ use super::{
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
 use crate::oci::manifest::extract_referenced_digests;
-use crate::store::metadata::handle::{handle_of, validate_handle};
+use crate::store::metadata::handle::{handle_of, is_handle_reserved, validate_handle};
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion,
     ManifestEntry, ManifestSummary, MirrorRule, Namespace, PermissionRule, PersonalAccessToken,
@@ -560,6 +560,11 @@ pub(crate) fn apply_namespace_core(
             now,
         } => {
             validate_handle(&handle)?;
+            if is_handle_reserved(&handle) {
+                return Err(LayerhouseError::Internal(format!(
+                    "handle {handle:?} is reserved by the system and cannot be claimed"
+                )));
+            }
             if namespaces.contains_key(&handle) {
                 // Conflict body intentionally omits the prior owner id —
                 // exposing it would leak cross-tenant subject/org ids to
@@ -600,20 +605,29 @@ pub(crate) fn apply_namespace_core(
             reason,
             now,
         } => {
-            let Some(ns) = namespaces.remove(&handle) else {
+            let Some(ns) = namespaces.get(&handle) else {
                 return Err(LayerhouseError::Internal(format!(
                     "handle {handle:?} is not currently claimed"
                 )));
             };
+            // Only the namespace owner may release it. Admins use
+            // AdminRevoke, not Delete. Org-owned namespaces always
+            // require admin intervention until org membership lands.
+            let is_owner = match &ns.owner {
+                crate::store::metadata::Owner::User(subject) => actor == *subject,
+                crate::store::metadata::Owner::Org(_) => false,
+            };
+            if !is_owner {
+                return Err(LayerhouseError::Internal(format!(
+                    "handle {handle:?} is not owned by the caller"
+                )));
+            }
             if has_content(&handle) {
-                // Restore the namespace — release is rejected when content
-                // remains so the caller must explicitly delete repos first
-                // (avoids unbounded Raft commits at release time).
-                namespaces.insert(handle.clone(), ns);
                 return Err(LayerhouseError::Internal(format!(
                     "handle {handle:?} still owns repositories or manifests; delete them before releasing"
                 )));
             }
+            let ns = namespaces.remove(&handle).expect("namespace just verified");
             released_handles.insert(
                 handle.clone(),
                 ReleasedHandle {
@@ -658,6 +672,9 @@ fn require_live_namespace(
     repository: &str,
 ) -> Result<(), LayerhouseError> {
     let handle = handle_of(repository)?;
+    if is_handle_reserved(handle) {
+        return Ok(());
+    }
     if !data.namespaces.contains_key(handle) {
         return Err(LayerhouseError::Internal(format!(
             "namespace {handle:?} does not exist (referenced by {repository:?})"
@@ -1911,7 +1928,7 @@ mod tests {
             &mut data,
             Request::Namespace(NamespaceRequest::Delete {
                 handle: "alice".to_string(),
-                actor: Subject::new("idp-alice"),
+                actor: Subject::new("test-alice"),
                 reason: ReleaseReason::OwnerDeleted,
                 now: 200,
             }),
@@ -1934,7 +1951,7 @@ mod tests {
             &mut data,
             Request::Namespace(NamespaceRequest::Delete {
                 handle: "alice".to_string(),
-                actor: Subject::new("idp-alice"),
+                actor: Subject::new("test-alice"),
                 reason: ReleaseReason::OwnerDeleted,
                 now: 200,
             }),
@@ -2073,7 +2090,7 @@ mod tests {
             &mut data,
             Request::Namespace(NamespaceRequest::Delete {
                 handle: "alice".to_string(),
-                actor: Subject::new("idp-alice"),
+                actor: Subject::new("test-alice"),
                 reason: ReleaseReason::Renamed {
                     new_handle: "alice2".to_string(),
                 },
