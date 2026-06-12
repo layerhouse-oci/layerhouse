@@ -12,9 +12,10 @@ use openraft::BasicNode;
 use openraft::TokioRuntime;
 use serde::{Deserialize, Serialize};
 
+use crate::auth::identity::Subject;
 use crate::store::metadata::{
-    BlobDeleteStatus, DeleteCounts, MirrorRule, PersonalAccessToken, ProxyCache,
-    ProxyCacheTagValidation, Repository, SyncJob, SyncJobRun, WarmImage,
+    BlobDeleteStatus, DeleteCounts, MirrorRule, Owner, PersonalAccessToken, ProxyCache,
+    ProxyCacheTagValidation, ReleaseReason, Repository, SyncJob, SyncJobRun, WarmImage,
 };
 
 openraft::declare_raft_types!(
@@ -157,6 +158,39 @@ pub enum RepositoryResponse {
     Bool(bool),
 }
 
+// ── Namespace domain ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NamespaceRequest {
+    Claim {
+        handle: String,
+        owner: Owner,
+        owner_label: String,
+        actor: Subject,
+        admin_override: bool,
+        /// Wall-clock timestamp captured on the leader before the request
+        /// enters Raft consensus. Apply must be deterministic across followers,
+        /// so timestamps cannot be minted inside the state machine.
+        now: u64,
+    },
+    Delete {
+        handle: String,
+        actor: Subject,
+        reason: ReleaseReason,
+        now: u64,
+    },
+    AdminRevoke {
+        handle: String,
+        actor: Subject,
+        now: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NamespaceResponse {
+    Ok,
+}
+
 // ── Outer wrappers (for OpenRaft TypeConfig) ─────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +200,7 @@ pub enum Request {
     Job(JobRequest),
     Token(TokenRequest),
     Repository(RepositoryRequest),
+    Namespace(NamespaceRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,4 +210,10 @@ pub enum Response {
     Job(JobResponse),
     Token(TokenResponse),
     Repository(RepositoryResponse),
+    Namespace(NamespaceResponse),
+    /// Apply-time error encoded as a string. Decoded by the router into
+    /// `LayerhouseError::Internal(msg)`. A typed envelope will replace this
+    /// placeholder; for now it lets fallible applies travel back through
+    /// openraft (which requires `Serialize`/`Deserialize` on the response).
+    Error(String),
 }

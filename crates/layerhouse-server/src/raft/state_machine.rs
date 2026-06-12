@@ -11,20 +11,22 @@ use tokio::sync::RwLock;
 
 use super::{
     JobRequest, JobResponse, ManifestRequest, ManifestResponse, MirrorConfigRequest,
-    MirrorConfigResponse, RepositoryRequest, RepositoryResponse, Request, Response, TokenRequest,
-    TokenResponse, TypeConfig,
+    MirrorConfigResponse, NamespaceRequest, NamespaceResponse, RepositoryRequest,
+    RepositoryResponse, Request, Response, TokenRequest, TokenResponse, TypeConfig,
 };
+use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
 use crate::oci::manifest::extract_referenced_digests;
+use crate::store::metadata::handle::{handle_of, validate_handle};
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion,
-    ManifestEntry, ManifestSummary, MirrorRule, PermissionRule, PersonalAccessToken, ProxyCache,
-    ReferrerEntry, Repository, RepositorySummary, SyncJob, SyncJobKind, SyncJobRun, SyncJobStatus,
-    WarmImage, clear_proxy_cache_tag_validations_for_cache,
-    clear_proxy_cache_tag_validations_for_repository, clear_proxy_cache_tag_validations_for_tag,
-    get_proxy_cache_tag_validation, mirror_rule_job, now_epoch, proxy_cache_warm_job,
-    put_proxy_cache_tag_validation, repository_manifest_size_bytes, repository_stored_size_bytes,
-    sync_job_blocks_trigger,
+    ManifestEntry, ManifestSummary, MirrorRule, Namespace, PermissionRule, PersonalAccessToken,
+    ProxyCache, ReferrerEntry, ReleaseReason, ReleasedHandle, Repository, RepositorySummary,
+    SyncJob, SyncJobKind, SyncJobRun, SyncJobStatus, WarmImage,
+    clear_proxy_cache_tag_validations_for_cache, clear_proxy_cache_tag_validations_for_repository,
+    clear_proxy_cache_tag_validations_for_tag, get_proxy_cache_tag_validation, mirror_rule_job,
+    now_epoch, proxy_cache_warm_job, put_proxy_cache_tag_validation,
+    repository_manifest_size_bytes, repository_stored_size_bytes, sync_job_blocks_trigger,
 };
 
 const SNAPSHOT_VERSION: u32 = 5;
@@ -69,6 +71,16 @@ pub struct StateMachineData {
     /// the dashboard editing flow lands in Phase 3.
     #[serde(default)]
     pub permission_rules: BTreeMap<String, PermissionRule>,
+    /// Live first-segment claims. The presence of `namespaces[handle]` is the
+    /// apply-time precondition for any write that creates content under that
+    /// handle (manifest push, repository create, blob mount).
+    #[serde(default)]
+    pub namespaces: BTreeMap<String, Namespace>,
+    /// Tombstones for previously-claimed handles. Reclaim is admin-gated; the
+    /// frozen `prior_owner_label` survives release so the UX can show the
+    /// last-known owner even after the IdP-side label changes.
+    #[serde(default)]
+    pub released_handles: BTreeMap<String, ReleasedHandle>,
 }
 
 pub struct StateMachine {
@@ -95,15 +107,28 @@ impl StateMachine {
 
     fn apply_request(data: &mut StateMachineData, req: Request) -> Response {
         match req {
-            Request::Manifest(r) => Response::Manifest(Self::apply_manifest(data, r)),
+            Request::Manifest(r) => match Self::apply_manifest(data, r) {
+                Ok(r) => Response::Manifest(r),
+                Err(e) => Response::Error(e.to_string()),
+            },
             Request::MirrorConfig(r) => Response::MirrorConfig(Self::apply_mirror_config(data, r)),
             Request::Job(r) => Response::Job(Self::apply_job(data, r)),
             Request::Token(r) => Response::Token(Self::apply_token(data, r)),
-            Request::Repository(r) => Response::Repository(Self::apply_repository(data, r)),
+            Request::Repository(r) => match Self::apply_repository(data, r) {
+                Ok(r) => Response::Repository(r),
+                Err(e) => Response::Error(e.to_string()),
+            },
+            Request::Namespace(r) => match Self::apply_namespace(data, r) {
+                Ok(r) => Response::Namespace(r),
+                Err(e) => Response::Error(e.to_string()),
+            },
         }
     }
 
-    fn apply_manifest(data: &mut StateMachineData, req: ManifestRequest) -> ManifestResponse {
+    fn apply_manifest(
+        data: &mut StateMachineData,
+        req: ManifestRequest,
+    ) -> Result<ManifestResponse, LayerhouseError> {
         match req {
             ManifestRequest::PutManifest {
                 name,
@@ -121,6 +146,7 @@ impl StateMachine {
                 config_summary,
                 referenced_blobs,
             } => {
+                require_live_namespace(data, &name)?;
                 let digest_parsed =
                     Digest::from_str_checked(&digest).unwrap_or_else(|| Digest::sha256(&body));
                 let subject_parsed = subject.and_then(|s| Digest::from_str_checked(&s));
@@ -175,7 +201,7 @@ impl StateMachine {
                         .insert(reference, entry_key);
                 }
 
-                ManifestResponse::Ok
+                Ok(ManifestResponse::Ok)
             }
             ManifestRequest::DeleteManifest { name, digest } => {
                 let mut removed = None;
@@ -202,7 +228,7 @@ impl StateMachine {
                         &tag,
                     );
                 }
-                ManifestResponse::Ok
+                Ok(ManifestResponse::Ok)
             }
             ManifestRequest::DeleteTag { name, digest, tag } => {
                 let removed = data
@@ -224,7 +250,7 @@ impl StateMachine {
                         &tag,
                     );
                 }
-                ManifestResponse::Bool(removed)
+                Ok(ManifestResponse::Bool(removed))
             }
             ManifestRequest::DeleteRepository { name } => {
                 let removed = data.manifests.remove(&name);
@@ -239,10 +265,10 @@ impl StateMachine {
                     &mut data.proxy_cache_tag_validations,
                     &name,
                 );
-                ManifestResponse::DeleteCounts(DeleteCounts {
+                Ok(ManifestResponse::DeleteCounts(DeleteCounts {
                     deleted_manifests,
                     deleted_tags,
-                })
+                }))
             }
             ManifestRequest::DeleteManifests { name, digests } => {
                 let digest_set: std::collections::BTreeSet<String> = digests.into_iter().collect();
@@ -279,16 +305,19 @@ impl StateMachine {
                         &tag,
                     );
                 }
-                ManifestResponse::DeleteCounts(DeleteCounts {
+                Ok(ManifestResponse::DeleteCounts(DeleteCounts {
                     deleted_manifests,
                     deleted_tags,
-                })
+                }))
             }
             ManifestRequest::MountBlob {
                 source_repo: _,
-                dest_repo: _,
+                dest_repo,
                 digest: _,
-            } => ManifestResponse::Ok,
+            } => {
+                require_live_namespace(data, &dest_repo)?;
+                Ok(ManifestResponse::Ok)
+            }
             ManifestRequest::RecordBlobDelete {
                 digest,
                 requested_at,
@@ -296,15 +325,15 @@ impl StateMachine {
                 let ref_count = data.blob_ref_count_str(&digest);
                 data.blob_delete_requests
                     .insert(digest.clone(), requested_at);
-                ManifestResponse::BlobDeleteStatus(BlobDeleteStatus {
+                Ok(ManifestResponse::BlobDeleteStatus(BlobDeleteStatus {
                     digest,
                     referenced: ref_count > 0,
                     ref_count,
-                })
+                }))
             }
             ManifestRequest::ClearBlobDelete { digest } => {
                 data.blob_delete_requests.remove(&digest);
-                ManifestResponse::Ok
+                Ok(ManifestResponse::Ok)
             }
         }
     }
@@ -459,17 +488,166 @@ impl StateMachine {
         }
     }
 
-    fn apply_repository(data: &mut StateMachineData, req: RepositoryRequest) -> RepositoryResponse {
+    fn apply_repository(
+        data: &mut StateMachineData,
+        req: RepositoryRequest,
+    ) -> Result<RepositoryResponse, LayerhouseError> {
         match req {
             RepositoryRequest::PutRepository(repo) => {
+                require_live_namespace(data, &repo.name)?;
                 data.repositories.insert(repo.name.clone(), repo);
-                RepositoryResponse::Ok
+                Ok(RepositoryResponse::Ok)
             }
             RepositoryRequest::DeleteRepository { name } => {
                 let removed = data.repositories.remove(&name).is_some();
-                RepositoryResponse::Bool(removed)
+                Ok(RepositoryResponse::Bool(removed))
             }
         }
+    }
+
+    fn apply_namespace(
+        data: &mut StateMachineData,
+        req: NamespaceRequest,
+    ) -> Result<NamespaceResponse, LayerhouseError> {
+        match req {
+            NamespaceRequest::Claim {
+                handle,
+                owner,
+                owner_label,
+                actor,
+                admin_override,
+                now,
+            } => {
+                validate_handle(&handle)?;
+                if data.namespaces.contains_key(&handle) {
+                    // Conflict body intentionally omits the prior owner id —
+                    // exposing it would leak cross-tenant subject/org ids to
+                    // an unrelated caller. Surface the kind only.
+                    let owner_kind = match data.namespaces.get(&handle).map(|n| &n.owner) {
+                        Some(crate::store::metadata::Owner::User(_)) => "user",
+                        Some(crate::store::metadata::Owner::Org(_)) => "org",
+                        None => "unknown",
+                    };
+                    return Err(LayerhouseError::Internal(format!(
+                        "handle {handle:?} is already claimed by a {owner_kind}"
+                    )));
+                }
+                if let Some(tomb) = data.released_handles.get(&handle) {
+                    if !admin_override {
+                        return Err(LayerhouseError::Internal(format!(
+                            "handle {handle:?} was previously released ({}); reclaim requires admin override",
+                            release_reason_label(&tomb.release_reason)
+                        )));
+                    }
+                    data.released_handles.remove(&handle);
+                }
+                let _ = actor;
+                data.namespaces.insert(
+                    handle.clone(),
+                    Namespace {
+                        handle,
+                        owner,
+                        owner_label,
+                        created_at: now,
+                    },
+                );
+                Ok(NamespaceResponse::Ok)
+            }
+            NamespaceRequest::Delete {
+                handle,
+                actor,
+                reason,
+                now,
+            } => {
+                let Some(ns) = data.namespaces.remove(&handle) else {
+                    return Err(LayerhouseError::Internal(format!(
+                        "handle {handle:?} is not currently claimed"
+                    )));
+                };
+                if namespace_has_content(data, &handle) {
+                    // Restore the namespace — release is rejected when content
+                    // remains so the caller must explicitly delete repos first
+                    // (avoids unbounded Raft commits at release time).
+                    data.namespaces.insert(handle.clone(), ns);
+                    return Err(LayerhouseError::Internal(format!(
+                        "handle {handle:?} still owns repositories or manifests; delete them before releasing"
+                    )));
+                }
+                data.released_handles.insert(
+                    handle.clone(),
+                    ReleasedHandle {
+                        handle: handle.clone(),
+                        prior_owner: ns.owner,
+                        prior_owner_label: ns.owner_label,
+                        released_at: now,
+                        released_by: actor,
+                        release_reason: reason,
+                    },
+                );
+                Ok(NamespaceResponse::Ok)
+            }
+            NamespaceRequest::AdminRevoke { handle, actor, now } => {
+                let Some(ns) = data.namespaces.remove(&handle) else {
+                    return Err(LayerhouseError::Internal(format!(
+                        "handle {handle:?} is not currently claimed"
+                    )));
+                };
+                data.released_handles.insert(
+                    handle.clone(),
+                    ReleasedHandle {
+                        handle: handle.clone(),
+                        prior_owner: ns.owner,
+                        prior_owner_label: ns.owner_label,
+                        released_at: now,
+                        released_by: actor,
+                        release_reason: ReleaseReason::AdminRevoked,
+                    },
+                );
+                Ok(NamespaceResponse::Ok)
+            }
+        }
+    }
+}
+
+/// Apply-time precondition: every write that creates content under a handle
+/// must observe a live namespace claim for that handle. Rejecting here closes
+/// the race where a namespace is released between route-layer authorization
+/// and Raft commit.
+fn require_live_namespace(
+    data: &StateMachineData,
+    repository: &str,
+) -> Result<(), LayerhouseError> {
+    let handle = handle_of(repository)?;
+    if !data.namespaces.contains_key(handle) {
+        return Err(LayerhouseError::Internal(format!(
+            "namespace {handle:?} does not exist (referenced by {repository:?})"
+        )));
+    }
+    Ok(())
+}
+
+/// True if any apply-tracked content under `handle` would be orphaned by
+/// releasing the namespace. The union here mirrors the write paths gated by
+/// `require_live_namespace`.
+///
+/// Scoped configuration state — sync jobs, mirror rules, proxy caches, warm
+/// images — is not yet considered here because those collections store free-
+/// form ids without a structural handle field. When the namespace routes land
+/// and those configs gain a `handle` association, fold them into this check
+/// (and into `require_live_namespace`) so admin-reclaim cannot inherit the
+/// previous owner's automation.
+fn namespace_has_content(data: &StateMachineData, handle: &str) -> bool {
+    let prefix = format!("{handle}/");
+    data.manifests.keys().any(|k| k.starts_with(&prefix))
+        || data.tags.keys().any(|k| k.starts_with(&prefix))
+        || data.repositories.keys().any(|k| k.starts_with(&prefix))
+}
+
+fn release_reason_label(reason: &ReleaseReason) -> &'static str {
+    match reason {
+        ReleaseReason::OwnerDeleted => "owner-deleted",
+        ReleaseReason::AdminRevoked => "admin-revoked",
+        ReleaseReason::Renamed { .. } => "renamed",
     }
 }
 
@@ -920,6 +1098,23 @@ impl StateMachineData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::identity::Subject;
+    use crate::store::metadata::Owner;
+
+    /// Insert a live namespace claim so D21-gated writes (`PutManifest`,
+    /// `PutRepository`, `MountBlob`) can land. Tests that exercise content
+    /// under a handle must seed the handle first.
+    fn seed_namespace(data: &mut StateMachineData, handle: &str) {
+        data.namespaces.insert(
+            handle.to_string(),
+            Namespace {
+                handle: handle.to_string(),
+                owner: Owner::User(Subject::new(format!("test-{handle}"))),
+                owner_label: handle.to_string(),
+                created_at: 1,
+            },
+        );
+    }
 
     fn digest(id: u8) -> String {
         format!("sha256:{id:064x}")
@@ -947,7 +1142,12 @@ mod tests {
         .into_bytes()
     }
 
-    fn put_manifest(reference: &str, manifest_digest: &str, referenced_blobs: &[&str]) -> Request {
+    fn put_manifest(
+        repo: &str,
+        reference: &str,
+        manifest_digest: &str,
+        referenced_blobs: &[&str],
+    ) -> Request {
         let default_config = digest(1);
         let config_digest = referenced_blobs
             .first()
@@ -958,7 +1158,7 @@ mod tests {
             .map(|value| crate::oci::manifest::stored_size_bytes(&value))
             .unwrap_or(0);
         Request::Manifest(ManifestRequest::PutManifest {
-            name: "repo".to_string(),
+            name: repo.to_string(),
             reference: reference.to_string(),
             digest: manifest_digest.to_string(),
             content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
@@ -1005,29 +1205,38 @@ mod tests {
         let manifest_a = digest(20);
         let manifest_b = digest(21);
         let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
 
         StateMachine::apply_request(
             &mut data,
-            put_manifest("latest", &manifest_a, &[&blob_a, &blob_b, &blob_b]),
+            put_manifest(
+                "alice/repo",
+                "latest",
+                &manifest_a,
+                &[&blob_a, &blob_b, &blob_b],
+            ),
         );
         assert_eq!(data.blob_ref_count_str(&blob_a), 1);
         assert_eq!(data.blob_ref_count_str(&blob_b), 1);
 
         StateMachine::apply_request(
             &mut data,
-            put_manifest("latest", &manifest_a, &[&blob_a, &blob_b]),
+            put_manifest("alice/repo", "latest", &manifest_a, &[&blob_a, &blob_b]),
         );
         assert_eq!(data.blob_ref_count_str(&blob_a), 1);
         assert_eq!(data.blob_ref_count_str(&blob_b), 1);
 
-        StateMachine::apply_request(&mut data, put_manifest("latest", &manifest_b, &[&blob_a]));
+        StateMachine::apply_request(
+            &mut data,
+            put_manifest("alice/repo", "latest", &manifest_b, &[&blob_a]),
+        );
         assert_eq!(data.blob_ref_count_str(&blob_a), 2);
         assert_eq!(data.blob_ref_count_str(&blob_b), 1);
 
         let response = StateMachine::apply_request(
             &mut data,
             Request::Manifest(ManifestRequest::DeleteTag {
-                name: "repo".to_string(),
+                name: "alice/repo".to_string(),
                 digest: manifest_b.clone(),
                 tag: "latest".to_string(),
             }),
@@ -1042,7 +1251,7 @@ mod tests {
         StateMachine::apply_request(
             &mut data,
             Request::Manifest(ManifestRequest::DeleteManifest {
-                name: "repo".to_string(),
+                name: "alice/repo".to_string(),
                 digest: manifest_a,
             }),
         );
@@ -1052,7 +1261,7 @@ mod tests {
         StateMachine::apply_request(
             &mut data,
             Request::Manifest(ManifestRequest::DeleteManifests {
-                name: "repo".to_string(),
+                name: "alice/repo".to_string(),
                 digests: vec![manifest_b],
             }),
         );
@@ -1064,17 +1273,21 @@ mod tests {
         let blob_a = digest(30);
         let blob_b = digest(31);
         let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
 
-        StateMachine::apply_request(&mut data, put_manifest("one", &digest(40), &[&blob_a]));
         StateMachine::apply_request(
             &mut data,
-            put_manifest("two", &digest(41), &[&blob_a, &blob_b]),
+            put_manifest("alice/repo", "one", &digest(40), &[&blob_a]),
+        );
+        StateMachine::apply_request(
+            &mut data,
+            put_manifest("alice/repo", "two", &digest(41), &[&blob_a, &blob_b]),
         );
 
         let response = StateMachine::apply_request(
             &mut data,
             Request::Manifest(ManifestRequest::DeleteRepository {
-                name: "repo".to_string(),
+                name: "alice/repo".to_string(),
             }),
         );
 
@@ -1099,7 +1312,7 @@ mod tests {
         };
 
         data.manifests
-            .entry("repo".to_string())
+            .entry("alice/repo".to_string())
             .or_default()
             .insert(
                 digest(60),
@@ -1110,7 +1323,7 @@ mod tests {
                 ),
             );
         data.manifests
-            .entry("repo".to_string())
+            .entry("alice/repo".to_string())
             .or_default()
             .insert(
                 digest(61),
@@ -1256,25 +1469,29 @@ mod tests {
     #[test]
     fn proxy_cache_tag_validation_is_cleared_by_manifest_deletes() {
         let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
         let manifest = digest(71);
 
-        StateMachine::apply_request(&mut data, put_manifest("latest", &manifest, &[]));
+        StateMachine::apply_request(
+            &mut data,
+            put_manifest("alice/repo", "latest", &manifest, &[]),
+        );
         StateMachine::apply_request(
             &mut data,
             Request::MirrorConfig(MirrorConfigRequest::PutProxyCacheTagValidation(
-                proxy_validation("docker", "repo", "latest"),
+                proxy_validation("docker", "alice/repo", "latest"),
             )),
         );
         StateMachine::apply_request(
             &mut data,
             Request::Manifest(ManifestRequest::DeleteManifests {
-                name: "repo".to_string(),
+                name: "alice/repo".to_string(),
                 digests: vec![manifest],
             }),
         );
 
         assert!(
-            data.get_proxy_cache_tag_validation("docker", "repo", "latest")
+            data.get_proxy_cache_tag_validation("docker", "alice/repo", "latest")
                 .is_none()
         );
     }
@@ -1381,12 +1598,13 @@ mod tests {
     #[test]
     fn state_machine_get_manifest_by_tag_and_digest() {
         let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
         let (body, manifest_digest) = seed_manifest_entry_json();
 
         StateMachine::apply_request(
             &mut data,
             Request::Manifest(ManifestRequest::PutManifest {
-                name: "shared-repo".to_string(),
+                name: "alice/shared-repo".to_string(),
                 reference: "v1".to_string(),
                 digest: manifest_digest.clone(),
                 content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
@@ -1403,27 +1621,28 @@ mod tests {
             }),
         );
 
-        let found = data.get_manifest("shared-repo", "v1");
+        let found = data.get_manifest("alice/shared-repo", "v1");
         assert!(found.is_some(), "manifest should be found by tag");
         assert_eq!(found.unwrap().digest.to_string(), manifest_digest);
 
-        let found = data.get_manifest("shared-repo", &manifest_digest);
+        let found = data.get_manifest("alice/shared-repo", &manifest_digest);
         assert!(found.is_some(), "manifest should be found by digest");
 
-        let found = data.get_manifest("shared-repo", "nonexistent");
+        let found = data.get_manifest("alice/shared-repo", "nonexistent");
         assert!(found.is_none(), "unknown reference should return None");
     }
 
     #[test]
     fn state_machine_list_tags() {
         let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
         let (body, manifest_digest) = seed_manifest_entry_json();
 
         for tag in &["v1", "v2"] {
             StateMachine::apply_request(
                 &mut data,
                 Request::Manifest(ManifestRequest::PutManifest {
-                    name: "shared-repo".to_string(),
+                    name: "alice/shared-repo".to_string(),
                     reference: (*tag).to_string(),
                     digest: manifest_digest.clone(),
                     content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
@@ -1441,17 +1660,18 @@ mod tests {
             );
         }
 
-        let tags = data.list_tags("shared-repo", None, None);
+        let tags = data.list_tags("alice/shared-repo", None, None);
         assert_eq!(tags, vec!["v1", "v2"]);
-        assert!(data.list_tags("nonexistent", None, None).is_empty());
+        assert!(data.list_tags("alice/nonexistent", None, None).is_empty());
     }
 
     #[test]
     fn state_machine_list_repositories() {
         let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
         let (body, manifest_digest) = seed_manifest_entry_json();
 
-        for repo in &["repo-a", "repo-b"] {
+        for repo in &["alice/repo-a", "alice/repo-b"] {
             StateMachine::apply_request(
                 &mut data,
                 Request::Manifest(ManifestRequest::PutManifest {
@@ -1474,18 +1694,19 @@ mod tests {
         }
 
         let repos = data.list_repositories(None, None);
-        assert_eq!(repos, vec!["repo-a", "repo-b"]);
+        assert_eq!(repos, vec!["alice/repo-a", "alice/repo-b"]);
     }
 
     #[test]
     fn state_machine_list_manifest_summaries() {
         let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
         let (body, manifest_digest) = seed_manifest_entry_json();
 
         StateMachine::apply_request(
             &mut data,
             Request::Manifest(ManifestRequest::PutManifest {
-                name: "shared-repo".to_string(),
+                name: "alice/shared-repo".to_string(),
                 reference: "v1".to_string(),
                 digest: manifest_digest,
                 content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
@@ -1502,8 +1723,280 @@ mod tests {
             }),
         );
 
-        let summaries = data.list_manifest_summaries("shared-repo");
+        let summaries = data.list_manifest_summaries("alice/shared-repo");
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].tags, vec!["v1"]);
+    }
+
+    fn claim_request(handle: &str, owner_label: &str, admin_override: bool) -> Request {
+        Request::Namespace(NamespaceRequest::Claim {
+            handle: handle.to_string(),
+            owner: Owner::User(Subject::new(format!("idp-{handle}"))),
+            owner_label: owner_label.to_string(),
+            actor: Subject::new(format!("idp-{handle}")),
+            admin_override,
+            now: 100,
+        })
+    }
+
+    #[test]
+    fn namespace_claim_inserts_live_namespace() {
+        let mut data = StateMachineData::default();
+        let resp = StateMachine::apply_request(&mut data, claim_request("alice", "Alice", false));
+        assert!(matches!(resp, Response::Namespace(NamespaceResponse::Ok)));
+        let ns = data.namespaces.get("alice").expect("namespace claimed");
+        assert_eq!(ns.handle, "alice");
+        assert_eq!(ns.owner_label, "Alice");
+        assert!(matches!(ns.owner, Owner::User(_)));
+    }
+
+    #[test]
+    fn namespace_claim_conflict_omits_owner_id() {
+        let mut data = StateMachineData::default();
+        // Pre-claim by a sensitive subject id that must NOT leak.
+        data.namespaces.insert(
+            "alice".to_string(),
+            Namespace {
+                handle: "alice".to_string(),
+                owner: Owner::User(Subject::new("secret-subject-uuid-do-not-leak")),
+                owner_label: "Alice".to_string(),
+                created_at: 1,
+            },
+        );
+        let resp = StateMachine::apply_request(&mut data, claim_request("alice", "Other", false));
+        let Response::Error(msg) = resp else {
+            panic!("expected Response::Error, got {resp:?}");
+        };
+        assert!(
+            !msg.contains("secret-subject-uuid-do-not-leak"),
+            "conflict body must not leak prior owner id: {msg:?}"
+        );
+        assert!(
+            msg.contains("user"),
+            "conflict body should mention owner kind: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn namespace_reclaim_requires_admin_override() {
+        let mut data = StateMachineData::default();
+        data.released_handles.insert(
+            "alice".to_string(),
+            ReleasedHandle {
+                handle: "alice".to_string(),
+                prior_owner: Owner::User(Subject::new("idp-alice")),
+                prior_owner_label: "Alice".to_string(),
+                released_at: 1,
+                released_by: Subject::new("idp-alice"),
+                release_reason: ReleaseReason::OwnerDeleted,
+            },
+        );
+
+        let resp = StateMachine::apply_request(&mut data, claim_request("alice", "Alice2", false));
+        assert!(
+            matches!(resp, Response::Error(_)),
+            "reclaim without admin override must fail: {resp:?}"
+        );
+        assert!(data.released_handles.contains_key("alice"));
+        assert!(!data.namespaces.contains_key("alice"));
+
+        let resp = StateMachine::apply_request(&mut data, claim_request("alice", "Alice2", true));
+        assert!(matches!(resp, Response::Namespace(NamespaceResponse::Ok)));
+        assert!(!data.released_handles.contains_key("alice"));
+        assert!(data.namespaces.contains_key("alice"));
+    }
+
+    #[test]
+    fn namespace_delete_blocks_when_content_exists() {
+        let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
+        let (_body, manifest_digest) = seed_manifest_entry_json();
+        StateMachine::apply_request(
+            &mut data,
+            put_manifest("alice/repo", "v1", &manifest_digest, &[]),
+        );
+
+        let resp = StateMachine::apply_request(
+            &mut data,
+            Request::Namespace(NamespaceRequest::Delete {
+                handle: "alice".to_string(),
+                actor: Subject::new("idp-alice"),
+                reason: ReleaseReason::OwnerDeleted,
+                now: 200,
+            }),
+        );
+        assert!(
+            matches!(resp, Response::Error(_)),
+            "delete with content must fail: {resp:?}"
+        );
+        // Namespace must be restored on the failure path.
+        assert!(data.namespaces.contains_key("alice"));
+        assert!(!data.released_handles.contains_key("alice"));
+    }
+
+    #[test]
+    fn namespace_delete_creates_tombstone() {
+        let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
+
+        let resp = StateMachine::apply_request(
+            &mut data,
+            Request::Namespace(NamespaceRequest::Delete {
+                handle: "alice".to_string(),
+                actor: Subject::new("idp-alice"),
+                reason: ReleaseReason::OwnerDeleted,
+                now: 200,
+            }),
+        );
+        assert!(matches!(resp, Response::Namespace(NamespaceResponse::Ok)));
+        assert!(!data.namespaces.contains_key("alice"));
+        let tomb = data
+            .released_handles
+            .get("alice")
+            .expect("tombstone present");
+        assert_eq!(tomb.prior_owner_label, "alice");
+        assert!(matches!(tomb.release_reason, ReleaseReason::OwnerDeleted));
+        assert_eq!(tomb.released_at, 200);
+    }
+
+    #[test]
+    fn namespace_admin_revoke_creates_tombstone() {
+        let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
+
+        let resp = StateMachine::apply_request(
+            &mut data,
+            Request::Namespace(NamespaceRequest::AdminRevoke {
+                handle: "alice".to_string(),
+                actor: Subject::new("admin-1"),
+                now: 300,
+            }),
+        );
+        assert!(matches!(resp, Response::Namespace(NamespaceResponse::Ok)));
+        let tomb = data
+            .released_handles
+            .get("alice")
+            .expect("tombstone present");
+        assert!(matches!(tomb.release_reason, ReleaseReason::AdminRevoked));
+        assert_eq!(tomb.released_at, 300);
+    }
+
+    #[test]
+    fn put_manifest_rejected_without_live_namespace() {
+        let mut data = StateMachineData::default();
+        let (_body, manifest_digest) = seed_manifest_entry_json();
+        let resp = StateMachine::apply_request(
+            &mut data,
+            put_manifest("ghost/repo", "v1", &manifest_digest, &[]),
+        );
+        let Response::Error(msg) = resp else {
+            panic!("expected Response::Error, got {resp:?}");
+        };
+        assert!(msg.contains("ghost"), "{msg:?}");
+        assert!(!data.manifests.contains_key("ghost/repo"));
+    }
+
+    #[test]
+    fn mount_blob_rejected_without_live_namespace() {
+        let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
+        let blob = digest(42);
+
+        let resp = StateMachine::apply_request(
+            &mut data,
+            Request::Manifest(ManifestRequest::MountBlob {
+                source_repo: "alice/source".to_string(),
+                dest_repo: "ghost/dest".to_string(),
+                digest: blob.clone(),
+            }),
+        );
+        assert!(
+            matches!(resp, Response::Error(_)),
+            "mount into ghost namespace must fail: {resp:?}"
+        );
+    }
+
+    #[test]
+    fn put_repository_rejected_without_live_namespace() {
+        let mut data = StateMachineData::default();
+        let repo = Repository {
+            name: "ghost/repo".to_string(),
+            description: String::new(),
+            owner: None,
+            visibility: crate::store::metadata::Visibility::default(),
+            created_at: 1,
+        };
+        let resp = StateMachine::apply_request(
+            &mut data,
+            Request::Repository(RepositoryRequest::PutRepository(repo)),
+        );
+        assert!(
+            matches!(resp, Response::Error(_)),
+            "put_repository under ghost namespace must fail: {resp:?}"
+        );
+    }
+
+    #[test]
+    fn namespace_delete_unknown_handle_errors() {
+        let mut data = StateMachineData::default();
+        let resp = StateMachine::apply_request(
+            &mut data,
+            Request::Namespace(NamespaceRequest::Delete {
+                handle: "ghost".to_string(),
+                actor: Subject::new("idp-ghost"),
+                reason: ReleaseReason::OwnerDeleted,
+                now: 1,
+            }),
+        );
+        let Response::Error(msg) = resp else {
+            panic!("expected Response::Error, got {resp:?}");
+        };
+        assert!(msg.contains("ghost"), "{msg:?}");
+        assert!(!data.released_handles.contains_key("ghost"));
+    }
+
+    #[test]
+    fn namespace_admin_revoke_unknown_handle_errors() {
+        let mut data = StateMachineData::default();
+        let resp = StateMachine::apply_request(
+            &mut data,
+            Request::Namespace(NamespaceRequest::AdminRevoke {
+                handle: "ghost".to_string(),
+                actor: Subject::new("admin-1"),
+                now: 1,
+            }),
+        );
+        assert!(
+            matches!(resp, Response::Error(_)),
+            "admin-revoke of unknown handle must fail: {resp:?}"
+        );
+        assert!(!data.released_handles.contains_key("ghost"));
+    }
+
+    #[test]
+    fn namespace_delete_with_renamed_reason_persists_new_handle() {
+        let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
+
+        let resp = StateMachine::apply_request(
+            &mut data,
+            Request::Namespace(NamespaceRequest::Delete {
+                handle: "alice".to_string(),
+                actor: Subject::new("idp-alice"),
+                reason: ReleaseReason::Renamed {
+                    new_handle: "alice2".to_string(),
+                },
+                now: 400,
+            }),
+        );
+        assert!(matches!(resp, Response::Namespace(NamespaceResponse::Ok)));
+        let tomb = data
+            .released_handles
+            .get("alice")
+            .expect("tombstone present");
+        match &tomb.release_reason {
+            ReleaseReason::Renamed { new_handle } => assert_eq!(new_handle, "alice2"),
+            other => panic!("expected Renamed reason, got {other:?}"),
+        }
     }
 }
