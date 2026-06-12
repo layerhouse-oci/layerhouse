@@ -31,7 +31,11 @@ use crate::routes::{AppState, RegistryCore, build_router};
 use crate::store::s3::S3BlobStore;
 use crate::store::upload::UploadTracker;
 
-const SNAPSHOT_FORMAT_VERSION: u32 = 5;
+/// Alias of the canonical snapshot version (defined in the Raft state machine)
+/// so the S3 cold-start codec and the Raft `install_snapshot` codec always
+/// agree — a divergence would let a node restore from S3 locally yet fail to
+/// install the same snapshot over Raft.
+const SNAPSHOT_FORMAT_VERSION: u32 = crate::raft::state_machine::SNAPSHOT_VERSION;
 const SNAPSHOT_HEADER_LEN: usize = 4;
 
 #[derive(Debug, Error)]
@@ -386,17 +390,12 @@ fn deserialize_snapshot(bytes: &[u8]) -> Result<StateMachineData, AppError> {
     }
     let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let payload = &bytes[SNAPSHOT_HEADER_LEN..];
-    match version {
-        // v2 and v4 are accepted for forward-compat: the v5 collections
-        // (`repositories`, `permission_rules`) default to empty via
-        // `#[serde(default)]`, so older S3 snapshots load cleanly.
-        2 | 4 | SNAPSHOT_FORMAT_VERSION => {
-            let mut data: StateMachineData = serde_json::from_slice(payload)?;
-            data.normalize_restored_metadata();
-            Ok(data)
-        }
-        _ => Err(AppError::SnapshotVersion(version)),
+    if version != SNAPSHOT_FORMAT_VERSION {
+        return Err(AppError::SnapshotVersion(version));
     }
+    let mut data: StateMachineData = serde_json::from_slice(payload)?;
+    data.normalize_restored_metadata();
+    Ok(data)
 }
 
 fn serialize_snapshot(data: &StateMachineData) -> Result<Vec<u8>, serde_json::Error> {
@@ -682,67 +681,5 @@ mod tests {
 
         let error = deserialize_snapshot(&bytes).expect_err("unknown snapshot version fails");
         assert!(matches!(error, AppError::SnapshotVersion(999)));
-    }
-
-    #[test]
-    fn snapshot_restores_previous_format_and_rebuilds_metadata_indexes() {
-        let manifest_body = serde_json::json!({
-            "schemaVersion": 2,
-            "config": {
-                "mediaType": "application/vnd.oci.image.config.v1+json",
-                "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
-                "size": 1
-            },
-            "layers": [{
-                "mediaType": "application/vnd.oci.image.layer.v1.tar",
-                "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
-                "size": 2
-            }]
-        })
-        .to_string()
-        .into_bytes();
-        let payload = serde_json::json!({
-            "manifests": {
-                "repo": {
-                    "sha256:0000000000000000000000000000000000000000000000000000000000000010": {
-                        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000010",
-                        "content_type": "application/vnd.oci.image.manifest.v1+json",
-                        "body": manifest_body
-                    }
-                }
-            }
-        });
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&2u32.to_le_bytes());
-        bytes.extend_from_slice(&serde_json::to_vec(&payload).unwrap());
-
-        let data = deserialize_snapshot(&bytes).expect("v2 snapshot restores");
-
-        assert_eq!(
-            data.blob_ref_count_str(
-                "sha256:0000000000000000000000000000000000000000000000000000000000000001"
-            ),
-            1
-        );
-        assert_eq!(
-            data.blob_ref_count_str(
-                "sha256:0000000000000000000000000000000000000000000000000000000000000002"
-            ),
-            1
-        );
-    }
-
-    #[test]
-    fn snapshot_restores_v4_with_empty_v5_collections() {
-        // A v4 S3 snapshot predates `repositories`/`permission_rules`. It must
-        // still load, with those collections defaulting to empty.
-        let payload = serde_json::json!({ "manifests": {}, "tags": {} });
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&4u32.to_le_bytes());
-        bytes.extend_from_slice(&serde_json::to_vec(&payload).unwrap());
-
-        let data = deserialize_snapshot(&bytes).expect("v4 snapshot restores");
-        assert!(data.repositories.is_empty());
-        assert!(data.permission_rules.is_empty());
     }
 }

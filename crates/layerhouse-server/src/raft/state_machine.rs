@@ -29,7 +29,12 @@ use crate::store::metadata::{
     repository_manifest_size_bytes, repository_stored_size_bytes, sync_job_blocks_trigger,
 };
 
-const SNAPSHOT_VERSION: u32 = 5;
+/// On-disk snapshot format version. The single source of truth for both the
+/// Raft `install_snapshot` path here and the S3 cold-start path in `main.rs`
+/// (which aliases this constant), so the two can never drift. Layerhouse is
+/// not yet deployed, so the format starts fresh at 1 with no legacy versions
+/// to accept — any other version is rejected outright.
+pub(crate) const SNAPSHOT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StateMachineData {
@@ -725,26 +730,20 @@ impl openraft::storage::RaftStateMachine<TypeConfig> for StateMachine {
         let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         let payload = &bytes[4..];
 
-        let mut new_data: StateMachineData = match version {
-            // v2 and v4 are accepted for forward-compat: the new collections
-            // (`repositories`, `permission_rules`) default to empty via
-            // `#[serde(default)]`, so older snapshots deserialize cleanly.
-            2 | 4 | SNAPSHOT_VERSION => {
-                serde_json::from_slice(payload).map_err(|e| StorageError::IO {
-                    source: StorageIOError::read_snapshot(None, openraft::AnyError::new(&e)),
-                })?
-            }
-            _ => {
-                return Err(StorageError::IO {
-                    source: StorageIOError::read_snapshot(
-                        None,
-                        openraft::AnyError::new(&std::io::Error::other(format!(
-                            "unsupported snapshot version: {}",
-                            version
-                        ))),
-                    ),
-                });
-            }
+        let mut new_data: StateMachineData = if version == SNAPSHOT_VERSION {
+            serde_json::from_slice(payload).map_err(|e| StorageError::IO {
+                source: StorageIOError::read_snapshot(None, openraft::AnyError::new(&e)),
+            })?
+        } else {
+            return Err(StorageError::IO {
+                source: StorageIOError::read_snapshot(
+                    None,
+                    openraft::AnyError::new(&std::io::Error::other(format!(
+                        "unsupported snapshot version: {}",
+                        version
+                    ))),
+                ),
+            });
         };
         new_data.normalize_restored_metadata();
 
@@ -1507,29 +1506,15 @@ mod tests {
         assert!(data.proxy_cache_tag_validations.is_empty());
     }
 
-    #[test]
-    fn v4_snapshot_json_loads_with_empty_v5_collections() {
-        // A v4-shaped payload predates `repositories` and `permission_rules`.
-        // `#[serde(default)]` must fill them with empty maps so v4 snapshots
-        // taken before this migration still load.
-        let data: StateMachineData = serde_json::from_value(serde_json::json!({
-            "manifests": {},
-            "tags": {},
-            "personal_access_tokens": {}
-        }))
-        .expect("v4-shaped snapshot should deserialize");
+    #[tokio::test]
+    async fn v1_snapshot_roundtrips_namespaces_and_released_handles() {
+        use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine};
 
-        assert!(data.repositories.is_empty());
-        assert!(data.permission_rules.is_empty());
-    }
-
-    #[test]
-    fn v5_snapshot_roundtrips_repositories_and_permission_rules() {
         let mut data = StateMachineData::default();
         data.repositories.insert(
-            "users/alice/app".to_string(),
+            "alice/app".to_string(),
             Repository {
-                name: "users/alice/app".to_string(),
+                name: "alice/app".to_string(),
                 description: "alice's app".to_string(),
                 owner: Some("subject-alice".to_string()),
                 visibility: crate::store::metadata::Visibility::PublicPull,
@@ -1547,16 +1532,53 @@ mod tests {
                 created_at: 9,
             },
         );
+        data.namespaces.insert(
+            "alice".to_string(),
+            Namespace {
+                handle: "alice".to_string(),
+                owner: Owner::User(Subject::new("subject-alice")),
+                owner_label: "alice".to_string(),
+                created_at: 100,
+            },
+        );
+        data.released_handles.insert(
+            "bob".to_string(),
+            ReleasedHandle {
+                handle: "bob".to_string(),
+                prior_owner: Owner::User(Subject::new("subject-bob")),
+                prior_owner_label: "bob".to_string(),
+                released_at: 101,
+                released_by: Subject::new("subject-admin"),
+                release_reason: ReleaseReason::AdminRevoked,
+            },
+        );
 
-        // Serialize and deserialize the same way the snapshot path does
-        // (JSON payload after the version prefix).
-        let payload = serde_json::to_vec(&data).expect("serialize");
-        let restored: StateMachineData =
-            serde_json::from_slice(&payload).expect("deserialize v5 payload");
+        // Drive the actual on-disk pipeline (version prefix + payload), not
+        // raw serde, so the test fails if the version gate or the snapshot
+        // builder regresses.
+        let source = Arc::new(RwLock::new(data));
+        let mut sm_out = StateMachine::new(source);
+        let mut builder = sm_out.get_snapshot_builder().await;
+        let snapshot = builder.build_snapshot().await.expect("build snapshot");
+        let bytes = snapshot.snapshot.into_inner();
+
+        assert_eq!(
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            SNAPSHOT_VERSION,
+            "snapshot must carry the v1 prefix"
+        );
+
+        let mut sm_in = StateMachine::new(Arc::new(RwLock::new(StateMachineData::default())));
+        sm_in
+            .install_snapshot(&snapshot.meta, Box::new(Cursor::new(bytes)))
+            .await
+            .expect("install v1 snapshot");
+
+        let restored = sm_in.data.read().await;
 
         let repo = restored
             .repositories
-            .get("users/alice/app")
+            .get("alice/app")
             .expect("repository preserved");
         assert_eq!(repo.owner.as_deref(), Some("subject-alice"));
         assert_eq!(
@@ -1570,6 +1592,24 @@ mod tests {
             .expect("permission rule preserved");
         assert_eq!(rule.groups, vec!["team-a".to_string()]);
         assert_eq!(rule.source, crate::store::metadata::RuleSource::Raft);
+
+        let ns = restored
+            .namespaces
+            .get("alice")
+            .expect("namespace preserved");
+        assert_eq!(ns.owner_label, "alice");
+        assert_eq!(ns.created_at, 100);
+
+        let released = restored
+            .released_handles
+            .get("bob")
+            .expect("released handle preserved");
+        assert_eq!(released.prior_owner_label, "bob");
+        assert!(matches!(
+            released.release_reason,
+            ReleaseReason::AdminRevoked
+        ));
+        assert_eq!(released.released_by, "subject-admin");
     }
 
     // ── Shared read tests against StateMachineData ────────────────────
