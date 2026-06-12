@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::auth::token::{AuthIdentity, TokenType};
 use crate::error::LayerhouseError;
 use crate::routes::AppState;
+use crate::store::metadata::NamespaceStore;
 
 #[derive(Debug, Serialize)]
 pub struct SessionResponse {
@@ -22,7 +23,7 @@ pub struct SessionResponse {
     pub is_admin: bool,
 }
 
-pub fn routes<M: Send + Sync + 'static, B: Send + Sync + 'static>() -> Router<Arc<AppState<M, B>>> {
+pub fn routes<M: NamespaceStore, B: Send + Sync + 'static>() -> Router<Arc<AppState<M, B>>> {
     Router::new()
         .route("/api/v1/session", axum::routing::get(get_session::<M, B>))
         .route(
@@ -31,7 +32,7 @@ pub fn routes<M: Send + Sync + 'static, B: Send + Sync + 'static>() -> Router<Ar
         )
 }
 
-async fn get_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
+async fn get_session<M: NamespaceStore, B: Send + Sync + 'static>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
@@ -58,10 +59,13 @@ async fn get_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
         });
     };
 
-    let is_admin = state
-        .auth
-        .as_ref()
-        .is_some_and(|auth| auth.check_admin_access(&identity).is_ok());
+    let is_admin = if let Some(auth) = state.auth.as_ref() {
+        auth.check_admin_access(&identity, &state.core.metadata)
+            .await
+            .is_ok()
+    } else {
+        false
+    };
 
     Ok(Json(SessionResponse {
         auth_enabled: true,

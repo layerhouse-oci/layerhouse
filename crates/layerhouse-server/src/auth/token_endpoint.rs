@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::error::LayerhouseError;
 use crate::routes::AppState;
 use crate::store::blob::BlobStore;
-use crate::store::metadata::TokenStore;
+use crate::store::metadata::{NamespaceStore, TokenStore};
 
 #[derive(Debug)]
 pub struct TokenQuery {
@@ -55,7 +55,7 @@ pub struct TokenResponse {
     pub issued_at: String,
 }
 
-pub async fn token_endpoint<M: TokenStore, B: BlobStore>(
+pub async fn token_endpoint<M: TokenStore + NamespaceStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     RawQuery(raw_query): RawQuery,
     req: axum::http::Request<axum::body::Body>,
@@ -85,7 +85,9 @@ pub async fn token_endpoint<M: TokenStore, B: BlobStore>(
     if let Some(scope) = &requested_scope {
         for requested in scope.split_whitespace() {
             if let Some((repository, action)) = crate::auth::permissions::parse_scope(requested) {
-                auth_service.check_permission(&identity, &repository, action)?;
+                auth_service
+                    .check_permission(&identity, &repository, action, &state.core.metadata)
+                    .await?;
             }
         }
     }

@@ -12,7 +12,9 @@ use crate::oci::digest::Digest;
 use crate::oci::manifest;
 use crate::store::blob::BlobStore;
 #[allow(unused_imports)]
-use crate::store::metadata::{ManifestEntry, ManifestStore, RegistryStore, now_epoch};
+use crate::store::metadata::{
+    ManifestEntry, ManifestStore, NamespaceStore, RegistryStore, now_epoch,
+};
 
 use super::AppState;
 
@@ -52,7 +54,7 @@ fn oci_subject_header() -> HeaderName {
     HeaderName::from_static("oci-subject")
 }
 
-pub async fn dispatch<M: RegistryStore, B: BlobStore>(
+pub async fn dispatch<M: RegistryStore + NamespaceStore, B: BlobStore>(
     state: Arc<AppState<M, B>>,
     method: &Method,
     name: &str,
@@ -158,7 +160,7 @@ async fn respond_manifest<M: RegistryStore, B: BlobStore>(
     Ok(response)
 }
 
-async fn put_manifest<M: RegistryStore, B: BlobStore>(
+async fn put_manifest<M: RegistryStore + NamespaceStore, B: BlobStore>(
     state: &AppState<M, B>,
     name: &str,
     reference: &str,
@@ -215,7 +217,8 @@ async fn put_manifest<M: RegistryStore, B: BlobStore>(
                 service: None,
                 scope: None,
             })?;
-            auth.check_permission(&identity, name, OciAction::Update)?;
+            auth.check_permission(&identity, name, OciAction::Update, &state.core.metadata)
+                .await?;
         }
     }
 
@@ -1070,12 +1073,35 @@ mod tests {
         }
     }
 
+    // Claim `handle` for an org owner unrelated to the test identity, so the
+    // namespace gate is satisfied (the handle is live) but ownership grants
+    // nothing implicitly — the write decision falls through to the RBAC scope
+    // re-check the test is actually exercising.
+    async fn claim_for_other_owner(state: &TestAppState, handle: &str) {
+        state
+            .core
+            .metadata
+            .claim_namespace(
+                handle,
+                crate::store::metadata::Owner::Org(
+                    crate::store::metadata::typed_id::OrgId::generate(),
+                ),
+                handle,
+                crate::auth::identity::Subject::new("ns-claimer"),
+                true,
+                1,
+            )
+            .await
+            .expect("claim namespace");
+    }
+
     // A create-only grant can push a brand-new tag, but the write-time re-check
     // blocks the same identity from overwriting the now-existing tag — closing
     // the TOCTOU window left by the middleware's pre-body action resolution.
     #[tokio::test]
     async fn put_manifest_overwrite_denied_without_update_grant() {
         let state = test_state_with_auth(vec![]);
+        claim_for_other_owner(&state, "team-a").await;
         let create_only =
             identity_with_scopes(vec!["repository:team-a/app:pull,create".to_string()]);
 
@@ -1109,6 +1135,7 @@ mod tests {
     #[tokio::test]
     async fn put_manifest_overwrite_allowed_with_update_grant() {
         let state = test_state_with_auth(vec![]);
+        claim_for_other_owner(&state, "team-a").await;
         let updater =
             identity_with_scopes(vec!["repository:team-a/app:pull,create,update".to_string()]);
 

@@ -15,13 +15,26 @@ use axum::http::HeaderMap;
 
 use crate::config::{AuthConfig, CookieSecureMode, S3Config};
 use crate::error::LayerhouseError;
-use crate::store::metadata::TokenStore;
+use crate::store::metadata::handle::handle_of;
+use crate::store::metadata::{NamespaceStore, Owner, TokenStore};
 
 use self::discovery::OidcDiscovery;
 use self::identity::Subject;
 use self::jwks::{CachedJwksDocument, JwksCache, JwksMetrics, JwksS3Cache};
 use self::permissions::PermissionResolver;
 use self::token::{AuthIdentity, TokenType};
+
+/// Whether a namespace `owner` grants `identity` the full action ladder in the
+/// claimed namespace. A `User` owner matches by typed subject. `Org` ownership
+/// returns `false` for now: there is no actor->org membership map yet, so
+/// org-owned namespaces rely on admin or an explicit RBAC grant until org
+/// membership lands.
+fn owner_grants(owner: &Owner, identity: &AuthIdentity) -> bool {
+    match owner {
+        Owner::User(subject) => *subject == identity.subject,
+        Owner::Org(_) => false,
+    }
+}
 
 pub struct AuthService {
     pub config: AuthConfig,
@@ -527,11 +540,12 @@ impl AuthService {
         })
     }
 
-    pub fn check_permission(
+    pub async fn check_permission(
         &self,
         identity: &AuthIdentity,
         repository: &str,
         action: permissions::OciAction,
+        namespaces: &dyn NamespaceStore,
     ) -> Result<(), LayerhouseError> {
         // Personal-namespace auto-grant: any authenticated user has the full
         // action ladder under `users/<their-username>/`. Keyed on
@@ -539,6 +553,33 @@ impl AuthService {
         // sessions (see `validate_pat`).
         if permissions::in_personal_namespace(identity.username.as_deref(), repository) {
             return Ok(());
+        }
+
+        // Writes to `<handle>/...` are gated on a live namespace claim, mirroring
+        // the Raft apply-time gate (`require_live_namespace`). Reads and targets
+        // with no resolvable handle (the `"*"` admin wildcard, single-segment
+        // repos) skip the gate and fall through to RBAC. `handle_of` erroring is
+        // treated as "no handle to gate on", not a hard failure, so the admin
+        // path and cross-namespace pulls keep working.
+        if action != permissions::OciAction::Pull
+            && let Ok(handle) = handle_of(repository)
+        {
+            match namespaces.get_namespace(handle).await? {
+                // Unclaimed handle: deny up front instead of letting the write
+                // reach Raft and fail at apply. Keeps the auth answer (and any
+                // minted OCI bearer token) honest about what will succeed.
+                None => {
+                    return Err(LayerhouseError::Denied(format!(
+                        "namespace {handle:?} is not claimed"
+                    )));
+                }
+                // The claim owner has the full action ladder in their namespace.
+                Some(ns) if owner_grants(&ns.owner, identity) => return Ok(()),
+                // Otherwise fall through to RBAC: this covers admins (their `*`
+                // grant matches the real repo) and admin-configured delegated
+                // grants (e.g. a CI group granted `team-a/*`).
+                Some(_) => {}
+            }
         }
 
         // PATs and minted OCI bearer tokens carry explicit repository scopes.
@@ -556,8 +597,13 @@ impl AuthService {
             .check(&identity.groups, repository, action)
     }
 
-    pub fn check_admin_access(&self, identity: &AuthIdentity) -> Result<(), LayerhouseError> {
-        self.check_permission(identity, "*", permissions::OciAction::Delete)
+    pub async fn check_admin_access(
+        &self,
+        identity: &AuthIdentity,
+        namespaces: &dyn NamespaceStore,
+    ) -> Result<(), LayerhouseError> {
+        self.check_permission(identity, "*", permissions::OciAction::Delete, namespaces)
+            .await
     }
 
     pub fn mint_oci_token(
@@ -718,7 +764,12 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::{AuthService, CachedJwksDocument, JwksCache, jwks};
+    use crate::auth::identity::Subject;
+    use crate::auth::permissions::OciAction;
+    use crate::auth::token::{AuthIdentity, TokenType};
     use crate::config::{AuthConfig, PermissionMapping};
+    use crate::store::metadata::typed_id::OrgId;
+    use crate::store::metadata::{InMemoryMetadataStore, NamespaceStore, Owner, ReleaseReason};
 
     pub(super) fn auth_config() -> AuthConfig {
         AuthConfig {
@@ -815,5 +866,152 @@ mod tests {
             .await
             .expect_err("wrong issuer should be rejected");
         assert!(err.to_string().contains("does not match configured issuer"));
+    }
+
+    fn identity(
+        subject: &str,
+        token_type: TokenType,
+        groups: &[&str],
+        scopes: &[&str],
+    ) -> AuthIdentity {
+        AuthIdentity {
+            subject: Subject::new(subject),
+            username: None,
+            display_name: None,
+            email: None,
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            token_type,
+        }
+    }
+
+    async fn claim(store: &InMemoryMetadataStore, handle: &str, owner: Owner) {
+        store
+            .claim_namespace(handle, owner, handle, Subject::new("claimer"), true, 100)
+            .await
+            .expect("claim should succeed");
+    }
+
+    #[tokio::test]
+    async fn write_owner_implicit_grant_and_non_owner_denied() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-alice"))).await;
+
+        let alice = identity("subject-alice", TokenType::OidcAccess, &[], &[]);
+        auth.check_permission(&alice, "acme/app", OciAction::Create, &store)
+            .await
+            .expect("owner gets implicit write grant");
+
+        let bob = identity("subject-bob", TokenType::OidcAccess, &[], &[]);
+        auth.check_permission(&bob, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("non-owner without RBAC grant is denied");
+    }
+
+    #[tokio::test]
+    async fn write_to_unclaimed_handle_denied_even_with_rbac_grant() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+
+        // PAT carries a matching scope, but the handle is never claimed.
+        let pat = identity(
+            "subject-x",
+            TokenType::PersonalAccess,
+            &[],
+            &["repository:acme/*:*"],
+        );
+        auth.check_permission(&pat, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("writes to an unclaimed handle are denied up front");
+    }
+
+    #[tokio::test]
+    async fn delegated_rbac_grant_authorizes_non_owner_write() {
+        let auth = AuthService::for_test(vec![PermissionMapping {
+            name: "ci".to_string(),
+            groups: vec!["ci".to_string()],
+            scopes: vec!["repository:acme/*:create".to_string()],
+        }]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
+
+        let ci = identity("subject-ci", TokenType::OidcAccess, &["ci"], &[]);
+        auth.check_permission(&ci, "acme/app", OciAction::Create, &store)
+            .await
+            .expect("delegated group grant authorizes the write");
+    }
+
+    #[tokio::test]
+    async fn reads_are_ungated_by_namespace_claim() {
+        let auth = AuthService::for_test(vec![PermissionMapping {
+            name: "readers".to_string(),
+            groups: vec!["readers".to_string()],
+            scopes: vec!["repository:acme/*:pull".to_string()],
+        }]);
+        let store = InMemoryMetadataStore::default();
+
+        // No claim for "acme"; a Pull still resolves via RBAC.
+        let reader = identity("subject-r", TokenType::OidcAccess, &["readers"], &[]);
+        auth.check_permission(&reader, "acme/app", OciAction::Pull, &store)
+            .await
+            .expect("pulls skip the namespace gate");
+    }
+
+    #[tokio::test]
+    async fn admin_access_bypasses_namespace_gate() {
+        let auth = AuthService::for_test(vec![PermissionMapping {
+            name: "admin".to_string(),
+            groups: vec!["registry_admins".to_string()],
+            scopes: vec!["repository:*:*".to_string()],
+        }]);
+        let store = InMemoryMetadataStore::default();
+
+        let admin = identity(
+            "subject-admin",
+            TokenType::OidcAccess,
+            &["registry_admins"],
+            &[],
+        );
+        auth.check_admin_access(&admin, &store)
+            .await
+            .expect("admin `*` grant authorizes regardless of claims");
+    }
+
+    #[tokio::test]
+    async fn org_owned_handle_denies_actor_without_grant() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::Org(OrgId::generate())).await;
+
+        // Org ownership grants nothing implicitly yet (no membership map), and
+        // the actor has neither admin nor a delegated grant.
+        let actor = identity("subject-y", TokenType::OidcAccess, &[], &[]);
+        auth.check_permission(&actor, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("org-owned handle denies a non-admin actor without a grant");
+    }
+
+    #[tokio::test]
+    async fn released_handle_denies_writes_until_reclaim() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-alice"))).await;
+        store
+            .release_namespace(
+                "acme",
+                Subject::new("subject-alice"),
+                ReleaseReason::OwnerDeleted,
+                200,
+            )
+            .await
+            .expect("release should succeed");
+
+        // The handle now has only a tombstone, no live claim. Even the prior
+        // owner is gated until the handle is reclaimed.
+        let alice = identity("subject-alice", TokenType::OidcAccess, &[], &[]);
+        auth.check_permission(&alice, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("a released handle denies writes until it is reclaimed");
     }
 }

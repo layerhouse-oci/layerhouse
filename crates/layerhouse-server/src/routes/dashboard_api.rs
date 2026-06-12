@@ -14,8 +14,8 @@ use crate::oci::digest::Digest;
 use crate::raft::membership;
 use crate::store::blob::BlobStore;
 use crate::store::metadata::{
-    DeleteCounts, ManifestStore, ManifestSummary, Repository, RepositoryStore, RepositorySummary,
-    Visibility,
+    DeleteCounts, ManifestStore, ManifestSummary, NamespaceStore, Repository, RepositoryStore,
+    RepositorySummary, Visibility,
 };
 
 use super::{AppState, percent_decode};
@@ -23,7 +23,8 @@ use super::{AppState, percent_decode};
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 200;
 
-pub fn routes<M: ManifestStore + RepositoryStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
+pub fn routes<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>()
+-> Router<Arc<AppState<M, B>>> {
     Router::new()
         .route(
             "/api/v1/repositories",
@@ -164,7 +165,7 @@ fn parse_rfc3339_epoch(value: &str, field: &str) -> Result<u64, LayerhouseError>
         .map_err(|_| LayerhouseError::NameInvalid(format!("{} must be after 1970-01-01", field)))
 }
 
-async fn repository_dispatch<M: ManifestStore + RepositoryStore, B: BlobStore>(
+async fn repository_dispatch<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     Path(path): Path<String>,
     req: Request<Body>,
@@ -175,7 +176,10 @@ async fn repository_dispatch<M: ManifestStore + RepositoryStore, B: BlobStore>(
     }
 }
 
-async fn repository_dispatch_result<M: ManifestStore + RepositoryStore, B: BlobStore>(
+async fn repository_dispatch_result<
+    M: ManifestStore + RepositoryStore + NamespaceStore,
+    B: BlobStore,
+>(
     state: Arc<AppState<M, B>>,
     path: String,
     req: Request<Body>,
@@ -253,7 +257,7 @@ async fn repository_dispatch_result<M: ManifestStore + RepositoryStore, B: BlobS
     }
 }
 
-async fn list_repositories<M: ManifestStore, B: BlobStore>(
+async fn list_repositories<M: ManifestStore + NamespaceStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Query(query): Query<RepositoryQuery>,
@@ -266,14 +270,22 @@ async fn list_repositories<M: ManifestStore, B: BlobStore>(
     // (`state.auth` is None) there is nothing to filter against, so the full
     // list is returned.
     if let (Some(auth), Some(Extension(identity))) = (state.auth.as_ref(), &identity) {
-        repos.retain(|repo| {
-            auth.check_permission(
-                identity,
-                &repo.name,
-                crate::auth::permissions::OciAction::Pull,
-            )
-            .is_ok()
-        });
+        let mut visible = Vec::with_capacity(repos.len());
+        for repo in repos {
+            if auth
+                .check_permission(
+                    identity,
+                    &repo.name,
+                    crate::auth::permissions::OciAction::Pull,
+                    &state.core.metadata,
+                )
+                .await
+                .is_ok()
+            {
+                visible.push(repo);
+            }
+        }
+        repos = visible;
     }
 
     let q = query.q.unwrap_or_default().to_lowercase();
@@ -337,7 +349,7 @@ struct CreateRepositoryRequest {
 /// pushed. Requires `Create` permission on the target path; the personal
 /// namespace (`users/<username>/*`) grants this implicitly. The caller becomes
 /// the owner.
-async fn create_repository<M: ManifestStore + RepositoryStore, B: BlobStore>(
+async fn create_repository<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Json(req): Json<CreateRepositoryRequest>,
@@ -358,7 +370,9 @@ async fn create_repository<M: ManifestStore + RepositoryStore, B: BlobStore>(
             &identity,
             &name,
             crate::auth::permissions::OciAction::Create,
-        )?;
+            &state.core.metadata,
+        )
+        .await?;
         identity
             .username
             .clone()
@@ -386,10 +400,11 @@ async fn create_repository<M: ManifestStore + RepositoryStore, B: BlobStore>(
     Ok((StatusCode::CREATED, Json(repo)).into_response())
 }
 
-fn require_delete_permission(
+async fn require_delete_permission(
     auth: &Option<Arc<crate::auth::AuthService>>,
     identity: Option<&Extension<crate::auth::token::AuthIdentity>>,
     name: &str,
+    namespaces: &dyn NamespaceStore,
 ) -> Result<(), LayerhouseError> {
     let Some(auth) = auth.as_ref() else {
         return Ok(());
@@ -402,7 +417,13 @@ fn require_delete_permission(
             scope: None,
         });
     };
-    auth.check_permission(identity, name, crate::auth::permissions::OciAction::Delete)?;
+    auth.check_permission(
+        identity,
+        name,
+        crate::auth::permissions::OciAction::Delete,
+        namespaces,
+    )
+    .await?;
     Ok(())
 }
 
@@ -649,13 +670,13 @@ async fn get_raw_manifest<M: ManifestStore, B: BlobStore>(
     Ok(Json(body))
 }
 
-async fn delete_tag<M: ManifestStore + RepositoryStore, B: BlobStore>(
+async fn delete_tag<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path((name, digest, tag)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
-    require_delete_permission(&state.auth, identity.as_ref(), &name)?;
+    require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata).await?;
     let digest = Digest::from_str_checked(&digest)
         .ok_or_else(|| LayerhouseError::DigestInvalid(digest.clone()))?;
     if !state.core.metadata.delete_tag(&name, &digest, &tag).await? {
@@ -664,13 +685,13 @@ async fn delete_tag<M: ManifestStore + RepositoryStore, B: BlobStore>(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn delete_manifest<M: ManifestStore + RepositoryStore, B: BlobStore>(
+async fn delete_manifest<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path((name, digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
-    require_delete_permission(&state.auth, identity.as_ref(), &name)?;
+    require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata).await?;
     let digest = Digest::from_str_checked(&digest)
         .ok_or_else(|| LayerhouseError::DigestInvalid(digest.clone()))?;
     let counts = state
@@ -681,14 +702,17 @@ async fn delete_manifest<M: ManifestStore + RepositoryStore, B: BlobStore>(
     Ok(Json(counts))
 }
 
-async fn batch_delete_manifests<M: ManifestStore + RepositoryStore, B: BlobStore>(
+async fn batch_delete_manifests<
+    M: ManifestStore + RepositoryStore + NamespaceStore,
+    B: BlobStore,
+>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path(name): Path<String>,
     Json(req): Json<BatchDeleteRequest>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
-    require_delete_permission(&state.auth, identity.as_ref(), &name)?;
+    require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata).await?;
     let digests: Result<Vec<_>, _> = req
         .digests
         .iter()
@@ -705,13 +729,13 @@ async fn batch_delete_manifests<M: ManifestStore + RepositoryStore, B: BlobStore
     Ok(Json(counts))
 }
 
-async fn delete_repository<M: ManifestStore + RepositoryStore, B: BlobStore>(
+async fn delete_repository<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
-    require_delete_permission(&state.auth, identity.as_ref(), &name)?;
+    require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata).await?;
     let counts: DeleteCounts = state.core.metadata.delete_repository(&name).await?;
     // Also drop any first-class repository metadata so a deleted repo does not
     // linger as an empty shadow entry.

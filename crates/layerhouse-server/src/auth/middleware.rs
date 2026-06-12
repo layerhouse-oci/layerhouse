@@ -86,13 +86,18 @@ pub async fn auth_middleware<M: MetadataStore, B: BlobStore>(
         let repository = extract_repository_from_path(&path);
         let action = oci_action.unwrap_or(OciAction::Pull);
 
-        if let Err(e) = auth_service.check_permission(&identity, &repository, action) {
+        if let Err(e) = auth_service
+            .check_permission(&identity, &repository, action, &state.core.metadata)
+            .await
+        {
             return e.into_response();
         }
     }
 
     if path.starts_with("/api/v1/admin/")
-        && let Err(e) = auth_service.check_admin_access(&identity)
+        && let Err(e) = auth_service
+            .check_admin_access(&identity, &state.core.metadata)
+            .await
     {
         return e.into_response();
     }
