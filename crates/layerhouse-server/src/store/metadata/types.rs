@@ -330,7 +330,7 @@ pub enum ReleaseReason {
 
 /// A first-class repository object ("shadow repository"). Unlike a manifest
 /// map keyed by pushed content, a `Repository` can exist before any blob is
-/// pushed, carrying human metadata (description, owner) and a visibility label.
+/// pushed, carrying human metadata (description, created_by) and a visibility label.
 /// Phase 1 defines the shape and persists an empty collection; the creation
 /// flow (`POST /api/v1/repositories`) and listing integration land in Phase 2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,9 +338,9 @@ pub struct Repository {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    /// Subject of the identity that owns this repository, if any.
+    /// Subject of the identity that created this repository, if any.
     #[serde(default)]
-    pub owner: Option<String>,
+    pub created_by: Option<Subject>,
     #[serde(default)]
     pub visibility: Visibility,
     #[serde(default)]
@@ -873,7 +873,7 @@ pub struct RepositorySummary {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
-    pub owner: Option<String>,
+    pub created_by: Option<Subject>,
     #[serde(default)]
     pub visibility: Visibility,
 }

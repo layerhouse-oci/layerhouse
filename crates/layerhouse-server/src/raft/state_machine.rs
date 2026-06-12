@@ -981,7 +981,7 @@ impl StateMachineData {
                 manifest_size_bytes,
                 last_modified,
                 description: meta.map(|r| r.description.clone()).unwrap_or_default(),
-                owner: meta.and_then(|r| r.owner.clone()),
+                created_by: meta.and_then(|r| r.created_by.clone()),
                 visibility: meta.map(|r| r.visibility).unwrap_or_default(),
             });
         }
@@ -1000,7 +1000,7 @@ impl StateMachineData {
                 manifest_size_bytes: 0,
                 last_modified: repo.created_at,
                 description: repo.description.clone(),
-                owner: repo.owner.clone(),
+                created_by: repo.created_by.clone(),
                 visibility: repo.visibility,
             });
         }
@@ -1564,7 +1564,7 @@ mod tests {
             Repository {
                 name: "alice/app".to_string(),
                 description: "alice's app".to_string(),
-                owner: Some("subject-alice".to_string()),
+                created_by: Some(Subject::new("subject-alice")),
                 visibility: crate::store::metadata::Visibility::PublicPull,
                 created_at: 7,
             },
@@ -1628,7 +1628,10 @@ mod tests {
             .repositories
             .get("alice/app")
             .expect("repository preserved");
-        assert_eq!(repo.owner.as_deref(), Some("subject-alice"));
+        assert_eq!(
+            repo.created_by.as_ref().map(|s| s.as_str()),
+            Some("subject-alice")
+        );
         assert_eq!(
             repo.visibility,
             crate::store::metadata::Visibility::PublicPull
@@ -2010,7 +2013,7 @@ mod tests {
         let repo = Repository {
             name: "ghost/repo".to_string(),
             description: String::new(),
-            owner: None,
+            created_by: None,
             visibility: crate::store::metadata::Visibility::default(),
             created_at: 1,
         };

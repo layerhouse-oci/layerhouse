@@ -261,7 +261,7 @@ impl ManifestStore for InMemoryMetadataStore {
                 manifest_size_bytes,
                 last_modified,
                 description: meta.map(|r| r.description.clone()).unwrap_or_default(),
-                owner: meta.and_then(|r| r.owner.clone()),
+                created_by: meta.and_then(|r| r.created_by.clone()),
                 visibility: meta.map(|r| r.visibility).unwrap_or_default(),
             });
         }
@@ -279,7 +279,7 @@ impl ManifestStore for InMemoryMetadataStore {
                 manifest_size_bytes: 0,
                 last_modified: repo.created_at,
                 description: repo.description.clone(),
-                owner: repo.owner.clone(),
+                created_by: repo.created_by.clone(),
                 visibility: repo.visibility,
             });
         }

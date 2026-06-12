@@ -186,7 +186,7 @@ pub trait HelmStore: Send + Sync + 'static {
 // ── Domain supertrait aliases ─────────────────────────────────────────
 
 /// First-class repository ("shadow repository") CRUD. A `Repository` can exist
-/// before any blob is pushed and carries human metadata (description, owner,
+/// before any blob is pushed and carries human metadata (description, created_by,
 /// visibility). Persisted via Raft consensus, same as the other metadata.
 #[async_trait]
 pub trait RepositoryStore: Send + Sync + 'static {
