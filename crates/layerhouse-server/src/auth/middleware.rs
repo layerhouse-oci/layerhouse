@@ -95,6 +95,7 @@ pub async fn auth_middleware<M: MetadataStore, B: BlobStore>(
     }
 
     if path.starts_with("/api/v1/admin/")
+        && !is_namespace_self_service(&path)
         && let Err(e) = auth_service
             .check_admin_access(&identity, &state.core.metadata)
             .await
@@ -106,6 +107,15 @@ pub async fn auth_middleware<M: MetadataStore, B: BlobStore>(
     let mut req = req;
     req.extensions_mut().insert(identity);
     next.run(req).await
+}
+
+/// Namespace claim and release are self-service operations (the handlers
+/// gate admin_override / revoke individually). The middleware must not
+/// blanket-deny them with an admin check — regular users need these to
+/// claim and release their own namespaces.
+fn is_namespace_self_service(path: &str) -> bool {
+    path.starts_with("/api/v1/admin/namespaces/")
+        && (path.ends_with("/claim") || path.ends_with("/release"))
 }
 
 fn is_public_path(path: &str) -> bool {

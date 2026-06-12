@@ -3,6 +3,7 @@ pub mod blobs;
 pub mod catalog;
 pub mod dashboard_api;
 pub mod manifests;
+pub mod namespaces;
 pub mod pat_api;
 pub mod referrers;
 pub mod session_api;
@@ -117,6 +118,7 @@ pub fn build_router<M: MetadataStore, B: BlobStore>(
         .merge(catalog::routes::<M, B>())
         .merge(admin::routes::<M, B>())
         .merge(dashboard_api::routes::<M, B>())
+        .merge(namespaces::routes::<M, B>())
         .merge(pat_api::routes::<M, B>())
         .merge(session_api::routes::<M, B>())
         .route("/v2/{*path}", axum::routing::any(dispatch::<M, B>))

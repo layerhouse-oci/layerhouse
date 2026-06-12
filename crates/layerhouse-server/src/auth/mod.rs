@@ -15,7 +15,7 @@ use axum::http::HeaderMap;
 
 use crate::config::{AuthConfig, CookieSecureMode, S3Config};
 use crate::error::LayerhouseError;
-use crate::store::metadata::handle::handle_of;
+use crate::store::metadata::handle::{handle_of, is_handle_reserved};
 use crate::store::metadata::{NamespaceStore, Owner, TokenStore};
 
 use self::discovery::OidcDiscovery;
@@ -563,6 +563,7 @@ impl AuthService {
         // path and cross-namespace pulls keep working.
         if action != permissions::OciAction::Pull
             && let Ok(handle) = handle_of(repository)
+            && !is_handle_reserved(handle)
         {
             match namespaces.get_namespace(handle).await? {
                 // Unclaimed handle: deny up front instead of letting the write

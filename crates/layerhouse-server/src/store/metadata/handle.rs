@@ -17,6 +17,18 @@ use crate::error::LayerhouseError;
 const HANDLE_MIN_LEN: usize = 3;
 const HANDLE_MAX_LEN: usize = 39;
 
+/// Handles that are reserved by the system and cannot be claimed by users.
+/// These handles are always treated as live namespaces by
+/// `require_live_namespace` so that system-scoped repository paths (e.g.
+/// `users/<username>/...` for personal namespaces) work without an explicit
+/// claim.
+const RESERVED_HANDLES: &[&str] = &["users"];
+
+/// Returns true if `handle` is a system-reserved handle.
+pub fn is_handle_reserved(handle: &str) -> bool {
+    RESERVED_HANDLES.contains(&handle)
+}
+
 /// Validate that `s` is a syntactically well-formed handle.
 ///
 /// Grammar: `[a-z0-9](?:-[a-z0-9])*`, 3..=39 chars total. No consecutive
