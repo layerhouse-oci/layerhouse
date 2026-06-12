@@ -85,8 +85,8 @@ impl RaftMetadataStore {
     }
 
     async fn write(&self, req: Request) -> Result<Response, LayerhouseError> {
-        match self.raft.client_write(req.clone()).await {
-            Ok(resp) => Ok(resp.data),
+        let resp = match self.raft.client_write(req.clone()).await {
+            Ok(resp) => resp.data,
             Err(openraft::error::RaftError::APIError(ClientWriteError::ForwardToLeader(fwd))) => {
                 let leader_addr = fwd
                     .leader_node
@@ -95,10 +95,17 @@ impl RaftMetadataStore {
                     .unwrap_or_default();
                 network::forward_client_write(&leader_addr, self.tls.clone(), &req)
                     .await
-                    .map_err(LayerhouseError::Consensus)
+                    .map_err(LayerhouseError::Consensus)?
             }
-            Err(e) => Err(LayerhouseError::Consensus(format!("{}", e))),
+            Err(e) => return Err(LayerhouseError::Consensus(format!("{}", e))),
+        };
+        // Apply-time errors travel back as `Response::Error(msg)` because
+        // `LayerhouseError` is not `Deserialize`. Decode into `Internal` here
+        // so callers see a normal `LayerhouseError`.
+        if let Response::Error(msg) = resp {
+            return Err(LayerhouseError::Internal(msg));
         }
+        Ok(resp)
     }
 
     async fn write_manifest(

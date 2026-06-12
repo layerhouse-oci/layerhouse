@@ -291,6 +291,12 @@ pub enum Owner {
 pub struct Namespace {
     pub handle: String,
     pub owner: Owner,
+    /// Frozen username/org-name captured at claim time. Persisted because the
+    /// IdP-side label (preferred_username, displayName) is mutable; freezing
+    /// at claim lets a later release record the originally-claimed label even
+    /// if the IdP label has since drifted.
+    #[serde(default)]
+    pub owner_label: String,
     pub created_at: u64,
 }
 
