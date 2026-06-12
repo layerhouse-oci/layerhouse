@@ -347,8 +347,8 @@ struct CreateRepositoryRequest {
 
 /// Create a first-class ("shadow") repository that can exist before any blob is
 /// pushed. Requires `Create` permission on the target path; the personal
-/// namespace (`users/<username>/*`) grants this implicitly. The caller becomes
-/// the owner.
+/// namespace (`users/<username>/*`) grants this implicitly. The caller subject
+/// is recorded as `created_by`.
 async fn create_repository<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
@@ -357,7 +357,7 @@ async fn create_repository<M: ManifestStore + RepositoryStore + NamespaceStore, 
     let name = req.name.trim().to_string();
     validate_repository_name(&name)?;
 
-    let owner = if let Some(auth) = state.auth.as_ref() {
+    let created_by = if let Some(auth) = state.auth.as_ref() {
         let Some(Extension(identity)) = identity else {
             return Err(LayerhouseError::Unauthorized {
                 message: "authentication required".to_string(),
@@ -373,12 +373,9 @@ async fn create_repository<M: ManifestStore + RepositoryStore + NamespaceStore, 
             &state.core.metadata,
         )
         .await?;
-        identity
-            .username
-            .clone()
-            .or_else(|| Some(identity.subject.as_str().to_string()))
+        Some(identity.subject.clone())
     } else {
-        identity.and_then(|Extension(i)| i.username.clone())
+        None
     };
 
     if state.core.metadata.get_repository(&name).await?.is_some() {
@@ -391,7 +388,7 @@ async fn create_repository<M: ManifestStore + RepositoryStore + NamespaceStore, 
     let repo = Repository {
         name: name.clone(),
         description: req.description.trim().to_string(),
-        owner,
+        created_by,
         visibility: req.visibility,
         created_at: crate::store::metadata::now_epoch(),
     };
@@ -935,6 +932,7 @@ async fn cluster_remove<M: ManifestStore, B: BlobStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::identity::Subject;
     use crate::auth::token::AuthIdentity;
     use crate::store::blob::InMemoryBlobStore;
     use crate::store::metadata::{InMemoryMetadataStore, ManifestEntry, ManifestStore};
@@ -1269,7 +1267,7 @@ mod tests {
         let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(data["name"], "users/alice/app");
         assert_eq!(data["description"], "my app");
-        assert_eq!(data["owner"], "alice");
+        assert_eq!(data["created_by"], "user-1");
         assert_eq!(data["visibility"], "public_pull");
 
         // The shadow repo shows up in the listing even with no pushed content.
@@ -1348,7 +1346,7 @@ mod tests {
             .put_repository(crate::store::metadata::Repository {
                 name: "users/alice/empty".to_string(),
                 description: "nothing pushed yet".to_string(),
-                owner: Some("alice".to_string()),
+                created_by: Some(Subject::new("alice")),
                 visibility: Visibility::Private,
                 created_at: 123,
             })
@@ -1378,6 +1376,6 @@ mod tests {
             .unwrap();
         assert_eq!(repo["manifest_count"].as_u64(), Some(0));
         assert_eq!(repo["description"], "nothing pushed yet");
-        assert_eq!(repo["owner"], "alice");
+        assert_eq!(repo["created_by"], "alice");
     }
 }
