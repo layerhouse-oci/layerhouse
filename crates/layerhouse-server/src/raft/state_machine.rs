@@ -114,19 +114,46 @@ impl StateMachine {
         match req {
             Request::Manifest(r) => match Self::apply_manifest(data, r) {
                 Ok(r) => Response::Manifest(r),
-                Err(e) => Response::Error(e.to_string()),
+                Err(e) => Self::error_to_response(e),
             },
             Request::MirrorConfig(r) => Response::MirrorConfig(Self::apply_mirror_config(data, r)),
             Request::Job(r) => Response::Job(Self::apply_job(data, r)),
             Request::Token(r) => Response::Token(Self::apply_token(data, r)),
             Request::Repository(r) => match Self::apply_repository(data, r) {
                 Ok(r) => Response::Repository(r),
-                Err(e) => Response::Error(e.to_string()),
+                Err(e) => Self::error_to_response(e),
             },
             Request::Namespace(r) => match apply_namespace(data, r) {
                 Ok(r) => Response::Namespace(r),
-                Err(e) => Response::Error(e.to_string()),
+                Err(e) => Self::error_to_response(e),
             },
+        }
+    }
+
+    fn error_to_response(e: LayerhouseError) -> Response {
+        match e {
+            LayerhouseError::NameUnknown(msg) => Response::NameUnknown(msg),
+            LayerhouseError::Denied(msg) => Response::Denied(msg),
+            LayerhouseError::Conflict(msg) => Response::Conflict(msg),
+            LayerhouseError::NameInvalid(msg) => Response::NameInvalid(msg),
+            LayerhouseError::BlobUnknown(msg)
+            | LayerhouseError::BlobUploadInvalid(msg)
+            | LayerhouseError::BlobUploadUnknown(msg)
+            | LayerhouseError::DigestInvalid(msg)
+            | LayerhouseError::ManifestBlobUnknown(msg)
+            | LayerhouseError::ManifestInvalid(msg)
+            | LayerhouseError::ManifestUnknown(msg)
+            | LayerhouseError::SizeInvalid(msg)
+            | LayerhouseError::Unsupported(msg)
+            | LayerhouseError::TooManyRequests(msg)
+            | LayerhouseError::S3(msg)
+            | LayerhouseError::Serialization(msg)
+            | LayerhouseError::Upstream(msg)
+            | LayerhouseError::NotLeader(msg)
+            | LayerhouseError::Consensus(msg)
+            | LayerhouseError::Internal(msg) => Response::InternalError(msg),
+            LayerhouseError::Unauthorized { message, .. } => Response::InternalError(message),
+            LayerhouseError::Io(e) => Response::InternalError(e.to_string()),
         }
     }
 
@@ -561,7 +588,7 @@ pub(crate) fn apply_namespace_core(
         } => {
             validate_handle(&handle)?;
             if is_handle_reserved(&handle) {
-                return Err(LayerhouseError::Internal(format!(
+                return Err(LayerhouseError::Denied(format!(
                     "handle {handle:?} is reserved by the system and cannot be claimed"
                 )));
             }
@@ -574,13 +601,13 @@ pub(crate) fn apply_namespace_core(
                     Some(crate::store::metadata::Owner::Org(_)) => "org",
                     None => "unknown",
                 };
-                return Err(LayerhouseError::Internal(format!(
+                return Err(LayerhouseError::Conflict(format!(
                     "handle {handle:?} is already claimed by a {owner_kind}"
                 )));
             }
             if let Some(tomb) = released_handles.get(&handle) {
                 if !admin_override {
-                    return Err(LayerhouseError::Internal(format!(
+                    return Err(LayerhouseError::Denied(format!(
                         "handle {handle:?} was previously released ({}); reclaim requires admin override",
                         release_reason_label(&tomb.release_reason)
                     )));
@@ -606,7 +633,7 @@ pub(crate) fn apply_namespace_core(
             now,
         } => {
             let Some(ns) = namespaces.get(&handle) else {
-                return Err(LayerhouseError::Internal(format!(
+                return Err(LayerhouseError::NameUnknown(format!(
                     "handle {handle:?} is not currently claimed"
                 )));
             };
@@ -618,12 +645,12 @@ pub(crate) fn apply_namespace_core(
                 crate::store::metadata::Owner::Org(_) => false,
             };
             if !is_owner {
-                return Err(LayerhouseError::Internal(format!(
+                return Err(LayerhouseError::Denied(format!(
                     "handle {handle:?} is not owned by the caller"
                 )));
             }
             if has_content(&handle) {
-                return Err(LayerhouseError::Internal(format!(
+                return Err(LayerhouseError::Conflict(format!(
                     "handle {handle:?} still owns repositories or manifests; delete them before releasing"
                 )));
             }
@@ -643,7 +670,7 @@ pub(crate) fn apply_namespace_core(
         }
         NamespaceRequest::AdminRevoke { handle, actor, now } => {
             let Some(ns) = namespaces.remove(&handle) else {
-                return Err(LayerhouseError::Internal(format!(
+                return Err(LayerhouseError::NameUnknown(format!(
                     "handle {handle:?} is not currently claimed"
                 )));
             };
@@ -676,7 +703,7 @@ fn require_live_namespace(
         return Ok(());
     }
     if !data.namespaces.contains_key(handle) {
-        return Err(LayerhouseError::Internal(format!(
+        return Err(LayerhouseError::NameUnknown(format!(
             "namespace {handle:?} does not exist (referenced by {repository:?})"
         )));
     }
@@ -1872,8 +1899,8 @@ mod tests {
             },
         );
         let resp = StateMachine::apply_request(&mut data, claim_request("alice", "Other", false));
-        let Response::Error(msg) = resp else {
-            panic!("expected Response::Error, got {resp:?}");
+        let Response::Conflict(msg) = resp else {
+            panic!("expected Response::Conflict, got {resp:?}");
         };
         assert!(
             !msg.contains("secret-subject-uuid-do-not-leak"),
@@ -1902,7 +1929,7 @@ mod tests {
 
         let resp = StateMachine::apply_request(&mut data, claim_request("alice", "Alice2", false));
         assert!(
-            matches!(resp, Response::Error(_)),
+            matches!(resp, Response::Denied(_)),
             "reclaim without admin override must fail: {resp:?}"
         );
         assert!(data.released_handles.contains_key("alice"));
@@ -1934,7 +1961,7 @@ mod tests {
             }),
         );
         assert!(
-            matches!(resp, Response::Error(_)),
+            matches!(resp, Response::Conflict(_)),
             "delete with content must fail: {resp:?}"
         );
         // Namespace must be restored on the failure path.
@@ -1997,8 +2024,8 @@ mod tests {
             &mut data,
             put_manifest("ghost/repo", "v1", &manifest_digest, &[]),
         );
-        let Response::Error(msg) = resp else {
-            panic!("expected Response::Error, got {resp:?}");
+        let Response::NameUnknown(msg) = resp else {
+            panic!("expected Response::NameUnknown, got {resp:?}");
         };
         assert!(msg.contains("ghost"), "{msg:?}");
         assert!(!data.manifests.contains_key("ghost/repo"));
@@ -2019,7 +2046,7 @@ mod tests {
             }),
         );
         assert!(
-            matches!(resp, Response::Error(_)),
+            matches!(resp, Response::NameUnknown(_)),
             "mount into ghost namespace must fail: {resp:?}"
         );
     }
@@ -2039,7 +2066,7 @@ mod tests {
             Request::Repository(RepositoryRequest::PutRepository(repo)),
         );
         assert!(
-            matches!(resp, Response::Error(_)),
+            matches!(resp, Response::NameUnknown(_)),
             "put_repository under ghost namespace must fail: {resp:?}"
         );
     }
@@ -2056,8 +2083,8 @@ mod tests {
                 now: 1,
             }),
         );
-        let Response::Error(msg) = resp else {
-            panic!("expected Response::Error, got {resp:?}");
+        let Response::NameUnknown(msg) = resp else {
+            panic!("expected Response::NameUnknown, got {resp:?}");
         };
         assert!(msg.contains("ghost"), "{msg:?}");
         assert!(!data.released_handles.contains_key("ghost"));
@@ -2075,7 +2102,7 @@ mod tests {
             }),
         );
         assert!(
-            matches!(resp, Response::Error(_)),
+            matches!(resp, Response::NameUnknown(_)),
             "admin-revoke of unknown handle must fail: {resp:?}"
         );
         assert!(!data.released_handles.contains_key("ghost"));

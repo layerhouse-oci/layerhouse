@@ -211,9 +211,14 @@ pub enum Response {
     Token(TokenResponse),
     Repository(RepositoryResponse),
     Namespace(NamespaceResponse),
-    /// Apply-time error encoded as a string. Decoded by the router into
-    /// `LayerhouseError::Internal(msg)`. A typed envelope will replace this
-    /// placeholder; for now it lets fallible applies travel back through
-    /// openraft (which requires `Serialize`/`Deserialize` on the response).
-    Error(String),
+    /// Apply-time error — handle is not claimed / doesn't exist.
+    NameUnknown(String),
+    /// Apply-time error — caller lacks permission for this operation.
+    Denied(String),
+    /// Apply-time error — operation conflicts with current state.
+    Conflict(String),
+    /// Apply-time error — name fails grammar validation.
+    NameInvalid(String),
+    /// Apply-time error — internal / unknown catch-all.
+    InternalError(String),
 }
