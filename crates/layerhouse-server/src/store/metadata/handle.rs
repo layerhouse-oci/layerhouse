@@ -35,7 +35,7 @@ pub fn is_handle_reserved(handle: &str) -> bool {
 /// dashes, no leading/trailing dash.
 pub fn validate_handle(s: &str) -> Result<(), LayerhouseError> {
     if s.len() < HANDLE_MIN_LEN || s.len() > HANDLE_MAX_LEN {
-        return Err(LayerhouseError::Internal(format!(
+        return Err(LayerhouseError::NameInvalid(format!(
             "handle {s:?} has invalid length: must be {HANDLE_MIN_LEN}..={HANDLE_MAX_LEN} chars"
         )));
     }
@@ -45,23 +45,23 @@ pub fn validate_handle(s: &str) -> Result<(), LayerhouseError> {
         let is_alnum = b.is_ascii_lowercase() || b.is_ascii_digit();
         let is_dash = b == b'-';
         if !is_alnum && !is_dash {
-            return Err(LayerhouseError::Internal(format!(
+            return Err(LayerhouseError::NameInvalid(format!(
                 "handle {s:?} contains illegal character {:?}",
                 b as char
             )));
         }
         if idx == 0 && is_dash {
-            return Err(LayerhouseError::Internal(format!(
+            return Err(LayerhouseError::NameInvalid(format!(
                 "handle {s:?} cannot start with a dash"
             )));
         }
         if idx == bytes.len() - 1 && is_dash {
-            return Err(LayerhouseError::Internal(format!(
+            return Err(LayerhouseError::NameInvalid(format!(
                 "handle {s:?} cannot end with a dash"
             )));
         }
         if is_dash && prev_dash {
-            return Err(LayerhouseError::Internal(format!(
+            return Err(LayerhouseError::NameInvalid(format!(
                 "handle {s:?} cannot contain consecutive dashes"
             )));
         }
@@ -76,17 +76,17 @@ pub fn validate_handle(s: &str) -> Result<(), LayerhouseError> {
 /// leading segment additionally satisfies [`validate_handle`].
 pub fn validate_repository_path(s: &str) -> Result<(), LayerhouseError> {
     if s.is_empty() {
-        return Err(LayerhouseError::Internal(
+        return Err(LayerhouseError::NameInvalid(
             "repository path is empty".to_string(),
         ));
     }
     if s.starts_with('/') || s.ends_with('/') {
-        return Err(LayerhouseError::Internal(format!(
+        return Err(LayerhouseError::NameInvalid(format!(
             "repository path {s:?} cannot start or end with '/'"
         )));
     }
     if s.contains("//") {
-        return Err(LayerhouseError::Internal(format!(
+        return Err(LayerhouseError::NameInvalid(format!(
             "repository path {s:?} contains an empty segment"
         )));
     }
@@ -99,7 +99,7 @@ pub fn validate_repository_path(s: &str) -> Result<(), LayerhouseError> {
         validate_path_segment(seg)?;
     }
     if !had_more {
-        return Err(LayerhouseError::Internal(format!(
+        return Err(LayerhouseError::NameInvalid(format!(
             "repository path {s:?} requires at least two segments (<handle>/<name>)"
         )));
     }
@@ -108,7 +108,7 @@ pub fn validate_repository_path(s: &str) -> Result<(), LayerhouseError> {
 
 fn validate_path_segment(seg: &str) -> Result<(), LayerhouseError> {
     if seg.is_empty() {
-        return Err(LayerhouseError::Internal(
+        return Err(LayerhouseError::NameInvalid(
             "repository path contains an empty segment".to_string(),
         ));
     }
@@ -116,7 +116,7 @@ fn validate_path_segment(seg: &str) -> Result<(), LayerhouseError> {
         let ok =
             b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_' || b == b'.';
         if !ok {
-            return Err(LayerhouseError::Internal(format!(
+            return Err(LayerhouseError::NameInvalid(format!(
                 "repository path segment {seg:?} contains illegal character {:?}",
                 b as char
             )));
@@ -129,12 +129,12 @@ fn validate_path_segment(seg: &str) -> Result<(), LayerhouseError> {
 /// `repository` is a bare one-segment string (no `/`).
 pub fn handle_of(repository: &str) -> Result<&str, LayerhouseError> {
     let (head, rest) = repository.split_once('/').ok_or_else(|| {
-        LayerhouseError::Internal(format!(
+        LayerhouseError::NameInvalid(format!(
             "repository {repository:?} is missing a namespace handle prefix"
         ))
     })?;
     if rest.is_empty() {
-        return Err(LayerhouseError::Internal(format!(
+        return Err(LayerhouseError::NameInvalid(format!(
             "repository {repository:?} is missing the name segment after the handle"
         )));
     }

@@ -101,11 +101,16 @@ impl RaftMetadataStore {
             }
             Err(e) => return Err(LayerhouseError::Consensus(format!("{}", e))),
         };
-        // Apply-time errors travel back as `Response::Error(msg)` because
-        // `LayerhouseError` is not `Deserialize`. Decode into `Internal` here
-        // so callers see a normal `LayerhouseError`.
-        if let Response::Error(msg) = resp {
-            return Err(LayerhouseError::Internal(msg));
+        // Apply-time errors travel back as Response error variants because
+        // `LayerhouseError` is not `Deserialize`. Map each variant back into
+        // the corresponding `LayerhouseError`.
+        match &resp {
+            Response::NameUnknown(msg) => return Err(LayerhouseError::NameUnknown(msg.clone())),
+            Response::Denied(msg) => return Err(LayerhouseError::Denied(msg.clone())),
+            Response::Conflict(msg) => return Err(LayerhouseError::Conflict(msg.clone())),
+            Response::NameInvalid(msg) => return Err(LayerhouseError::NameInvalid(msg.clone())),
+            Response::InternalError(msg) => return Err(LayerhouseError::Internal(msg.clone())),
+            _ => {}
         }
         Ok(resp)
     }
