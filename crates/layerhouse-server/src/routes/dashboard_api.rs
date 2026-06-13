@@ -222,6 +222,23 @@ async fn repository_dispatch_result<
     let name = parts[..manifests_pos].join("/");
     let tail = &parts[manifests_pos + 1..];
 
+    // Dashboard repository reads were historically ungated (the middleware only
+    // auth-checks `/v2/` and `/api/v1/admin/` paths). A direct GET to
+    // `/api/v1/repositories/users/<name>/.../manifests` would leak private
+    // manifests. Gate every dashboard repository GET on Pull access here, using
+    // the same `check_permission` the OCI and admin paths use.
+    if method == Method::GET
+        && let (Some(auth), Some(Extension(identity))) = (state.auth.as_ref(), &identity)
+    {
+        auth.check_permission(
+            identity,
+            &name,
+            crate::auth::permissions::OciAction::Pull,
+            &state.core.metadata,
+        )
+        .await?;
+    }
+
     match (method, tail) {
         (Method::GET, []) => {
             let query = parse_query::<ManifestQuery>(&uri)?;

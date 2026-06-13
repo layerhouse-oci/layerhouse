@@ -555,6 +555,21 @@ impl AuthService {
             return Ok(());
         }
 
+        // Personal-namespace boundary guard: repos under `users/<someone>/`
+        // are private. Only the namespace owner (matched above) gets through;
+        // any other access — cross-user PAT scope, delegated RBAC, OCI bearer
+        // tokens — is denied. This closes the gap where a PAT scoped to
+        // `users/bob/*` could bypass the namespace gate (the `users` handle is
+        // reserved, so `is_handle_reserved` skips the claim check).
+        if let Some(ns_user) = permissions::in_personal_namespace_of(repository)
+            && identity.username.as_deref().is_none_or(|u| u != ns_user)
+        {
+            return Err(LayerhouseError::Denied(format!(
+                "access denied for repository {}",
+                repository
+            )));
+        }
+
         // Writes to `<handle>/...` are gated on a live namespace claim, mirroring
         // the Raft apply-time gate (`require_live_namespace`). Reads and targets
         // with no resolvable handle (the `"*"` admin wildcard, single-segment
@@ -1014,5 +1029,97 @@ mod tests {
         auth.check_permission(&alice, "acme/app", OciAction::Create, &store)
             .await
             .expect_err("a released handle denies writes until it is reclaimed");
+    }
+
+    // ── Personal-namespace boundary tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn pat_cross_user_personal_namespace_denied() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+
+        // Alice creates a PAT with a scope targeting Bob's personal namespace.
+        let pat = identity(
+            "subject-alice",
+            TokenType::PersonalAccess,
+            &[],
+            &["repository:users/bob/app:*"],
+        );
+        let err = auth
+            .check_permission(&pat, "users/bob/app", OciAction::Create, &store)
+            .await
+            .expect_err("cross-user personal namespace must be denied");
+        assert!(err.to_string().contains("access denied"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn pat_own_personal_namespace_allowed() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+
+        // Alice with her own personal namespace — auto-grant.
+        let mut alice = identity("subject-alice", TokenType::PersonalAccess, &[], &[]);
+        alice.username = Some("alice".to_string());
+        auth.check_permission(&alice, "users/alice/app", OciAction::Create, &store)
+            .await
+            .expect("own personal namespace is allowed");
+    }
+
+    #[tokio::test]
+    async fn oidc_cross_user_personal_namespace_denied_despite_rbac() {
+        // Even with an RBAC grant matching `users/bob/*`, Alice cannot access
+        // Bob's personal namespace via OIDC — personal namespaces are private.
+        let auth = AuthService::for_test(vec![PermissionMapping {
+            name: "cross-ns".to_string(),
+            groups: vec!["ci".to_string()],
+            scopes: vec!["repository:users/bob/*:create".to_string()],
+        }]);
+        let store = InMemoryMetadataStore::default();
+
+        let alice = identity("subject-alice", TokenType::OidcAccess, &["ci"], &[]);
+        let err = auth
+            .check_permission(&alice, "users/bob/app", OciAction::Create, &store)
+            .await
+            .expect_err("cross-user personal namespace denied despite RBAC grant");
+        assert!(err.to_string().contains("access denied"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn oci_bearer_cross_user_personal_namespace_denied() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+
+        // OCI bearer token with scopes for another user's namespace.
+        let bearer = identity(
+            "subject-alice",
+            TokenType::OciBearer,
+            &[],
+            &["repository:users/bob/app:*"],
+        );
+        let err = auth
+            .check_permission(&bearer, "users/bob/app", OciAction::Create, &store)
+            .await
+            .expect_err("OCI bearer cross-user personal namespace must be denied");
+        assert!(err.to_string().contains("access denied"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn cross_user_personal_namespace_pull_denied() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+
+        // Pull to another user's namespace with a valid pull scope.
+        // The cross-user guard applies to ALL actions (including Pull).
+        let pat = identity(
+            "subject-alice",
+            TokenType::PersonalAccess,
+            &[],
+            &["repository:users/bob/app:pull"],
+        );
+        let err = auth
+            .check_permission(&pat, "users/bob/app", OciAction::Pull, &store)
+            .await
+            .expect_err("pull to cross-user personal namespace is denied");
+        assert!(err.to_string().contains("access denied"), "{err:?}");
     }
 }

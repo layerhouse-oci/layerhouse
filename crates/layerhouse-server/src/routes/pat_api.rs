@@ -12,6 +12,8 @@ use crate::routes::AppState;
 use crate::store::blob::BlobStore;
 use crate::store::metadata::{PersonalAccessToken, TokenStore};
 
+use crate::auth::permissions;
+
 #[derive(Debug, Deserialize)]
 pub struct CreatePatRequest {
     pub name: String,
@@ -85,6 +87,14 @@ async fn create_token<M: TokenStore, B: BlobStore>(
         return Err(LayerhouseError::NameInvalid(
             "token name is required".to_string(),
         ));
+    }
+
+    // Reject scopes that target another user's personal namespace.
+    // `users/<name>/...` repos are private; cross-user PAT scopes are
+    // never legitimate. The auth layer's `check_permission` also guards
+    // this boundary at request time as belt-and-suspenders.
+    for scope in &req.scopes {
+        permissions::pat_scope_allowed_for_identity(scope, identity.username.as_deref())?;
     }
 
     // Generate raw token: "layerhouse-" + 32 random hex chars

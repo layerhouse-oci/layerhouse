@@ -193,6 +193,50 @@ pub fn in_personal_namespace(username: Option<&str>, repository: &str) -> bool {
     repository.starts_with(&prefix)
 }
 
+/// If `repository` lives under the `users/` prefix, return the target username
+/// (the segment immediately after `users/`). Returns `None` for paths outside
+/// the personal-namespace tree.
+pub fn in_personal_namespace_of(repository: &str) -> Option<&str> {
+    let rest = repository.strip_prefix("users/")?;
+    let username = rest.split('/').next()?;
+    if username.is_empty() {
+        None
+    } else {
+        Some(username)
+    }
+}
+
+/// Validate that a PAT scope string doesn't target another user's personal
+/// namespace. Scopes matching the identity's own `users/` namespace are
+/// allowed; everything else is syntactically fine (the auth layer validates
+/// actual permission at request time).
+pub fn pat_scope_allowed_for_identity(
+    scope: &str,
+    username: Option<&str>,
+) -> Result<(), LayerhouseError> {
+    let Some((repo_pattern, _action)) = parse_scope(scope) else {
+        // Unparseable scopes are caught later by the auth layer.
+        return Ok(());
+    };
+    // Strip trailing `/*` so `in_personal_namespace_of("users/bob/*")` extracts
+    // `"bob"` rather than `"bob*"`.
+    let repo_pattern = repo_pattern.strip_suffix("/*").unwrap_or(&repo_pattern);
+    let Some(target_user) = in_personal_namespace_of(repo_pattern) else {
+        return Ok(());
+    };
+    let Some(my_username) = username.filter(|u| !u.is_empty()) else {
+        return Err(LayerhouseError::Denied(format!(
+            "scope {scope:?} targets a personal namespace but your session has no username"
+        )));
+    };
+    if target_user != my_username {
+        return Err(LayerhouseError::Denied(format!(
+            "scope {scope:?} targets another user's personal namespace"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +384,61 @@ mod tests {
         assert!(!in_personal_namespace(Some(""), "users/alice/app"));
         // A repo outside the personal namespace is never auto-granted.
         assert!(!in_personal_namespace(Some("alice"), "team-a/app"));
+    }
+
+    #[test]
+    fn in_personal_namespace_of_extracts_username() {
+        assert_eq!(in_personal_namespace_of("users/alice/app"), Some("alice"));
+        assert_eq!(
+            in_personal_namespace_of("users/alice/nested/repo"),
+            Some("alice")
+        );
+        assert_eq!(in_personal_namespace_of("users/alice"), Some("alice"));
+        assert_eq!(in_personal_namespace_of("team-a/app"), None);
+        assert_eq!(in_personal_namespace_of("users"), None);
+        assert_eq!(in_personal_namespace_of("users/"), None);
+        assert_eq!(in_personal_namespace_of(""), None);
+    }
+
+    #[test]
+    fn pat_scope_allowed_rejects_cross_user_target() {
+        let err = pat_scope_allowed_for_identity("repository:users/bob/app:*", Some("alice"))
+            .expect_err("cross-user scope must be rejected");
+        assert!(err.to_string().contains("personal namespace"), "{err:?}");
+
+        // Own namespace is fine.
+        pat_scope_allowed_for_identity("repository:users/alice/app:*", Some("alice"))
+            .expect("own personal namespace scope is allowed");
+
+        // Non-users scope is fine.
+        pat_scope_allowed_for_identity("repository:team-a/*:*", Some("alice"))
+            .expect("non-users scope is allowed");
+
+        // Unparseable scope is fine (caught later).
+        pat_scope_allowed_for_identity("bad-scope", Some("alice"))
+            .expect("unparseable scope passes syntax check");
+
+        // Missing username with a users/ scope.
+        let err = pat_scope_allowed_for_identity("repository:users/bob/app:*", None)
+            .expect_err("users/ scope without username must be rejected");
+        assert!(err.to_string().contains("no username"), "{err:?}");
+    }
+
+    #[test]
+    fn pat_scope_wildcard_own_namespace_allowed() {
+        // A wildcard scope targeting `users/bob/*` is allowed when the
+        // identity is `bob` — the `/*` suffix is stripped before username
+        // extraction so we compare `"bob"` vs `"bob"`, not `"bob*"`.
+        pat_scope_allowed_for_identity("repository:users/bob/*:*", Some("bob"))
+            .expect("wildcard scope for own namespace is allowed");
+    }
+
+    #[test]
+    fn pat_scope_prefix_collision_rejected() {
+        // `alicia` is a prefix of `alice` but is a different user — the
+        // scope must be rejected even though the strings share a prefix.
+        let err = pat_scope_allowed_for_identity("repository:users/alicia/app:pull", Some("alice"))
+            .expect_err("prefix-collision scope must be rejected");
+        assert!(err.to_string().contains("personal namespace"), "{err:?}");
     }
 }

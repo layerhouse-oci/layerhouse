@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::error::LayerhouseError;
 use crate::routes::AppState;
+use crate::routes::percent_decode;
 use crate::store::blob::BlobStore;
 use crate::store::metadata::{ManifestStore, MetadataStore, TokenStore};
 
@@ -357,7 +358,8 @@ fn expire_session_cookie(response: &mut Response, flags: &super::CookieFlags) {
 }
 
 fn extract_repository_from_path(path: &str) -> String {
-    path.strip_prefix("/v2/")
+    let raw = path
+        .strip_prefix("/v2/")
         .and_then(|rest| {
             let parts: Vec<&str> = rest.split('/').collect();
             parts
@@ -371,7 +373,8 @@ fn extract_repository_from_path(path: &str) -> String {
                 .filter(|index| *index > 0)
                 .map(|index| parts[..index].join("/"))
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    percent_decode(&raw)
 }
 
 /// Resolve the OCI action a `/v2/` request needs, performing the manifest
