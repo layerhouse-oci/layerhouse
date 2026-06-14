@@ -1,12 +1,41 @@
 use crate::config::PermissionMapping;
 use crate::error::LayerhouseError;
 
+/// Where a permission grant came from. Used by the dashboard to explain
+/// *why* a user can access (or grant access to) a repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantSource {
+    /// Actor's own personal namespace — full access implicit.
+    Personal,
+    /// Available through OIDC group → RBAC mapping.
+    GroupGrant,
+    /// Anonymous pull; limited grant ceiling.
+    Public,
+}
+
+/// Repository kind derived from manifest artifact types.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoKind {
+    Image,
+    Helm,
+    Wasm,
+    Artifact,
+    Unknown,
+}
+
 /// Action ladder for repository access. Higher tiers imply all lower ones:
 /// `Pull < Create < Update < Delete`. `Create` is "add a manifest/tag that
 /// does not yet exist"; `Update` additionally allows overwriting an existing
 /// tag. This is the single source of truth for the action model — verb
 /// derivation, scope-string tokens, and the implication ladder all live here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum OciAction {
     Pull,
     Create,
@@ -116,6 +145,39 @@ impl PermissionResolver {
             repository
         )))
     }
+
+    /// Maximum action granted by group mappings for a repository.
+    /// Returns `None` when no group grant covers the repository.
+    pub fn max_action_from_groups(
+        &self,
+        user_groups: &[String],
+        repository: &str,
+    ) -> Option<OciAction> {
+        let mut best: Option<OciAction> = None;
+        for mapping in &self.mappings {
+            if !mapping
+                .groups
+                .iter()
+                .any(|group| user_groups.iter().any(|ug| group_matches(group, ug)))
+            {
+                continue;
+            }
+            for (repo_pattern, allowed_action) in &mapping.rules {
+                if match_repository(repo_pattern, repository)
+                    && action_matches(*allowed_action, OciAction::Pull)
+                {
+                    best = match best {
+                        Some(current) if action_rank(*allowed_action) > action_rank(current) => {
+                            Some(*allowed_action)
+                        }
+                        None => Some(*allowed_action),
+                        _ => best,
+                    };
+                }
+            }
+        }
+        best
+    }
 }
 
 fn group_matches(configured: &str, user_group: &str) -> bool {
@@ -156,7 +218,7 @@ fn parse_action_token(token: &str) -> Option<OciAction> {
 }
 
 /// Ladder position: higher rank implies all lower actions.
-fn action_rank(action: OciAction) -> u8 {
+pub fn action_rank(action: OciAction) -> u8 {
     match action {
         OciAction::Pull => 0,
         OciAction::Create => 1,
@@ -177,7 +239,7 @@ fn match_repository(pattern: &str, repo: &str) -> bool {
 
 /// A grant for `allowed` covers a request for `requested` when it sits at or
 /// above the requested tier: `Delete ⊇ Update ⊇ Create ⊇ Pull`.
-fn action_matches(allowed: OciAction, requested: OciAction) -> bool {
+pub fn action_matches(allowed: OciAction, requested: OciAction) -> bool {
     action_rank(allowed) >= action_rank(requested)
 }
 
@@ -235,6 +297,50 @@ pub fn pat_scope_allowed_for_identity(
         )));
     }
     Ok(())
+}
+
+/// Maximum action an actor can perform on `repository` based solely on their
+/// explicit scopes (PAT or OCI bearer). Returns `None` when no scope matches.
+/// The caller is responsible for also checking personal-namespace and
+/// namespace-claim owner grants.
+pub fn max_action_from_scopes(scopes: &[String], repository: &str) -> Option<OciAction> {
+    scopes
+        .iter()
+        .filter_map(|scope| parse_scope(scope))
+        .filter(|(pattern, _)| match_repository(pattern, repository))
+        .map(|(_, action)| action)
+        .max_by_key(|a| action_rank(*a))
+}
+
+/// Check whether `identity` holds a grant pattern that would cover a
+/// namespace-pattern scope like `repository:<prefix>/*`. Returns the
+/// maximum grantable action for that pattern, if any.
+pub fn max_action_for_namespace_pattern(scopes: &[String], prefix: &str) -> Option<OciAction> {
+    let pattern_repo = format!("{prefix}/*");
+    max_action_from_scopes(scopes, &pattern_repo)
+}
+
+/// Derive candidate namespace patterns from an identity's scopes for a given
+/// search prefix. Returns patterns the actor can grant (e.g., `team-a/*` from
+/// an RBAC mapping or PAT scope).
+pub fn derive_namespace_patterns(
+    scopes: &[String],
+    search_prefix: &str,
+) -> Vec<(String, OciAction)> {
+    let mut patterns: Vec<(String, OciAction)> = Vec::new();
+    for scope in scopes {
+        if let Some((repo_pattern, action)) = parse_scope(scope)
+            && let Some(prefix) = repo_pattern.strip_suffix("/*")
+            && !prefix.is_empty()
+            && prefix != "*"
+            && (search_prefix.is_empty() || prefix.starts_with(search_prefix))
+        {
+            patterns.push((format!("repository:{prefix}/*"), action));
+        }
+    }
+    patterns.sort();
+    patterns.dedup();
+    patterns
 }
 
 #[cfg(test)]

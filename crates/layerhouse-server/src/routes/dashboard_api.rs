@@ -9,13 +9,14 @@ use axum::routing::{any, delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::permissions::{self, GrantSource, OciAction};
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
 use crate::raft::membership;
 use crate::store::blob::BlobStore;
 use crate::store::metadata::{
     DeleteCounts, ManifestStore, ManifestSummary, NamespaceStore, Repository, RepositoryStore,
-    RepositorySummary, Visibility,
+    Visibility,
 };
 
 use super::{AppState, percent_decode};
@@ -56,13 +57,44 @@ struct RepositoryQuery {
     q: Option<String>,
     recency: Option<String>,
     sort: Option<String>,
+    /// Ownership filter: `all` (default), `mine`, `shared`, `public`.
+    #[serde(default)]
+    filter: OwnershipFilter,
+}
+
+#[derive(Debug, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum OwnershipFilter {
+    #[default]
+    All,
+    Mine,
+    Shared,
+    Public,
 }
 
 #[derive(Debug, Serialize)]
 struct RepositoryListResponse {
-    repositories: Vec<RepositorySummary>,
-    total: usize,
-    has_more: bool,
+    repositories: Vec<EnrichedRepositorySummary>,
+    total_reachable: u64,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EnrichedRepositorySummary {
+    name: String,
+    tag_count: usize,
+    manifest_count: usize,
+    stored_size_bytes: u64,
+    manifest_size_bytes: u64,
+    last_modified: u64,
+    description: String,
+    created_by: Option<crate::auth::identity::Subject>,
+    visibility: Visibility,
+    /// Maximum action the actor can perform on this repository.
+    access_level: OciAction,
+    /// Maximum action the actor could grant in a PAT for this repository.
+    max_grantable: OciAction,
+    grant_source: GrantSource,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +137,12 @@ struct ManifestDetailResponse {
     annotations: Option<serde_json::Value>,
     config_summary: Option<serde_json::Value>,
     body: serde_json::Value,
+    /// Where the actor's access to this repository came from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access_source: Option<GrantSource>,
+    /// Maximum action the actor could grant in a PAT for this repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_grantable_action: Option<OciAction>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,9 +284,13 @@ async fn repository_dispatch_result<
                 .await
                 .map(IntoResponse::into_response)
         }
-        (Method::GET, [digest]) => get_manifest(State(state), Path((name, (*digest).to_string())))
-            .await
-            .map(IntoResponse::into_response),
+        (Method::GET, [digest]) => get_manifest(
+            State(state),
+            Path((name, (*digest).to_string())),
+            identity.clone(),
+        )
+        .await
+        .map(IntoResponse::into_response),
         (Method::DELETE, [digest]) => delete_manifest(
             State(state),
             identity.clone(),
@@ -279,74 +321,116 @@ async fn list_repositories<M: ManifestStore + NamespaceStore, B: BlobStore>(
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Query(query): Query<RepositoryQuery>,
 ) -> Result<Response, LayerhouseError> {
-    let mut repos = state.core.metadata.list_repository_summaries().await?;
+    let repos = state.core.metadata.list_repository_summaries().await?;
 
-    // Hide repositories the caller cannot pull. The dashboard list is
-    // user-facing, so it filters by Pull access; the OCI `/v2/_catalog`
-    // endpoint stays unfiltered for spec compliance. When auth is disabled
-    // (`state.auth` is None) there is nothing to filter against, so the full
-    // list is returned.
+    // Compute enriched summaries: for each repo the actor can pull, record the
+    // access level, maximum grantable action, and grant source.
+    let mut enriched: Vec<EnrichedRepositorySummary> = Vec::new();
     if let (Some(auth), Some(Extension(identity))) = (state.auth.as_ref(), &identity) {
-        let mut visible = Vec::with_capacity(repos.len());
         for repo in repos {
-            if auth
-                .check_permission(
-                    identity,
-                    &repo.name,
-                    crate::auth::permissions::OciAction::Pull,
-                    &state.core.metadata,
-                )
+            if let Ok((action, source)) = auth
+                .max_grantable_action(identity, &repo.name, &state.core.metadata)
                 .await
-                .is_ok()
             {
-                visible.push(repo);
+                enriched.push(EnrichedRepositorySummary {
+                    name: repo.name,
+                    tag_count: repo.tag_count,
+                    manifest_count: repo.manifest_count,
+                    stored_size_bytes: repo.stored_size_bytes,
+                    manifest_size_bytes: repo.manifest_size_bytes,
+                    last_modified: repo.last_modified,
+                    description: repo.description,
+                    created_by: repo.created_by,
+                    visibility: repo.visibility,
+                    access_level: action,
+                    max_grantable: action,
+                    grant_source: source,
+                });
             }
         }
-        repos = visible;
+    } else {
+        // Auth-disabled mode: everything is visible, source is public.
+        for repo in repos {
+            enriched.push(EnrichedRepositorySummary {
+                name: repo.name,
+                tag_count: repo.tag_count,
+                manifest_count: repo.manifest_count,
+                stored_size_bytes: repo.stored_size_bytes,
+                manifest_size_bytes: repo.manifest_size_bytes,
+                last_modified: repo.last_modified,
+                description: repo.description,
+                created_by: repo.created_by,
+                visibility: repo.visibility,
+                access_level: OciAction::Delete,
+                max_grantable: OciAction::Delete,
+                grant_source: GrantSource::Public,
+            });
+        }
+    }
+
+    // Ownership filter.
+    if query.filter != OwnershipFilter::All
+        && let Some(Extension(ref identity)) = identity
+    {
+        let username = identity.username.as_deref().unwrap_or("");
+        enriched.retain(|repo| match query.filter {
+            OwnershipFilter::Mine => permissions::in_personal_namespace(Some(username), &repo.name),
+            OwnershipFilter::Shared => {
+                !permissions::in_personal_namespace(Some(username), &repo.name)
+            }
+            OwnershipFilter::Public => repo.visibility == Visibility::PublicPull,
+            OwnershipFilter::All => true,
+        });
     }
 
     let q = query.q.unwrap_or_default().to_lowercase();
     if !q.is_empty() {
-        repos.retain(|repo| repo.name.to_lowercase().contains(&q));
+        enriched.retain(|repo| repo.name.to_lowercase().contains(&q));
     }
 
     let now = crate::store::metadata::now_epoch();
     match query.recency.as_deref() {
-        Some("recent") => repos.retain(|repo| now.saturating_sub(repo.last_modified) <= 7 * 86_400),
-        Some("stale") => repos.retain(|repo| now.saturating_sub(repo.last_modified) >= 30 * 86_400),
+        Some("recent") => {
+            enriched.retain(|repo| now.saturating_sub(repo.last_modified) <= 7 * 86_400)
+        }
+        Some("stale") => {
+            enriched.retain(|repo| now.saturating_sub(repo.last_modified) >= 30 * 86_400)
+        }
         _ => {}
     }
 
     match query.sort.as_deref().unwrap_or("updated_desc") {
-        "name_asc" => repos.sort_by(|a, b| a.name.cmp(&b.name)),
-        "tag_count_desc" => repos.sort_by(|a, b| {
+        "name_asc" => enriched.sort_by(|a, b| a.name.cmp(&b.name)),
+        "tag_count_desc" => enriched.sort_by(|a, b| {
             b.tag_count
                 .cmp(&a.tag_count)
                 .then_with(|| a.name.cmp(&b.name))
         }),
-        "updated_asc" => repos.sort_by(|a, b| {
+        "updated_asc" => enriched.sort_by(|a, b| {
             a.last_modified
                 .cmp(&b.last_modified)
                 .then_with(|| a.name.cmp(&b.name))
         }),
-        _ => repos.sort_by(|a, b| {
+        _ => enriched.sort_by(|a, b| {
             b.last_modified
                 .cmp(&a.last_modified)
                 .then_with(|| a.name.cmp(&b.name))
         }),
     }
 
-    let total = repos.len();
+    let total_reachable = enriched.len() as u64;
     let n = page_size(query.n);
-    let (page, has_more) = paginate(repos, n, query.last.as_deref(), |repo| repo.name.as_str());
+    let (page, has_more) = paginate(enriched, n, query.last.as_deref(), |repo| {
+        repo.name.as_str()
+    });
     let next = page
         .last()
         .map(|repo| next_url("/api/v1/repositories", n, &repo.name));
     with_link(
         RepositoryListResponse {
             repositories: page,
-            total,
-            has_more,
+            total_reachable,
+            next_cursor: next.clone(),
         },
         has_more,
         next,
@@ -639,9 +723,10 @@ async fn list_manifests<M: ManifestStore, B: BlobStore>(
     )
 }
 
-async fn get_manifest<M: ManifestStore, B: BlobStore>(
+async fn get_manifest<M: ManifestStore + NamespaceStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     Path((name, digest)): Path<(String, String)>,
+    identity: Option<Extension<crate::auth::token::AuthIdentity>>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
     let manifest = state
@@ -652,6 +737,20 @@ async fn get_manifest<M: ManifestStore, B: BlobStore>(
         .into_iter()
         .find(|item| item.digest == digest)
         .ok_or_else(|| LayerhouseError::ManifestUnknown(digest.clone()))?;
+
+    let (access_source, max_grantable_action) =
+        if let (Some(auth), Some(Extension(identity))) = (state.auth.as_ref(), &identity) {
+            match auth
+                .max_grantable_action(identity, &name, &state.core.metadata)
+                .await
+            {
+                Ok((action, source)) => (Some(source), Some(action)),
+                Err(_) => (None, None),
+            }
+        } else {
+            (Some(GrantSource::Public), Some(OciAction::Delete))
+        };
+
     Ok(Json(ManifestDetailResponse {
         digest: manifest.digest,
         media_type: manifest.media_type,
@@ -665,6 +764,8 @@ async fn get_manifest<M: ManifestStore, B: BlobStore>(
         annotations: manifest.annotations,
         config_summary: manifest.config_summary,
         body: manifest.body,
+        access_source,
+        max_grantable_action,
     }))
 }
 
@@ -1394,5 +1495,205 @@ mod tests {
         assert_eq!(repo["manifest_count"].as_u64(), Some(0));
         assert_eq!(repo["description"], "nothing pushed yet");
         assert_eq!(repo["created_by"], "alice");
+    }
+
+    // ── Repository list: reachability filtering ───────────────────────
+
+    async fn seed_manifest(
+        state: &Arc<AppState<InMemoryMetadataStore, InMemoryBlobStore>>,
+        name: &str,
+        tag: &str,
+    ) {
+        state
+            .core
+            .metadata
+            .put_manifest(name, tag, manifest_entry(1, 1_777_593_600))
+            .await
+            .unwrap();
+    }
+
+    fn get_repositories(query: &str, identity: Option<AuthIdentity>) -> Request<Body> {
+        let uri = if query.is_empty() {
+            "/api/v1/repositories".to_string()
+        } else {
+            format!("/api/v1/repositories?{query}")
+        };
+        let mut req = Request::builder()
+            .uri(uri)
+            .method(Method::GET)
+            .body(Body::empty())
+            .unwrap();
+        if let Some(id) = identity {
+            req.extensions_mut().insert(id);
+        }
+        req
+    }
+
+    #[tokio::test]
+    async fn list_repositories_filters_by_pull_permission() {
+        let state = test_state_with_auth(vec![]);
+        seed_manifest(&state, "team-a/frontend", "latest").await;
+        seed_manifest(&state, "team-a/backend", "latest").await;
+        seed_manifest(&state, "team-b/worker", "latest").await;
+        seed_manifest(&state, "public/app", "latest").await;
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        // Actor has pull only on team-a repos.
+        let response = app
+            .oneshot(get_repositories(
+                "",
+                Some(identity(vec!["repository:team-a/*:pull".to_string()])),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let names: Vec<&str> = data["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"team-a/frontend"));
+        assert!(names.contains(&"team-a/backend"));
+        assert_eq!(data["total_reachable"], 2);
+    }
+
+    #[tokio::test]
+    async fn list_repositories_excludes_cross_user_personal() {
+        let state = test_state_with_auth(vec![]);
+        seed_manifest(&state, "users/alice/app", "latest").await;
+        seed_manifest(&state, "users/bob/app", "latest").await;
+        seed_manifest(&state, "team-a/worker", "latest").await;
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        // Alice sees her own repos + shared, but never Bob's.
+        let response = app
+            .oneshot(get_repositories(
+                "",
+                Some(identity(vec!["repository:team-a/worker:pull".to_string()])),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let names: Vec<&str> = data["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"users/alice/app"));
+        assert!(names.contains(&"team-a/worker"));
+        assert!(!names.iter().any(|n| n.contains("bob")));
+    }
+
+    #[tokio::test]
+    async fn list_repositories_mine_filter() {
+        let state = test_state_with_auth(vec![]);
+        seed_manifest(&state, "users/alice/app", "latest").await;
+        seed_manifest(&state, "users/alice/backend", "latest").await;
+        seed_manifest(&state, "team-a/worker", "latest").await;
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        // `mine` filter: only personal namespace repos.
+        let response = app
+            .oneshot(get_repositories(
+                "filter=mine",
+                Some(identity(vec!["repository:team-a/worker:*".to_string()])),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let names: Vec<&str> = data["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.iter().all(|n| n.starts_with("users/alice/")));
+    }
+
+    #[tokio::test]
+    async fn list_repositories_empty() {
+        let state = test_state_with_auth(vec![]);
+        // No repos seeded; actor has no pull grants.
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(get_repositories("", Some(identity(Vec::new()))))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let repos = data["repositories"].as_array().unwrap();
+        assert!(repos.is_empty());
+        assert_eq!(data["total_reachable"], 0);
+    }
+
+    #[tokio::test]
+    async fn list_repositories_includes_access_metadata() {
+        let state = test_state_with_auth(vec![]);
+        seed_manifest(&state, "users/alice/app", "latest").await;
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(get_repositories("", Some(identity(vec![]))))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let repo = &data["repositories"].as_array().unwrap()[0];
+        // Personal namespace should have delete-level access.
+        assert_eq!(repo["access_level"], "delete");
+        assert_eq!(repo["max_grantable"], "delete");
+        assert_eq!(repo["grant_source"], "personal");
+    }
+
+    #[tokio::test]
+    async fn list_repositories_shared_filter() {
+        let state = test_state_with_auth(vec![]);
+        seed_manifest(&state, "users/alice/app", "latest").await;
+        seed_manifest(&state, "team-a/worker", "latest").await;
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(get_repositories(
+                "filter=shared",
+                Some(identity(vec!["repository:team-a/worker:pull".to_string()])),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let names: Vec<&str> = data["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        // Only non-personal repos.
+        assert_eq!(names, vec!["team-a/worker"]);
     }
 }

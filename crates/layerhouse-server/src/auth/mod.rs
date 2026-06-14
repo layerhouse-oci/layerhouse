@@ -22,6 +22,7 @@ use self::discovery::OidcDiscovery;
 use self::identity::Subject;
 use self::jwks::{CachedJwksDocument, JwksCache, JwksMetrics, JwksS3Cache};
 use self::permissions::PermissionResolver;
+use self::permissions::action_rank;
 use self::token::{AuthIdentity, TokenType};
 
 /// Whether a namespace `owner` grants `identity` the full action ladder in the
@@ -620,6 +621,70 @@ impl AuthService {
     ) -> Result<(), LayerhouseError> {
         self.check_permission(identity, "*", permissions::OciAction::Delete, namespaces)
             .await
+    }
+
+    /// Compute the maximum action the actor can perform on `repository`,
+    /// and where that access came from. Used by the dashboard to render
+    /// the access ladder and authorization reason panel.
+    pub async fn max_grantable_action(
+        &self,
+        identity: &AuthIdentity,
+        repository: &str,
+        namespaces: &dyn NamespaceStore,
+    ) -> Result<(permissions::OciAction, permissions::GrantSource), LayerhouseError> {
+        use permissions::OciAction::*;
+
+        // Personal namespace grants the full ladder.
+        if permissions::in_personal_namespace(identity.username.as_deref(), repository) {
+            return Ok((Delete, permissions::GrantSource::Personal));
+        }
+
+        // Namespace owner via claim — full ladder.
+        if let Ok(handle) = handle_of(repository)
+            && !is_handle_reserved(handle)
+            && let Some(ns) = namespaces.get_namespace(handle).await?
+            && owner_grants(&ns.owner, identity)
+        {
+            return Ok((Delete, permissions::GrantSource::Personal));
+        }
+
+        // Check scopes (PAT or OCI bearer).
+        let scope_max = permissions::max_action_from_scopes(&identity.scopes, repository);
+
+        // Check OIDC group grants.
+        let group_max = self
+            .permission_resolver
+            .max_action_from_groups(&identity.groups, repository);
+
+        let max = match (scope_max, group_max) {
+            (Some(s), Some(g)) => Some(if action_rank(s) >= action_rank(g) {
+                s
+            } else {
+                g
+            }),
+            (Some(s), None) => Some(s),
+            (None, Some(g)) => Some(g),
+            (None, None) => None,
+        };
+
+        match max {
+            Some(action) => Ok((action, permissions::GrantSource::GroupGrant)),
+            None => Err(LayerhouseError::Denied(format!(
+                "access denied for repository {}",
+                repository
+            ))),
+        }
+    }
+
+    /// Maximum action granted by group mappings for a repository.
+    /// Delegates to the inner [`PermissionResolver`].
+    pub fn max_action_from_groups(
+        &self,
+        user_groups: &[String],
+        repository: &str,
+    ) -> Option<permissions::OciAction> {
+        self.permission_resolver
+            .max_action_from_groups(user_groups, repository)
     }
 
     pub fn mint_oci_token(
