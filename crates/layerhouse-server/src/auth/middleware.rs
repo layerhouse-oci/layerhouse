@@ -76,6 +76,11 @@ pub async fn auth_middleware<M: MetadataStore, B: BlobStore>(
     let identity = match authenticate_request(auth_service, &state.core.metadata, credential).await
     {
         Ok(Some(identity)) => identity,
+        // Session discovery is reachable while logged out: let the handler
+        // return the `auth_enabled: true, subject: null` state so the dashboard
+        // can show the sign-in affordance. Every other path still gets the 401
+        // challenge when no credential is presented.
+        Ok(None) if path == "/api/v1/session" => return next.run(req).await,
         Ok(None) => return auth_required_response(auth_service, &req, oci_action),
         Err(e) if uses_session_cookie => {
             return session_cookie_auth_error_response(&req, e, &flags);
