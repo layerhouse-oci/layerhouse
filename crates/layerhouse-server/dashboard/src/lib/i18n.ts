@@ -155,6 +155,12 @@ const en: Messages = {
   "overview.unknown": "unknown",
 
   "repos.eyebrow": "Repository Index",
+  "repos.heroEyebrow": "Container Registry",
+  "repos.heroCopy":
+    "Browse pushed OCI images, inspect tag volume, and jump into repository history from the Layerhouse Container Registry dashboard.",
+  "repos.catalog": "Catalog",
+  "repos.sort": "Sort",
+  "repos.deleteEyebrow": "Destructive Action",
   "repos.title": "Repositories",
   "repos.search": "Search repositories",
   "repos.sort.recent": "Recently updated",
