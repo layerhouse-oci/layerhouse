@@ -50,13 +50,21 @@ async fn get_session<M: NamespaceStore, B: Send + Sync + 'static>(
         }));
     }
 
+    // Session discovery: auth is enabled but the caller has no valid identity.
+    // Return 200 with the logged-out state so the dashboard can render the
+    // "Sign in with OIDC" affordance instead of treating this as a hard error.
     let Some(Extension(identity)) = identity else {
-        return Err(LayerhouseError::Unauthorized {
-            message: "authentication required".to_string(),
-            realm: None,
-            service: None,
-            scope: None,
-        });
+        return Ok(Json(SessionResponse {
+            auth_enabled: true,
+            subject: None,
+            username: None,
+            display_name: None,
+            email: None,
+            groups: vec![],
+            scopes: vec![],
+            token_type: None,
+            is_admin: false,
+        }));
     };
 
     let is_admin = if let Some(auth) = state.auth.as_ref() {
@@ -209,5 +217,28 @@ mod tests {
         assert!(value["display_name"].is_null());
         assert!(value["email"].is_null());
         assert_eq!(value["is_admin"], true);
+    }
+
+    #[test]
+    fn logged_out_discovery_reports_auth_enabled_without_identity() {
+        // The session endpoint doubles as a discovery probe: when auth is on
+        // but the caller is unauthenticated, it must report auth_enabled with a
+        // null subject so the dashboard can render the sign-in affordance.
+        let value = serde_json::to_value(SessionResponse {
+            auth_enabled: true,
+            subject: None,
+            username: None,
+            display_name: None,
+            email: None,
+            groups: vec![],
+            scopes: vec![],
+            token_type: None,
+            is_admin: false,
+        })
+        .expect("serialize session");
+
+        assert_eq!(value["auth_enabled"], true);
+        assert!(value["subject"].is_null());
+        assert_eq!(value["is_admin"], false);
     }
 }
