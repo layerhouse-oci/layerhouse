@@ -1,8 +1,5 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
-import {
-  fetchHelmCharts,
-  fetchHelmChartVersions,
-} from "../lib/api";
+import { fetchHelmCharts, fetchHelmChartVersions } from "../lib/api";
 import type { HelmChart, HelmChartVersion } from "../lib/types";
 import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
@@ -23,9 +20,7 @@ export default function HelmCharts() {
       setError(null);
       setErrorCount(0);
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Failed to fetch helm charts"
-      );
+      setError(e instanceof Error ? e.message : "Failed to fetch helm charts");
       setErrorCount((c) => c + 1);
     } finally {
       setLoading(false);
@@ -60,20 +55,12 @@ export default function HelmCharts() {
     const s = search().toLowerCase();
     if (!s) return charts();
     return charts().filter(
-      (c) =>
-        c.name.toLowerCase().includes(s) ||
-        c.description.toLowerCase().includes(s)
+      (c) => c.name.toLowerCase().includes(s) || c.description.toLowerCase().includes(s),
     );
   };
 
   if (errorCount() >= 3) {
-    return (
-      <ErrorBanner
-        message={error() ?? "Unknown error"}
-        onRetry={load}
-        fullPage
-      />
-    );
+    return <ErrorBanner message={error() ?? "Unknown error"} onRetry={load} fullPage />;
   }
 
   return (
@@ -97,9 +84,7 @@ export default function HelmCharts() {
         <LoadingSpinner label="Loading helm charts..." />
       ) : filtered().length === 0 ? (
         <EmptyState
-          title={
-            search() ? "No matching charts" : "No helm charts"
-          }
+          title={search() ? "No matching charts" : "No helm charts"}
           description={
             search()
               ? "Try a different search term."
@@ -127,16 +112,12 @@ export default function HelmCharts() {
                       </td>
                       <td>{chart.description}</td>
                       <td>
-                        <span class="badge badge-success">
-                          {chart.latest_version}
-                        </span>
+                        <span class="badge badge-success">{chart.latest_version}</span>
                       </td>
                       <td>
-                        <button
-                          class="btn"
-                          onClick={() => toggleExpand(chart.name)}
-                        >
-                          {expanded().has(chart.name) ? "Hide" : "Versions"} ({chart.versions.length})
+                        <button class="btn" onClick={() => toggleExpand(chart.name)}>
+                          {expanded().has(chart.name) ? "Hide" : "Versions"} (
+                          {chart.versions.length})
                         </button>
                       </td>
                     </tr>

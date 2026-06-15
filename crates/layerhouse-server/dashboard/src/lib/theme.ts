@@ -18,9 +18,7 @@ function initialTheme(): ThemePreference {
 
 function systemTheme(): ResolvedTheme {
   if (typeof window === "undefined") return "dark";
-  return window.matchMedia?.("(prefers-color-scheme: light)").matches
-    ? "light"
-    : "dark";
+  return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
 const [themeSignal, setThemeSignal] = createSignal<ThemePreference>(initialTheme());
@@ -50,4 +48,3 @@ export function syncThemeDocument() {
   document.documentElement.dataset.theme = resolvedTheme();
   document.documentElement.dataset.themePreference = themeSignal();
 }
-

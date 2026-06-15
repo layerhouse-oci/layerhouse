@@ -20,10 +20,7 @@ export default function Cluster() {
 
   async function load() {
     try {
-      const [s, clusterStatus] = await Promise.all([
-        fetchSession(),
-        fetchClusterStatus(),
-      ]);
+      const [s, clusterStatus] = await Promise.all([fetchSession(), fetchClusterStatus()]);
       setSession(s);
       setStatus(clusterStatus);
       setError(null);
@@ -96,7 +93,9 @@ export default function Cluster() {
           <h1>{t("cluster.title")}</h1>
         </div>
         <Show when={session()?.is_admin}>
-          <button class="btn btn-primary" onClick={() => setShowJoin(true)}>{t("cluster.joinNode")}</button>
+          <button class="btn btn-primary" onClick={() => setShowJoin(true)}>
+            {t("cluster.joinNode")}
+          </button>
         </Show>
       </div>
 
@@ -109,10 +108,30 @@ export default function Cluster() {
       ) : (
         <>
           <div class="stats">
-            <div class="stat glass"><div class="label">{t("cluster.leader")}</div><div class="value small">{status()!.leader_id ?? "-"}</div><p class="note">{t("cluster.term")} {status()!.term}</p></div>
-            <div class="stat glass"><div class="label">{t("cluster.quorum")}</div><div class="value small">{status()!.quorum}</div><p class="note">{t("cluster.healthyVoters", { count: status()!.healthy_voters })}</p></div>
-            <div class="stat glass"><div class="label">{t("app.nav.cluster")}</div><div class="value small">{status()!.cluster_id}</div><p class="note">{t("common.updated")} {formatAgo(status()!.updated_at)}</p></div>
-            <div class="stat glass"><div class="label">{t("cluster.members")}</div><div class="value small">{memberRows().length}</div><p class="note">{t("cluster.learnersCount", { count: status()!.learners.length })}</p></div>
+            <div class="stat glass">
+              <div class="label">{t("cluster.leader")}</div>
+              <div class="value small">{status()!.leader_id ?? "-"}</div>
+              <p class="note">
+                {t("cluster.term")} {status()!.term}
+              </p>
+            </div>
+            <div class="stat glass">
+              <div class="label">{t("cluster.quorum")}</div>
+              <div class="value small">{status()!.quorum}</div>
+              <p class="note">{t("cluster.healthyVoters", { count: status()!.healthy_voters })}</p>
+            </div>
+            <div class="stat glass">
+              <div class="label">{t("app.nav.cluster")}</div>
+              <div class="value small">{status()!.cluster_id}</div>
+              <p class="note">
+                {t("common.updated")} {formatAgo(status()!.updated_at)}
+              </p>
+            </div>
+            <div class="stat glass">
+              <div class="label">{t("cluster.members")}</div>
+              <div class="value small">{memberRows().length}</div>
+              <p class="note">{t("cluster.learnersCount", { count: status()!.learners.length })}</p>
+            </div>
           </div>
 
           <div class="card">
@@ -132,15 +151,30 @@ export default function Cluster() {
                 <For each={memberRows()}>
                   {(node) => (
                     <tr>
-                      <td><code>{node.node_id}</code></td>
+                      <td>
+                        <code>{node.node_id}</code>
+                      </td>
                       <td>{node.address}</td>
-                      <td><span class={`badge ${node.role === "leader" ? "badge-blue" : "badge-gray"}`}>{node.role}</span></td>
-                      <td><span class="badge badge-success">{node.status}</span></td>
+                      <td>
+                        <span
+                          class={`badge ${node.role === "leader" ? "badge-blue" : "badge-gray"}`}
+                        >
+                          {node.role}
+                        </span>
+                      </td>
+                      <td>
+                        <span class="badge badge-success">{node.status}</span>
+                      </td>
                       <td>{node.commit_index ?? "-"}</td>
-                      <td>{node.replication_lag_ms === null ? "-" : `${node.replication_lag_ms}ms`}</td>
+                      <td>
+                        {node.replication_lag_ms === null ? "-" : `${node.replication_lag_ms}ms`}
+                      </td>
                       <td>
                         <Show when={session()?.is_admin}>
-                          <button class="btn btn-compact btn-danger" onClick={() => setConfirmNode(node)}>
+                          <button
+                            class="btn btn-compact btn-danger"
+                            onClick={() => setConfirmNode(node)}
+                          >
                             {node.role === "leader" ? t("common.leave") : t("common.unlink")}
                           </button>
                         </Show>
@@ -160,15 +194,29 @@ export default function Cluster() {
             <h2>{t("cluster.joinTitle")}</h2>
             <div class="form-group">
               <label>{t("cluster.nodeId")}</label>
-              <input type="number" value={joinForm().node_id || ""} onInput={(e) => setJoinForm({ ...joinForm(), node_id: Number(e.currentTarget.value) || 0 })} />
+              <input
+                type="number"
+                value={joinForm().node_id || ""}
+                onInput={(e) =>
+                  setJoinForm({ ...joinForm(), node_id: Number(e.currentTarget.value) || 0 })
+                }
+              />
             </div>
             <div class="form-group">
               <label>{t("cluster.address")}</label>
-              <input value={joinForm().addr} placeholder="host:port" onInput={(e) => setJoinForm({ ...joinForm(), addr: e.currentTarget.value })} />
+              <input
+                value={joinForm().addr}
+                placeholder="host:port"
+                onInput={(e) => setJoinForm({ ...joinForm(), addr: e.currentTarget.value })}
+              />
             </div>
             <div class="modal-actions">
-              <button class="btn" disabled={busy()} onClick={() => setShowJoin(false)}>{t("common.cancel")}</button>
-              <button class="btn btn-primary" disabled={busy()} onClick={handleJoin}>{busy() ? t("cluster.joining") : t("cluster.join")}</button>
+              <button class="btn" disabled={busy()} onClick={() => setShowJoin(false)}>
+                {t("common.cancel")}
+              </button>
+              <button class="btn btn-primary" disabled={busy()} onClick={handleJoin}>
+                {busy() ? t("cluster.joining") : t("cluster.join")}
+              </button>
             </div>
           </div>
         </div>
@@ -178,14 +226,20 @@ export default function Cluster() {
         {(node) => (
           <div class="modal-overlay" onClick={() => setConfirmNode(null)}>
             <div class="modal" onClick={(e) => e.stopPropagation()}>
-              <h2>{node().role === "leader" ? t("cluster.leaveLeaderTitle") : t("cluster.removeNodeTitle", { id: node().node_id })}</h2>
+              <h2>
+                {node().role === "leader"
+                  ? t("cluster.leaveLeaderTitle")
+                  : t("cluster.removeNodeTitle", { id: node().node_id })}
+              </h2>
               <p class="warning">
                 {node().role === "leader"
                   ? t("cluster.leaveWarning")
                   : t("cluster.removeWarning", { id: node().node_id, address: node().address })}
               </p>
               <div class="modal-actions">
-                <button class="btn" disabled={busy()} onClick={() => setConfirmNode(null)}>{t("common.cancel")}</button>
+                <button class="btn" disabled={busy()} onClick={() => setConfirmNode(null)}>
+                  {t("common.cancel")}
+                </button>
                 <button class="btn btn-danger" disabled={busy()} onClick={handleRemove}>
                   {busy() ? t("common.apply") : t("common.confirm")}
                 </button>

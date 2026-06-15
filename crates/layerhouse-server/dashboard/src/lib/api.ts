@@ -6,6 +6,7 @@ import type {
   DashboardSession,
   DashboardClusterStatus,
   DeleteCounts,
+  GrantableScopeListResponse,
   HelmChart,
   HelmChartVersion,
   ManifestDetailResponse,
@@ -16,6 +17,7 @@ import type {
   PersonalAccessToken,
   ProxyCache,
   ProxyCacheCreate,
+  RepositoryFilter,
   RepositoryListResponse,
   SyncJob,
   SyncJobRun,
@@ -93,7 +95,7 @@ function parseLinkHeader(link: string | null): { next: string | null } {
 async function fetchAllPages<TResponse, TItem>(
   url: string,
   params: Record<string, string>,
-  extractItems: (data: TResponse) => TItem[]
+  extractItems: (data: TResponse) => TItem[],
 ): Promise<TItem[]> {
   const firstQs = params ? "?" + new URLSearchParams(params).toString() : "";
   let target: string | null = BASE + url + firstQs;
@@ -151,7 +153,7 @@ export function fetchAllRepos(): Promise<string[]> {
   return fetchAllPages<CatalogResponse, string>(
     "/v2/_catalog",
     { n: "100" },
-    (data) => data.repositories
+    (data) => data.repositories,
   );
 }
 
@@ -163,7 +165,7 @@ export function fetchAllTags(repo: string): Promise<string[]> {
   return fetchAllPages<TagListResponse, string>(
     `/v2/${repo}/tags/list`,
     { n: "100" },
-    (data) => data.tags
+    (data) => data.tags,
   );
 }
 
@@ -173,13 +175,15 @@ export function fetchManifest(repo: string, ref: string): Promise<ManifestRespon
 
 // ---- Repository Browser ----
 
-export function fetchRepositories(params: {
-  n?: number;
-  last?: string;
-  q?: string;
-  recency?: "all" | "recent" | "stale";
-  sort?: string;
-} = {}): Promise<RepositoryListResponse> {
+export function fetchRepositories(
+  params: {
+    q?: string;
+    filter?: RepositoryFilter;
+    sort?: string;
+    page_size?: number;
+    cursor?: string;
+  } = {},
+): Promise<RepositoryListResponse> {
   return fetchJson(`/api/v1/repositories${qs(params)}`);
 }
 
@@ -199,15 +203,12 @@ export function fetchRepositoryManifests(
     created_after?: string;
     created_before?: string;
     sort?: string;
-  } = {}
+  } = {},
 ): Promise<ManifestListResponse> {
   return fetchJson(`/api/v1/repositories/${repo}/manifests${qs(params)}`);
 }
 
-export function fetchManifestDetail(
-  repo: string,
-  digest: string
-): Promise<ManifestDetailResponse> {
+export function fetchManifestDetail(repo: string, digest: string): Promise<ManifestDetailResponse> {
   return fetchJson(`/api/v1/repositories/${repo}/manifests/${digest}`);
 }
 
@@ -225,10 +226,7 @@ export function deleteManifestDigest(repo: string, digest: string): Promise<Dele
   });
 }
 
-export function batchDeleteManifestDigests(
-  repo: string,
-  digests: string[]
-): Promise<DeleteCounts> {
+export function batchDeleteManifestDigests(repo: string, digests: string[]): Promise<DeleteCounts> {
   return fetchJson(`/api/v1/repositories/${repo}/manifests:batch-delete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -236,14 +234,10 @@ export function batchDeleteManifestDigests(
   });
 }
 
-export async function deleteManifestTag(
-  repo: string,
-  digest: string,
-  tag: string
-): Promise<void> {
+export async function deleteManifestTag(repo: string, digest: string, tag: string): Promise<void> {
   await fetchNoBody(
     `/api/v1/repositories/${repo}/manifests/${digest}/tags/${encodeURIComponent(tag)}`,
-    { method: "DELETE" }
+    { method: "DELETE" },
   );
 }
 
@@ -265,9 +259,17 @@ export function fetchPersonalAccessTokens(): Promise<PersonalAccessToken[]> {
   return fetchJson("/api/v1/tokens");
 }
 
-export function createPersonalAccessToken(
-  token: CreateTokenRequest
-): Promise<CreateTokenResponse> {
+export function fetchGrantableScopes(
+  params: {
+    q?: string;
+    n?: number;
+    cursor?: string;
+  } = {},
+): Promise<GrantableScopeListResponse> {
+  return fetchJson(`/api/v1/tokens/grantable-scopes${qs(params)}`);
+}
+
+export function createPersonalAccessToken(token: CreateTokenRequest): Promise<CreateTokenResponse> {
   return fetchJson("/api/v1/tokens", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -292,7 +294,7 @@ export function fetchMirrorRules(includeSecrets?: boolean): Promise<MirrorRule[]
 
 export function fetchMirrorRule(id: string, includeSecrets?: boolean): Promise<MirrorRule> {
   return fetchJson(
-    `/api/v1/admin/mirror/rules/${encodeURIComponent(id)}${qs({ include_secrets: includeSecrets })}`
+    `/api/v1/admin/mirror/rules/${encodeURIComponent(id)}${qs({ include_secrets: includeSecrets })}`,
   );
 }
 
@@ -321,9 +323,7 @@ export function fetchSyncJobs(): Promise<SyncJob[]> {
 }
 
 export function fetchSyncJobRuns(jobId: string, limit?: number): Promise<SyncJobRun[]> {
-  return fetchJson(
-    `/api/v1/admin/mirror/jobs/${encodeURIComponent(jobId)}/runs${qs({ limit })}`
-  );
+  return fetchJson(`/api/v1/admin/mirror/jobs/${encodeURIComponent(jobId)}/runs${qs({ limit })}`);
 }
 
 // Legacy endpoint kept for old pages.
@@ -353,7 +353,9 @@ export async function deleteProxyCache(id: string): Promise<void> {
   });
 }
 
-export function triggerProxyCacheWarm(id: string): Promise<{ id: string; status: string; message: string }> {
+export function triggerProxyCacheWarm(
+  id: string,
+): Promise<{ id: string; status: string; message: string }> {
   return fetchJson(`/api/v1/admin/proxy-cache/${encodeURIComponent(id)}/warm`, {
     method: "POST",
   });

@@ -19,7 +19,7 @@ coverage-nextest:
     cargo llvm-cov nextest --workspace --lcov --output-path coverage/lcov.info
 
 dashboard-build:
-    cd {{dashboard_dir}} && vp build
+    cd {{dashboard_dir}} && vp check && vp build
 
 check: fmt clippy test dashboard-build
 

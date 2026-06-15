@@ -80,13 +80,7 @@ export default function MirrorJobs() {
   }
 
   if (errorCount() >= 3) {
-    return (
-      <ErrorBanner
-        message={error() ?? "Unknown error"}
-        onRetry={load}
-        fullPage
-      />
-    );
+    return <ErrorBanner message={error() ?? "Unknown error"} onRetry={load} fullPage />;
   }
 
   return (
@@ -130,7 +124,15 @@ export default function MirrorJobs() {
                       <td>{statusBadge(job.status)}</td>
                       <td>{formatTime(job.last_run_at)}</td>
                       <td>{formatTime(job.next_run_at)}</td>
-                      <td style={{ color: "var(--color-error)", "max-width": "200px", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
+                      <td
+                        style={{
+                          color: "var(--color-error)",
+                          "max-width": "200px",
+                          overflow: "hidden",
+                          "text-overflow": "ellipsis",
+                          "white-space": "nowrap",
+                        }}
+                      >
                         {job.last_error ?? "-"}
                       </td>
                       <td>
@@ -141,10 +143,7 @@ export default function MirrorJobs() {
                         >
                           Trigger
                         </button>{" "}
-                        <button
-                          class="btn"
-                          onClick={() => toggleExpand(job.id)}
-                        >
+                        <button class="btn" onClick={() => toggleExpand(job.id)}>
                           {expanded().has(job.id) ? "Hide Runs" : "Runs"}
                         </button>
                       </td>
@@ -152,9 +151,7 @@ export default function MirrorJobs() {
                     <Show when={expanded().has(job.id)}>
                       <tr>
                         <td colspan="7" style="padding:0">
-                          <div
-                            style="padding:0.75rem;background:var(--color-bg)"
-                          >
+                          <div style="padding:0.75rem;background:var(--color-bg)">
                             <table>
                               <thead>
                                 <tr>
@@ -172,16 +169,12 @@ export default function MirrorJobs() {
                                   {(run) => (
                                     <tr>
                                       <td>
-                                        <code style="font-size:0.75rem">
-                                          {run.id.slice(0, 12)}
-                                        </code>
+                                        <code style="font-size:0.75rem">{run.id.slice(0, 12)}</code>
                                       </td>
                                       <td>{run.node_id}</td>
                                       <td>{formatTime(run.started_at)}</td>
                                       <td>{formatTime(run.finished_at)}</td>
-                                      <td>
-                                        {statusBadge(run.status)}
-                                      </td>
+                                      <td>{statusBadge(run.status)}</td>
                                       <td>{run.tags_synced.length}</td>
                                       <td>{run.tags_failed.length}</td>
                                     </tr>

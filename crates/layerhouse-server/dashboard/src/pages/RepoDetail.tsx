@@ -4,18 +4,26 @@ import {
   batchDeleteManifestDigests,
   deleteManifestDigest,
   deleteManifestTag,
+  fetchRepositories,
   fetchRepositoryManifests,
 } from "../lib/api";
-import type { ManifestSummary } from "../lib/types";
-import {
-  copyToClipboard,
-  digestShort,
-  formatAgo,
-  formatBytes,
-  manifestKind,
-} from "../lib/format";
+import type { ManifestSummary, RepositorySummary } from "../lib/types";
+import { copyToClipboard, digestShort, formatAgo, formatBytes, manifestKind } from "../lib/format";
 import { t } from "../lib/i18n";
 import LoadingSpinner from "../components/LoadingSpinner";
+
+const ACCESS_BADGE: Record<string, string> = {
+  pull: "badge-blue",
+  create: "badge-teal",
+  update: "badge-amber",
+  delete: "badge-purple",
+};
+
+const GRANT_BADGE: Record<string, string> = {
+  personal: "badge-blue",
+  group_grant: "badge-teal",
+  public: "badge-gray",
+};
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
 import Pagination from "../components/Pagination";
@@ -72,6 +80,17 @@ export default function RepoDetail() {
   const [copied, setCopied] = createSignal<string | null>(null);
 
   const repo = () => decodeURIComponent(params.name);
+  const [repoAccess, setRepoAccess] = createSignal<RepositorySummary | null>(null);
+
+  createEffect(() => {
+    const name = repo();
+    fetchRepositories({ q: name, page_size: 1 })
+      .then((res) => {
+        const match = res.repositories.find((r) => r.name === name);
+        setRepoAccess(match ?? null);
+      })
+      .catch(() => setRepoAccess(null));
+  });
 
   async function load() {
     try {
@@ -220,6 +239,31 @@ export default function RepoDetail() {
       {error() && <ErrorBanner message={error()!} onRetry={load} />}
       <Show when={toast()}>{(message) => <div class="toast">{message()}</div>}</Show>
 
+      <Show when={repoAccess()}>
+        {(access) => (
+          <div class="card repo-access-panel">
+            <div class="repo-access-summary">
+              <span class="eyebrow">{t("repo.access")}</span>
+              <div class="repo-access-badges">
+                <span class={`badge ${ACCESS_BADGE[access().access_level] ?? "badge-gray"}`}>
+                  {t(`access.action.${access().access_level}`)}
+                </span>
+                <Show when={access().max_grantable !== access().access_level}>
+                  <span class="badge badge-gray">
+                    {t("repo.canGrant", { action: t(`access.action.${access().max_grantable}`) })}
+                  </span>
+                </Show>
+                <span class={`badge ${GRANT_BADGE[access().grant_source] ?? "badge-gray"}`}>
+                  {t("repo.accessSource", {
+                    source: t(`access.grantSource.${access().grant_source}`),
+                  })}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
+
       <div class="card">
         <div class="toolbar">
           <input
@@ -255,7 +299,10 @@ export default function RepoDetail() {
             <option value="digest_asc">{t("repo.sort.digest")}</option>
             <option value="tag_count_desc">{t("repos.sort.tags")}</option>
           </select>
-          <button class={`btn ${selectMode() ? "btn-primary" : ""}`} onClick={() => setSelectMode(!selectMode())}>
+          <button
+            class={`btn ${selectMode() ? "btn-primary" : ""}`}
+            onClick={() => setSelectMode(!selectMode())}
+          >
             {t("repo.select")}
           </button>
         </div>
@@ -263,12 +310,23 @@ export default function RepoDetail() {
         <Show when={selectMode()}>
           <div class="batch-bar">
             <span>{t("repo.selected", { count: selected().size })}</span>
-            <button class="btn btn-compact" onClick={selectAllVisible}>{t("repo.selectAllVisible")}</button>
-            <button class="btn btn-compact" onClick={() => setSelected(new Set<string>())}>{t("common.clear")}</button>
-            <button class="btn btn-compact" onClick={() => copyValue([...selected()].join("\n"), "selected")}>
+            <button class="btn btn-compact" onClick={selectAllVisible}>
+              {t("repo.selectAllVisible")}
+            </button>
+            <button class="btn btn-compact" onClick={() => setSelected(new Set<string>())}>
+              {t("common.clear")}
+            </button>
+            <button
+              class="btn btn-compact"
+              onClick={() => copyValue([...selected()].join("\n"), "selected")}
+            >
               {copied() === "selected" ? t("common.copied") : t("repo.copyDigests")}
             </button>
-            <button class="btn btn-compact btn-danger" disabled={selected().size === 0} onClick={() => setBatchConfirm(true)}>
+            <button
+              class="btn btn-compact btn-danger"
+              disabled={selected().size === 0}
+              onClick={() => setBatchConfirm(true)}
+            >
               {t("repo.deleteDigests")}
             </button>
           </div>
@@ -283,7 +341,9 @@ export default function RepoDetail() {
             <table class="digest-table">
               <thead>
                 <tr>
-                  <Show when={selectMode()}><th /></Show>
+                  <Show when={selectMode()}>
+                    <th />
+                  </Show>
                   <th>{t("common.digest")}</th>
                   <th>{t("common.type")}</th>
                   <th>{t("common.tags")}</th>
@@ -325,14 +385,21 @@ export default function RepoDetail() {
                                   copyValue(manifest.digest, manifest.digest);
                                 }}
                               >
-                                {copied() === manifest.digest ? t("common.copied") : t("common.copy")}
+                                {copied() === manifest.digest
+                                  ? t("common.copied")
+                                  : t("common.copy")}
                               </button>
                             </div>
                           </td>
-                          <td><span class={`badge ${type.className}`}>{type.label}</span></td>
+                          <td>
+                            <span class={`badge ${type.className}`}>{type.label}</span>
+                          </td>
                           <td onClick={(e) => e.stopPropagation()}>
                             <div class="chips">
-                              <Show when={manifest.tags.length > 0} fallback={<span class="muted">—</span>}>
+                              <Show
+                                when={manifest.tags.length > 0}
+                                fallback={<span class="muted">—</span>}
+                              >
                                 <For each={manifest.tags}>
                                   {(tag) => {
                                     const key = `${manifest.digest}:${tag}`;
@@ -354,10 +421,22 @@ export default function RepoDetail() {
                           <td>{formatAgo(manifest.last_modified)}</td>
                           <td onClick={(e) => e.stopPropagation()}>
                             <div class="row-actions">
-                              <button class="btn btn-compact" onClick={() => setExpanded(expanded() === manifest.digest ? null : manifest.digest)}>
-                                {expanded() === manifest.digest ? t("common.hide") : t("common.details")}
+                              <button
+                                class="btn btn-compact"
+                                onClick={() =>
+                                  setExpanded(
+                                    expanded() === manifest.digest ? null : manifest.digest,
+                                  )
+                                }
+                              >
+                                {expanded() === manifest.digest
+                                  ? t("common.hide")
+                                  : t("common.details")}
                               </button>
-                              <button class="btn btn-compact btn-danger" onClick={() => setPendingDelete(manifest)}>
+                              <button
+                                class="btn btn-compact btn-danger"
+                                onClick={() => setPendingDelete(manifest)}
+                              >
                                 {t("repo.deleteDigest")}
                               </button>
                             </div>
@@ -371,16 +450,33 @@ export default function RepoDetail() {
                                   <div class="copy-line">
                                     <span>{t("repo.manifestDigest")}</span>
                                     <code>{manifest.digest}</code>
-                                    <button class="btn btn-compact" onClick={() => copyValue(manifest.digest, `full-${manifest.digest}`)}>
-                                      {copied() === `full-${manifest.digest}` ? t("common.copied") : t("common.copy")}
+                                    <button
+                                      class="btn btn-compact"
+                                      onClick={() =>
+                                        copyValue(manifest.digest, `full-${manifest.digest}`)
+                                      }
+                                    >
+                                      {copied() === `full-${manifest.digest}`
+                                        ? t("common.copied")
+                                        : t("common.copy")}
                                     </button>
                                   </div>
                                   <Show when={manifestKind(manifest).kind === "helm"}>
                                     <div class="copy-line">
                                       <span>{t("repo.helmInstall")}</span>
                                       <code>{expandedContent(repo(), manifest)}</code>
-                                      <button class="btn btn-compact" onClick={() => copyValue(expandedContent(repo(), manifest), `helm-${manifest.digest}`)}>
-                                        {copied() === `helm-${manifest.digest}` ? t("common.copied") : t("common.copy")}
+                                      <button
+                                        class="btn btn-compact"
+                                        onClick={() =>
+                                          copyValue(
+                                            expandedContent(repo(), manifest),
+                                            `helm-${manifest.digest}`,
+                                          )
+                                        }
+                                      >
+                                        {copied() === `helm-${manifest.digest}`
+                                          ? t("common.copied")
+                                          : t("common.copy")}
                                       </button>
                                     </div>
                                   </Show>
@@ -388,8 +484,15 @@ export default function RepoDetail() {
                                     <div class="copy-line">
                                       <span>{t("repo.subjectDigest")}</span>
                                       <code>{manifest.subject}</code>
-                                      <button class="btn btn-compact" onClick={() => copyValue(manifest.subject!, `subject-${manifest.digest}`)}>
-                                        {copied() === `subject-${manifest.digest}` ? t("common.copied") : t("common.copy")}
+                                      <button
+                                        class="btn btn-compact"
+                                        onClick={() =>
+                                          copyValue(manifest.subject!, `subject-${manifest.digest}`)
+                                        }
+                                      >
+                                        {copied() === `subject-${manifest.digest}`
+                                          ? t("common.copied")
+                                          : t("common.copy")}
                                       </button>
                                     </div>
                                   </Show>
@@ -398,7 +501,12 @@ export default function RepoDetail() {
                                       <div class="copy-line">
                                         <span>{t("repo.configDigest")}</span>
                                         <code>{digest()}</code>
-                                        <button class="btn btn-compact" onClick={() => copyValue(digest(), `config-${manifest.digest}`)}>
+                                        <button
+                                          class="btn btn-compact"
+                                          onClick={() =>
+                                            copyValue(digest(), `config-${manifest.digest}`)
+                                          }
+                                        >
                                           {t("common.copy")}
                                         </button>
                                       </div>
@@ -429,9 +537,13 @@ export default function RepoDetail() {
               <p class="warning">
                 {t("repo.deleteDigestWarning", { tags: manifest().tags.length })}
               </p>
-              <p><code>{manifest().digest}</code></p>
+              <p>
+                <code>{manifest().digest}</code>
+              </p>
               <div class="modal-actions">
-                <button class="btn" disabled={busy()} onClick={() => setPendingDelete(null)}>{t("common.cancel")}</button>
+                <button class="btn" disabled={busy()} onClick={() => setPendingDelete(null)}>
+                  {t("common.cancel")}
+                </button>
                 <button class="btn btn-danger" disabled={busy()} onClick={confirmDeleteDigest}>
                   {busy() ? t("common.deleting") : t("common.confirmDelete")}
                 </button>
@@ -442,7 +554,13 @@ export default function RepoDetail() {
       </Show>
 
       <Show when={batchConfirm()}>
-        <div class="modal-overlay" onClick={() => { setBatchConfirm(false); setBatchDeleteText(""); }}>
+        <div
+          class="modal-overlay"
+          onClick={() => {
+            setBatchConfirm(false);
+            setBatchDeleteText("");
+          }}
+        >
           <div class="modal" onClick={(e) => e.stopPropagation()}>
             <h2>{t("repo.deleteBatchTitle", { count: selected().size })}</h2>
             <p class="warning">
@@ -458,8 +576,24 @@ export default function RepoDetail() {
               </div>
             </Show>
             <div class="modal-actions">
-              <button class="btn" disabled={busy()} onClick={() => { setBatchConfirm(false); setBatchDeleteText(""); }}>{t("common.cancel")}</button>
-              <button class="btn btn-danger" disabled={busy() || (requiresTypedBatchConfirm() && batchDeleteText().toLowerCase() !== "delete")} onClick={confirmBatchDelete}>
+              <button
+                class="btn"
+                disabled={busy()}
+                onClick={() => {
+                  setBatchConfirm(false);
+                  setBatchDeleteText("");
+                }}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                class="btn btn-danger"
+                disabled={
+                  busy() ||
+                  (requiresTypedBatchConfirm() && batchDeleteText().toLowerCase() !== "delete")
+                }
+                onClick={confirmBatchDelete}
+              >
                 {busy() ? t("common.deleting") : t("common.confirmDelete")}
               </button>
             </div>

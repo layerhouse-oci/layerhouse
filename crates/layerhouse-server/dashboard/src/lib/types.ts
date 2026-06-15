@@ -60,6 +60,11 @@ export interface ManifestResponse {
 
 // ---- Repository Browser ----
 
+export type OciAction = "pull" | "create" | "update" | "delete";
+export type GrantSource = "personal" | "group_grant" | "public";
+export type RepoKind = "image" | "helm" | "wasm" | "artifact" | "unknown";
+export type RepositoryFilter = "all" | "mine" | "shared" | "public";
+
 export interface RepositorySummary {
   name: string;
   tag_count: number;
@@ -67,12 +72,18 @@ export interface RepositorySummary {
   stored_size_bytes: number;
   manifest_size_bytes: number;
   last_modified: number;
+  description: string;
+  created_by: string | null;
+  visibility: string;
+  access_level: OciAction;
+  max_grantable: OciAction;
+  grant_source: GrantSource;
 }
 
 export interface RepositoryListResponse {
   repositories: RepositorySummary[];
-  total: number;
-  has_more: boolean;
+  total_reachable: number;
+  next_cursor: string | null;
 }
 
 export interface ManifestSummary {
@@ -97,7 +108,10 @@ export interface ManifestListResponse {
   has_more: boolean;
 }
 
-export interface ManifestDetailResponse extends ManifestSummary {}
+export interface ManifestDetailResponse extends ManifestSummary {
+  access_source?: GrantSource | null;
+  max_grantable_action?: OciAction | null;
+}
 
 export interface DeleteCounts {
   deleted_manifests: number;
@@ -128,9 +142,14 @@ export interface PersonalAccessToken {
   expires_at: number | null;
 }
 
+export interface PatScopeSelection {
+  repository: string;
+  actions: OciAction[];
+}
+
 export interface CreateTokenRequest {
   name: string;
-  scopes: string[];
+  scopes: PatScopeSelection[];
   expires_in_days?: number | null;
 }
 
@@ -143,6 +162,27 @@ export interface CreateTokenResponse {
   expires_at: number | null;
 }
 
+export interface GrantableScope {
+  repository: string;
+  max_grantable: OciAction;
+  kind: RepoKind[];
+  grant_source: GrantSource;
+}
+
+export interface NamespacePatternScope {
+  pattern: string;
+  current_match_count: number;
+  max_grantable: OciAction;
+  grant_source: GrantSource;
+}
+
+export interface GrantableScopeListResponse {
+  scopes: GrantableScope[];
+  namespace_patterns: NamespacePatternScope[];
+  total_matches: number;
+  next_cursor: string | null;
+}
+
 // ---- Mirror Rules ----
 
 export type MirrorDirection = "pull" | "push";
@@ -152,12 +192,7 @@ export type MirrorStrategy =
   | { type: "latest"; count: number }
   | { type: "pattern"; pattern: string };
 
-export type OutboundProxyProtocol =
-  | "none"
-  | "http"
-  | "https"
-  | "socks4"
-  | "socks5";
+export type OutboundProxyProtocol = "none" | "http" | "https" | "socks4" | "socks5";
 
 export interface OutboundProxy {
   protocol: OutboundProxyProtocol;

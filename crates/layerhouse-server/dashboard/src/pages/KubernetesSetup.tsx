@@ -124,7 +124,10 @@ kubectl run layerhouse-pull-test --image=${ep}/qa/alpine:v1 --restart=Never`,
             </div>
             <div class="form-group">
               <label>{t("setup.serverTlsSecret")}</label>
-              <input value={serverSecret()} onInput={(e) => setServerSecret(e.currentTarget.value)} />
+              <input
+                value={serverSecret()}
+                onInput={(e) => setServerSecret(e.currentTarget.value)}
+              />
             </div>
             <div class="form-group">
               <label>{t("setup.raftTlsSecret")}</label>
@@ -157,7 +160,10 @@ kubectl run layerhouse-pull-test --image=${ep}/qa/alpine:v1 --restart=Never`,
                   <h2>{snippet.title}</h2>
                   <p>{snippet.note}</p>
                 </div>
-                <button class="btn btn-compact" onClick={() => copy(`snippet-${index()}`, snippet.body)}>
+                <button
+                  class="btn btn-compact"
+                  onClick={() => copy(`snippet-${index()}`, snippet.body)}
+                >
                   {copied() === `snippet-${index()}` ? t("common.copied") : t("common.copy")}
                 </button>
               </div>

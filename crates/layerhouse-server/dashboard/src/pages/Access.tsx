@@ -6,6 +6,7 @@ import {
   ApiError,
   createPersonalAccessToken,
   deletePersonalAccessToken,
+  fetchGrantableScopes,
   fetchPersonalAccessTokens,
   fetchSession,
 } from "../lib/api";
@@ -14,44 +15,108 @@ import { t } from "../lib/i18n";
 import type {
   CreateTokenResponse,
   DashboardSession,
+  GrantSource,
+  GrantableScope,
+  NamespacePatternScope,
+  OciAction,
   PersonalAccessToken,
 } from "../lib/types";
 
 type AccessTab = "tokens" | "session" | "permissions";
-type TokenAction = "pull" | "push" | "delete";
+type ScopeKind = "repository" | "namespace_pattern";
 
 interface TokenForm {
   name: string;
-  repositoryPattern: string;
   expiresInDays: string;
-  actions: Record<TokenAction, boolean>;
+}
+
+interface SelectedScope {
+  repository: string;
+  displayName: string;
+  kind: ScopeKind;
+  maxGrantable: OciAction;
+  grantSource: GrantSource;
+  currentMatchCount?: number;
+  actions: OciAction[];
 }
 
 const EMPTY_FORM: TokenForm = {
   name: "",
-  repositoryPattern: "",
   expiresInDays: "30",
-  actions: {
-    pull: true,
-    push: true,
-    delete: false,
-  },
+};
+
+const ACTIONS: OciAction[] = ["pull", "create", "update", "delete"];
+const ACTION_RANK: Record<OciAction, number> = {
+  pull: 0,
+  create: 1,
+  update: 2,
+  delete: 3,
 };
 
 function userLabel(session: DashboardSession | null): string {
-  return session?.display_name || session?.username || session?.email || session?.subject || t("access.account");
+  return (
+    session?.display_name ||
+    session?.username ||
+    session?.email ||
+    session?.subject ||
+    t("access.account")
+  );
 }
 
 function dockerLoginUser(session: DashboardSession | null): string {
   return session?.username || session?.email || session?.subject || userLabel(session);
 }
 
-function scopesFor(form: TokenForm): string[] {
-  const repo = form.repositoryPattern.trim();
-  if (!repo) return [];
-  return (Object.entries(form.actions) as [TokenAction, boolean][])
-    .filter(([, enabled]) => enabled)
-    .map(([action]) => `repository:${repo}:${action}`);
+function actionAllowed(action: OciAction, maxGrantable: OciAction): boolean {
+  return ACTION_RANK[action] <= ACTION_RANK[maxGrantable];
+}
+
+function defaultActions(maxGrantable: OciAction): OciAction[] {
+  return ACTIONS.filter((action) => actionAllowed(action, maxGrantable) && action !== "delete");
+}
+
+function normalizeScopeRepository(value: string): string {
+  return value.replace(/^repository:/, "").trim();
+}
+
+function scopeKey(kind: ScopeKind, repository: string): string {
+  return `${kind}:${normalizeScopeRepository(repository)}`;
+}
+
+function grantSourceLabel(source: GrantSource): string {
+  return t(`access.grantSource.${source}`);
+}
+
+function actionLabel(action: OciAction): string {
+  return t(`access.action.${action}`);
+}
+
+function formatScopeActions(actions: OciAction[]): string {
+  return actions.map(actionLabel).join(", ");
+}
+
+function scopeFromRepository(scope: GrantableScope): SelectedScope {
+  return {
+    repository: scope.repository,
+    displayName: scope.repository,
+    kind: "repository",
+    maxGrantable: scope.max_grantable,
+    grantSource: scope.grant_source,
+    actions: defaultActions(scope.max_grantable),
+  };
+}
+
+function scopeFromPattern(scope: NamespacePatternScope): SelectedScope {
+  const repository = normalizeScopeRepository(scope.pattern);
+  return {
+    repository,
+    displayName: repository,
+    kind: "namespace_pattern",
+    maxGrantable: scope.max_grantable,
+    grantSource: scope.grant_source,
+    currentMatchCount: scope.current_match_count,
+    actions: defaultActions(scope.max_grantable),
+  };
 }
 
 function expiresSoon(token: PersonalAccessToken): boolean {
@@ -72,7 +137,8 @@ function envVarCommand(token: string): string {
   return `REGISTRY_TOKEN=${token}`;
 }
 
-export default function Access() {
+export default function Access(props: { onClose?: () => void }) {
+  const isModal = () => props.onClose !== undefined;
   const [tab, setTab] = createSignal<AccessTab>("tokens");
   const [session, setSession] = createSignal<DashboardSession | null>(null);
   const [tokens, setTokens] = createSignal<PersonalAccessToken[]>([]);
@@ -80,12 +146,18 @@ export default function Access() {
   const [error, setError] = createSignal<string | null>(null);
   const [showCreate, setShowCreate] = createSignal(false);
   const [form, setForm] = createSignal<TokenForm>({ ...EMPTY_FORM });
+  const [scopeQuery, setScopeQuery] = createSignal("");
+  const [scopeResults, setScopeResults] = createSignal<GrantableScope[]>([]);
+  const [namespaceResults, setNamespaceResults] = createSignal<NamespacePatternScope[]>([]);
+  const [selectedScopes, setSelectedScopes] = createSignal<SelectedScope[]>([]);
+  const [scopeSearchLoading, setScopeSearchLoading] = createSignal(false);
+  const [scopeSearchError, setScopeSearchError] = createSignal<string | null>(null);
   const [formError, setFormError] = createSignal<string | null>(null);
   const [saving, setSaving] = createSignal(false);
   const [createdToken, setCreatedToken] = createSignal<CreateTokenResponse | null>(null);
   const [revokeTarget, setRevokeTarget] = createSignal<PersonalAccessToken | null>(null);
   const [revoking, setRevoking] = createSignal(false);
-  const [revokeError, setRevokeError] = createSignal<string | null>(null);
+  const [_revokeError, setRevokeError] = createSignal<string | null>(null);
   const [copied, setCopied] = createSignal<string | null>(null);
 
   async function load() {
@@ -117,7 +189,13 @@ export default function Access() {
   });
 
   function resetCreate() {
-    setForm({ ...EMPTY_FORM, actions: { ...EMPTY_FORM.actions } });
+    setForm({ ...EMPTY_FORM });
+    setScopeQuery("");
+    setScopeResults([]);
+    setNamespaceResults([]);
+    setSelectedScopes([]);
+    setScopeSearchError(null);
+    setScopeSearchLoading(false);
     setFormError(null);
     setCreatedToken(null);
     setCopied(null);
@@ -126,6 +204,7 @@ export default function Access() {
   function openCreate() {
     resetCreate();
     setShowCreate(true);
+    void loadGrantableScopes("");
   }
 
   function closeCreate() {
@@ -134,25 +213,65 @@ export default function Access() {
     load();
   }
 
-  function updateAction(action: TokenAction, enabled: boolean) {
-    setForm({
-      ...form(),
-      actions: {
-        ...form().actions,
-        [action]: enabled,
-        // Push implies pull: a push-only token can't satisfy the
-        // pull,push challenge the registry emits for blob uploads.
-        ...(action === "push" && enabled ? { pull: true } : {}),
-        // Unchecking pull also unchecks push (push requires pull).
-        ...(action === "pull" && !enabled ? { push: false } : {}),
-      },
-    });
+  async function loadGrantableScopes(query = scopeQuery()) {
+    setScopeSearchLoading(true);
+    setScopeSearchError(null);
+    try {
+      const response = await fetchGrantableScopes({ q: query.trim(), n: 12 });
+      setScopeResults(response.scopes);
+      setNamespaceResults(response.namespace_patterns);
+    } catch (e) {
+      setScopeSearchError(e instanceof Error ? e.message : t("access.scopeSearchError"));
+    } finally {
+      setScopeSearchLoading(false);
+    }
+  }
+
+  function addScope(scope: SelectedScope) {
+    const key = scopeKey(scope.kind, scope.repository);
+    if (selectedScopes().some((selected) => scopeKey(selected.kind, selected.repository) === key)) {
+      return;
+    }
+    setSelectedScopes([...selectedScopes(), scope]);
+    setFormError(null);
+  }
+
+  function removeScope(scope: SelectedScope) {
+    const key = scopeKey(scope.kind, scope.repository);
+    setSelectedScopes(
+      selectedScopes().filter((selected) => scopeKey(selected.kind, selected.repository) !== key),
+    );
+  }
+
+  function isScopeSelected(kind: ScopeKind, repository: string): boolean {
+    const key = scopeKey(kind, repository);
+    return selectedScopes().some(
+      (selected) => scopeKey(selected.kind, selected.repository) === key,
+    );
+  }
+
+  function updateScopeAction(scope: SelectedScope, action: OciAction, enabled: boolean) {
+    const key = scopeKey(scope.kind, scope.repository);
+    setSelectedScopes(
+      selectedScopes().map((selected) => {
+        if (scopeKey(selected.kind, selected.repository) !== key) return selected;
+        const actions = enabled
+          ? [...new Set([...selected.actions, action])]
+          : selected.actions.filter((current) => current !== action);
+        return {
+          ...selected,
+          actions: actions.sort((a, b) => ACTION_RANK[a] - ACTION_RANK[b]),
+        };
+      }),
+    );
   }
 
   function validateForm(): string | null {
     if (!form().name.trim()) return t("access.nameRequired");
-    if (!form().repositoryPattern.trim()) return t("access.patternRequired");
-    if (scopesFor(form()).length === 0) return t("access.actionRequired");
+    if (selectedScopes().length === 0) return t("access.scopeRequired");
+    if (selectedScopes().some((scope) => scope.actions.length === 0)) {
+      return t("access.actionRequired");
+    }
     return null;
   }
 
@@ -166,11 +285,13 @@ export default function Access() {
     setSaving(true);
     setFormError(null);
     try {
-      const expiresInDays =
-        form().expiresInDays === "never" ? null : Number(form().expiresInDays);
+      const expiresInDays = form().expiresInDays === "never" ? null : Number(form().expiresInDays);
       const created = await createPersonalAccessToken({
         name: form().name.trim(),
-        scopes: scopesFor(form()),
+        scopes: selectedScopes().map((scope) => ({
+          repository: normalizeScopeRepository(scope.repository),
+          actions: scope.actions,
+        })),
         expires_in_days: Number.isFinite(expiresInDays) ? expiresInDays : null,
       });
       setCreatedToken(created);
@@ -209,7 +330,10 @@ export default function Access() {
         await load();
       } else {
         // Recoverable failure (network error, server error): restore token.
-        console.warn("[layerhouse] revoke failed", { id: target.id, message: (e as Error).message });
+        console.warn("[layerhouse] revoke failed", {
+          id: target.id,
+          message: (e as Error).message,
+        });
         setTokens(previous);
         setError(e instanceof Error ? e.message : t("access.revokeError"));
       }
@@ -230,22 +354,38 @@ export default function Access() {
 
   const activeTokens = () => tokens().length;
   const expiringSoonCount = () => tokens().filter(expiresSoon).length;
-  const currentScopes = () => scopesFor(form());
 
-  return (
+  const content = (
     <div>
-      <div class="page-header">
-        <div>
-          <p class="eyebrow">{t("access.eyebrow")}</p>
-          <h1>{t("access.title")}</h1>
-          <p class="page-copy">{t("access.copy")}</p>
+      <Show when={!isModal()}>
+        <div class="page-header">
+          <div>
+            <p class="eyebrow">{t("access.eyebrow")}</p>
+            <h1>{t("access.title")}</h1>
+            <p class="page-copy">{t("access.copy")}</p>
+          </div>
+          <Show when={session()?.auth_enabled && session()?.subject}>
+            <button class="btn btn-primary" onClick={openCreate}>
+              {t("access.createToken")}
+            </button>
+          </Show>
         </div>
-        <Show when={session()?.auth_enabled && session()?.subject}>
-          <button class="btn btn-primary" onClick={openCreate}>
-            {t("access.createToken")}
-          </button>
-        </Show>
-      </div>
+      </Show>
+      <Show when={isModal()}>
+        <div class="access-modal-header">
+          <h2>{t("access.title")}</h2>
+          <div class="access-modal-header-actions">
+            <Show when={session()?.auth_enabled && session()?.subject}>
+              <button class="btn btn-primary" onClick={openCreate}>
+                {t("access.createToken")}
+              </button>
+            </Show>
+            <button class="btn btn-compact" onClick={() => props.onClose?.()}>
+              {t("common.close")}
+            </button>
+          </div>
+        </div>
+      </Show>
 
       {error() && <ErrorBanner message={error()!} onRetry={load} />}
 
@@ -321,10 +461,7 @@ export default function Access() {
             <Show when={tab() === "tokens"}>
               <div class="card">
                 {tokens().length === 0 ? (
-                  <EmptyState
-                    title={t("access.noTokens")}
-                    description={t("access.noTokensDesc")}
-                  />
+                  <EmptyState title={t("access.noTokens")} description={t("access.noTokensDesc")} />
                 ) : (
                   <table>
                     <thead>
@@ -343,7 +480,9 @@ export default function Access() {
                         {(token) => (
                           <tr>
                             <td class="repo-name">{token.name}</td>
-                            <td><code>{token.prefix}</code></td>
+                            <td>
+                              <code>{token.prefix}</code>
+                            </td>
                             <td>
                               <div class="chips">
                                 <For each={token.scopes}>
@@ -402,7 +541,10 @@ export default function Access() {
               <div class="card">
                 <h2 class="card-header">{t("access.scopes")}</h2>
                 <div class="chips">
-                  <For each={session()?.scopes ?? []} fallback={<span class="muted">{t("common.none")}</span>}>
+                  <For
+                    each={session()?.scopes ?? []}
+                    fallback={<span class="muted">{t("common.none")}</span>}
+                  >
                     {(scope) => <span class="chip">{scope}</span>}
                   </For>
                 </div>
@@ -445,55 +587,174 @@ export default function Access() {
                       </select>
                     </div>
                     <div class="form-group full">
-                      <label>{t("access.repositoryPattern")}</label>
-                      <input
-                        value={form().repositoryPattern}
-                        placeholder="team/*"
-                        onInput={(event) =>
-                          setForm({ ...form(), repositoryPattern: event.currentTarget.value })
-                        }
-                      />
-                      <p class="hint">{t("access.repositoryPatternHint")}</p>
+                      <label>{t("access.scopeSearch")}</label>
+                      <div class="access-scope-search">
+                        <input
+                          value={scopeQuery()}
+                          placeholder={t("access.scopeSearchPlaceholder")}
+                          onInput={(event) => setScopeQuery(event.currentTarget.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              void loadGrantableScopes();
+                            }
+                          }}
+                        />
+                        <button
+                          class="btn"
+                          disabled={scopeSearchLoading()}
+                          onClick={() => void loadGrantableScopes()}
+                        >
+                          {scopeSearchLoading() ? t("common.loading") : t("access.searchScopes")}
+                        </button>
+                      </div>
+                      <p class="hint">{t("access.scopeSearchHint")}</p>
+                      {scopeSearchError() && <p class="warning">{scopeSearchError()}</p>}
+                    </div>
+                  </div>
+
+                  <div class="access-scope-picker">
+                    <div>
+                      <h3>{t("access.availableRepositories")}</h3>
+                      <div class="access-scope-results">
+                        <For
+                          each={scopeResults()}
+                          fallback={<p class="hint">{t("access.noRepositoryScopes")}</p>}
+                        >
+                          {(scope) => (
+                            <div class="access-scope-option">
+                              <div>
+                                <strong>{scope.repository}</strong>
+                                <span>
+                                  {t("access.maxGrantable", {
+                                    action: actionLabel(scope.max_grantable),
+                                  })}{" "}
+                                  · {grantSourceLabel(scope.grant_source)}
+                                </span>
+                              </div>
+                              <button
+                                class="btn btn-compact"
+                                disabled={isScopeSelected("repository", scope.repository)}
+                                onClick={() => addScope(scopeFromRepository(scope))}
+                              >
+                                {isScopeSelected("repository", scope.repository)
+                                  ? t("access.addedScope")
+                                  : t("access.addScope")}
+                              </button>
+                            </div>
+                          )}
+                        </For>
+                      </div>
+                    </div>
+
+                    <div>
+                      <h3>{t("access.availablePatterns")}</h3>
+                      <p class="warning access-pattern-warning">
+                        {t("access.namespacePatternWarning")}
+                      </p>
+                      <div class="access-scope-results">
+                        <For
+                          each={namespaceResults()}
+                          fallback={<p class="hint">{t("access.noNamespaceScopes")}</p>}
+                        >
+                          {(scope) => {
+                            const repository = normalizeScopeRepository(scope.pattern);
+                            return (
+                              <div class="access-scope-option access-scope-option-pattern">
+                                <div>
+                                  <strong>{repository}</strong>
+                                  <span>
+                                    {t("access.currentMatchCount", {
+                                      count: scope.current_match_count,
+                                    })}{" "}
+                                    ·{" "}
+                                    {t("access.maxGrantable", {
+                                      action: actionLabel(scope.max_grantable),
+                                    })}{" "}
+                                    · {grantSourceLabel(scope.grant_source)}
+                                  </span>
+                                </div>
+                                <button
+                                  class="btn btn-compact"
+                                  disabled={isScopeSelected("namespace_pattern", repository)}
+                                  onClick={() => addScope(scopeFromPattern(scope))}
+                                >
+                                  {isScopeSelected("namespace_pattern", repository)
+                                    ? t("access.addedScope")
+                                    : t("access.addPatternScope")}
+                                </button>
+                              </div>
+                            );
+                          }}
+                        </For>
+                      </div>
                     </div>
                   </div>
 
                   <div class="advanced">
-                    <h3>{t("access.allowedActions")}</h3>
-                    <div class="access-scope-grid">
-                      <label class="checkbox-row">
-                        <input
-                          type="checkbox"
-                          checked={form().actions.pull}
-                          onChange={(event) => updateAction("pull", event.currentTarget.checked)}
-                        />
-                        <span>{t("access.pull")}</span>
-                      </label>
-                      <label class="checkbox-row">
-                        <input
-                          type="checkbox"
-                          checked={form().actions.push}
-                          onChange={(event) => updateAction("push", event.currentTarget.checked)}
-                        />
-                        <span>{t("access.push")}</span>
-                      </label>
-                      <label class="checkbox-row">
-                        <input
-                          type="checkbox"
-                          checked={form().actions.delete}
-                          onChange={(event) => updateAction("delete", event.currentTarget.checked)}
-                        />
-                        <span>{t("access.delete")}</span>
-                      </label>
-                    </div>
-                    <div class="chips access-scope-preview">
-                      <For each={currentScopes()}>
-                        {(scope) => <span class="chip">{scope}</span>}
-                      </For>
-                    </div>
+                    <h3>{t("access.selectedScopes")}</h3>
+                    <Show
+                      when={selectedScopes().length > 0}
+                      fallback={<p class="hint">{t("access.selectedScopesEmpty")}</p>}
+                    >
+                      <div class="access-selected-scopes">
+                        <For each={selectedScopes()}>
+                          {(scope) => (
+                            <div class="access-selected-scope">
+                              <div class="access-selected-scope-header">
+                                <div>
+                                  <strong>{scope.displayName}</strong>
+                                  <span>
+                                    {scope.kind === "namespace_pattern"
+                                      ? t("access.namespacePattern")
+                                      : t("common.repository")}{" "}
+                                    ·{" "}
+                                    {t("access.maxGrantable", {
+                                      action: actionLabel(scope.maxGrantable),
+                                    })}{" "}
+                                    · {grantSourceLabel(scope.grantSource)}
+                                  </span>
+                                </div>
+                                <button class="btn btn-compact" onClick={() => removeScope(scope)}>
+                                  {t("common.unlink")}
+                                </button>
+                              </div>
+                              <div class="access-scope-grid">
+                                <For each={ACTIONS}>
+                                  {(action) => (
+                                    <label class="checkbox-row">
+                                      <input
+                                        type="checkbox"
+                                        checked={scope.actions.includes(action)}
+                                        disabled={!actionAllowed(action, scope.maxGrantable)}
+                                        onChange={(event) =>
+                                          updateScopeAction(
+                                            scope,
+                                            action,
+                                            event.currentTarget.checked,
+                                          )
+                                        }
+                                      />
+                                      <span>{actionLabel(action)}</span>
+                                    </label>
+                                  )}
+                                </For>
+                              </div>
+                              <p class="hint">
+                                {t("access.selectedActions", {
+                                  actions: formatScopeActions(scope.actions) || t("common.none"),
+                                })}
+                              </p>
+                            </div>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
                   </div>
 
                   <div class="modal-actions">
-                    <button class="btn" onClick={closeCreate}>{t("common.cancel")}</button>
+                    <button class="btn" onClick={closeCreate}>
+                      {t("common.cancel")}
+                    </button>
                     <button class="btn btn-primary" disabled={saving()} onClick={createToken}>
                       {saving() ? t("common.creating") : t("access.createToken")}
                     </button>
@@ -545,8 +806,12 @@ export default function Access() {
                   </div>
 
                   <div class="modal-actions">
-                    <button class="btn" onClick={openCreate}>{t("access.createAnother")}</button>
-                    <button class="btn btn-primary" onClick={closeCreate}>{t("common.done")}</button>
+                    <button class="btn" onClick={openCreate}>
+                      {t("access.createAnother")}
+                    </button>
+                    <button class="btn btn-primary" onClick={closeCreate}>
+                      {t("common.done")}
+                    </button>
                   </div>
                 </>
               )}
@@ -560,9 +825,7 @@ export default function Access() {
           <div class="modal-overlay" onClick={() => setRevokeTarget(null)}>
             <div class="modal" onClick={(event) => event.stopPropagation()}>
               <h2>{t("access.revokeTitle", { name: target().name })}</h2>
-              <p class="warning">
-                {t("access.revokeWarning", { prefix: target().prefix })}
-              </p>
+              <p class="warning">{t("access.revokeWarning", { prefix: target().prefix })}</p>
               <div class="modal-actions">
                 <button class="btn" onClick={() => setRevokeTarget(null)}>
                   {t("common.cancel")}
@@ -576,5 +839,15 @@ export default function Access() {
         )}
       </Show>
     </div>
+  );
+
+  return (
+    <Show when={isModal()} fallback={content}>
+      <div class="modal-overlay" onClick={() => props.onClose?.()}>
+        <div class="modal modal-wide access-modal" onClick={(e) => e.stopPropagation()}>
+          {content}
+        </div>
+      </div>
+    </Show>
   );
 }
