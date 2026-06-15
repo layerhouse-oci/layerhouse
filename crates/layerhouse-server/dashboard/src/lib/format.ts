@@ -91,7 +91,11 @@ export function manifestKind(manifest: Pick<ManifestSummary, "media_type" | "art
   if (artifact.includes("artifact.manifest") || media.includes("artifact.manifest")) {
     return { label: `📦 ${t("repo.type.artifact")}`, className: "badge-purple", kind: "artifact" };
   }
-  return { label: artifact || media || t("repo.type.unknown"), className: "badge-gray", kind: "unknown" };
+  return {
+    label: artifact || media || t("repo.type.unknown"),
+    className: "badge-gray",
+    kind: "unknown",
+  };
 }
 
 export async function copyToClipboard(text: string): Promise<boolean> {

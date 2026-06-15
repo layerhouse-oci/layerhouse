@@ -57,8 +57,7 @@ export default function Overview() {
     return t("overview.offline");
   };
 
-  const totalNodes = () =>
-    (status()?.voters.length ?? 0) + (status()?.learners.length ?? 0);
+  const totalNodes = () => (status()?.voters.length ?? 0) + (status()?.learners.length ?? 0);
 
   const hasQuorum = () => {
     const v = status()?.voters.length ?? 0;
@@ -68,13 +67,7 @@ export default function Overview() {
   };
 
   if (errorCount() >= 3) {
-    return (
-      <ErrorBanner
-        message={error() ?? t("common.unknown")}
-        onRetry={poll}
-        fullPage
-      />
-    );
+    return <ErrorBanner message={error() ?? t("common.unknown")} onRetry={poll} fullPage />;
   }
 
   return (
@@ -87,177 +80,163 @@ export default function Overview() {
         <>
           {/* Hero section */}
           <section class="hero glass">
-                <div>
-                  <p class="eyebrow">
-                    <span
-                      class={`status-dot${healthy() !== "green" ? ` ${healthy()}` : ""}`}
-                    />
-                    {t("overview.eyebrow")}
-                  </p>
-                  <h1>{t("overview.title")}</h1>
-                  <p class="hero-copy">{t("overview.copy")}</p>
+            <div>
+              <p class="eyebrow">
+                <span class={`status-dot${healthy() !== "green" ? ` ${healthy()}` : ""}`} />
+                {t("overview.eyebrow")}
+              </p>
+              <h1>{t("overview.title")}</h1>
+              <p class="hero-copy">{t("overview.copy")}</p>
+            </div>
+            <aside class="health-panel">
+              <div class="health-title">
+                <span class={`pulse${healthy() !== "green" ? ` ${healthy()}` : ""}`} />
+                <span>{healthText()}</span>
+              </div>
+              <div class="health-list">
+                <div class="health-row">
+                  <span>{t("overview.consensus")}</span>
+                  <strong>{stateLabel()}</strong>
                 </div>
-                <aside class="health-panel">
-                  <div class="health-title">
-                    <span
-                      class={`pulse${healthy() !== "green" ? ` ${healthy()}` : ""}`}
-                    />
-                    <span>{healthText()}</span>
-                  </div>
-                  <div class="health-list">
-                    <div class="health-row">
-                      <span>{t("overview.consensus")}</span>
-                      <strong>{stateLabel()}</strong>
-                    </div>
-                    <div class="health-row">
-                      <span>{t("overview.leader")}</span>
-                      <strong>
-                        {status()?.leader_id != null
-                          ? `node-${status()!.leader_id}`
-                          : t("common.none")}
-                      </strong>
-                    </div>
-                    <div class="health-row">
-                      <span>{t("overview.voters")}</span>
-                      <strong>{status()?.voters.length ?? 0}</strong>
-                    </div>
-                    <div class="health-row">
-                      <span>{t("overview.learners")}</span>
-                      <strong>{status()?.learners.length ?? 0}</strong>
-                    </div>
-                  </div>
-                </aside>
-              </section>
+                <div class="health-row">
+                  <span>{t("overview.leader")}</span>
+                  <strong>
+                    {status()?.leader_id != null ? `node-${status()!.leader_id}` : t("common.none")}
+                  </strong>
+                </div>
+                <div class="health-row">
+                  <span>{t("overview.voters")}</span>
+                  <strong>{status()?.voters.length ?? 0}</strong>
+                </div>
+                <div class="health-row">
+                  <span>{t("overview.learners")}</span>
+                  <strong>{status()?.learners.length ?? 0}</strong>
+                </div>
+              </div>
+            </aside>
+          </section>
 
-              {/* Stat cards */}
-              <section class="stats">
-                <article class="stat glass">
-                  <div class="stat-top">
-                    <div class="label">{t("overview.nodes")}</div>
-                    <div class="icon">01</div>
-                  </div>
-                  <div class="value">{totalNodes()}</div>
-                  <div class="note">{t("overview.nodesNote")}</div>
-                </article>
-                <article class="stat glass">
-                  <div class="stat-top">
-                    <div class="label">{t("overview.leader")}</div>
-                    <div class="icon">02</div>
-                  </div>
-                  <div class="value small">
-                    {status()?.leader_id != null
-                      ? `node-${status()!.leader_id}`
-                      : "—"}
-                  </div>
-                  <div class="note">
-                    {status()?.leader_id != null
-                      ? t("overview.consensusActive")
-                      : t("overview.noLeader")}
-                  </div>
-                </article>
-                <article class="stat glass">
-                  <div class="stat-top">
-                    <div class="label">{t("overview.voters")}</div>
-                    <div class="icon">03</div>
-                  </div>
-                  <div class="value">{status()?.voters.length ?? 0}</div>
-                  <div class="note">{t("overview.quorumAvailable", { quorum: hasQuorum() })}</div>
-                </article>
-                <article class="stat glass">
-                  <div class="stat-top">
-                    <div class="label">{t("overview.learners")}</div>
-                    <div class="icon">04</div>
-                  </div>
-                  <div class="value">{status()?.learners.length ?? 0}</div>
-                  <div class="note">
-                    {status() && status()!.learners.length === 0
-                      ? t("overview.noCatchUp")
-                      : t("overview.nodesCatchingUp", { count: status()!.learners.length })}
-                  </div>
-                </article>
-              </section>
+          {/* Stat cards */}
+          <section class="stats">
+            <article class="stat glass">
+              <div class="stat-top">
+                <div class="label">{t("overview.nodes")}</div>
+                <div class="icon">01</div>
+              </div>
+              <div class="value">{totalNodes()}</div>
+              <div class="note">{t("overview.nodesNote")}</div>
+            </article>
+            <article class="stat glass">
+              <div class="stat-top">
+                <div class="label">{t("overview.leader")}</div>
+                <div class="icon">02</div>
+              </div>
+              <div class="value small">
+                {status()?.leader_id != null ? `node-${status()!.leader_id}` : "—"}
+              </div>
+              <div class="note">
+                {status()?.leader_id != null
+                  ? t("overview.consensusActive")
+                  : t("overview.noLeader")}
+              </div>
+            </article>
+            <article class="stat glass">
+              <div class="stat-top">
+                <div class="label">{t("overview.voters")}</div>
+                <div class="icon">03</div>
+              </div>
+              <div class="value">{status()?.voters.length ?? 0}</div>
+              <div class="note">{t("overview.quorumAvailable", { quorum: hasQuorum() })}</div>
+            </article>
+            <article class="stat glass">
+              <div class="stat-top">
+                <div class="label">{t("overview.learners")}</div>
+                <div class="icon">04</div>
+              </div>
+              <div class="value">{status()?.learners.length ?? 0}</div>
+              <div class="note">
+                {status() && status()!.learners.length === 0
+                  ? t("overview.noCatchUp")
+                  : t("overview.nodesCatchingUp", { count: status()!.learners.length })}
+              </div>
+            </article>
+          </section>
 
-              {/* Topology */}
-              {status() && totalNodes() > 0 && (
-                <section class="topology-card glass">
-                  <div class="section-head">
-                    <div>
-                      <p class="section-label">{t("overview.liveMembership")}</p>
-                      <h2>{t("overview.topology")}</h2>
-                      <p class="section-copy">
-                        {t("overview.topologyCopy", {
-                          voters: status()!.voters.length,
-                          plural: status()!.voters.length !== 1 ? "s" : "",
-                          leader:
-                            status()!.leader_id != null
-                              ? `. ${t("overview.topologyLeader", {
-                                  leader: status()!.leader_id,
-                                })}.`
-                              : `. ${t("overview.topologyNoLeader")}.`,
-                        })}
-                      </p>
-                    </div>
-                    <div class="cluster-badge">{t("overview.clusterProd")}</div>
-                  </div>
-                  <div class="diagram">
-                    <For each={status()!.voters}>
-                      {(node) => (
-                        <article
-                          class={`node${status()!.leader_id === node.id ? " leader" : ""}`}
-                        >
-                          <div class="orb">
-                            {String(node.id).padStart(2, "0")}
-                          </div>
-                          <div class="node-body">
-                            <div class="node-name">node-{node.id}</div>
-                            <div class="role">
-                              {status()!.leader_id === node.id
-                                ? t("overview.leader")
-                                : t("overview.voters")}
-                            </div>
-                            <div class="node-meta">
-                              <span>{node.addr}</span>
-                              <span>
-                                {t("overview.commitIndex", {
-                                  index: status()?.last_applied_log ?? "—",
-                                })}
-                              </span>
-                            </div>
-                          </div>
-                        </article>
-                      )}
-                    </For>
-                    <For each={status()!.learners}>
-                      {(node) => (
-                        <article class="node">
-                          <div class="orb">
-                            {String(node.id).padStart(2, "0")}
-                          </div>
-                          <div class="node-body">
-                            <div class="node-name">node-{node.id}</div>
-                            <div class="role">{t("overview.learners")}</div>
-                            <div class="node-meta">
-                              <span>{node.addr}</span>
-                              <span>{t("overview.catchingUp")}</span>
-                            </div>
-                          </div>
-                        </article>
-                      )}
-                    </For>
-                  </div>
-                </section>
-              )}
-
-              {/* Footer */}
-              <footer class="footer">
-                <span>
-                  <strong>{t("overview.lastUpdated")}</strong>{" "}
-                  {lastUpdated() ? formatAgo(lastUpdated()! / 1000) : "—"}
-                </span>
-                <span>{t("overview.footer")}</span>
-              </footer>
-            </>
+          {/* Topology */}
+          {status() && totalNodes() > 0 && (
+            <section class="topology-card glass">
+              <div class="section-head">
+                <div>
+                  <p class="section-label">{t("overview.liveMembership")}</p>
+                  <h2>{t("overview.topology")}</h2>
+                  <p class="section-copy">
+                    {t("overview.topologyCopy", {
+                      voters: status()!.voters.length,
+                      plural: status()!.voters.length !== 1 ? "s" : "",
+                      leader:
+                        status()!.leader_id != null
+                          ? `. ${t("overview.topologyLeader", {
+                              leader: String(status()!.leader_id),
+                            })}.`
+                          : `. ${t("overview.topologyNoLeader")}.`,
+                    })}
+                  </p>
+                </div>
+                <div class="cluster-badge">{t("overview.clusterProd")}</div>
+              </div>
+              <div class="diagram">
+                <For each={status()!.voters}>
+                  {(node) => (
+                    <article class={`node${status()!.leader_id === node.id ? " leader" : ""}`}>
+                      <div class="orb">{String(node.id).padStart(2, "0")}</div>
+                      <div class="node-body">
+                        <div class="node-name">node-{node.id}</div>
+                        <div class="role">
+                          {status()!.leader_id === node.id
+                            ? t("overview.leader")
+                            : t("overview.voters")}
+                        </div>
+                        <div class="node-meta">
+                          <span>{node.addr}</span>
+                          <span>
+                            {t("overview.commitIndex", {
+                              index: status()?.last_applied_log ?? "—",
+                            })}
+                          </span>
+                        </div>
+                      </div>
+                    </article>
+                  )}
+                </For>
+                <For each={status()!.learners}>
+                  {(node) => (
+                    <article class="node">
+                      <div class="orb">{String(node.id).padStart(2, "0")}</div>
+                      <div class="node-body">
+                        <div class="node-name">node-{node.id}</div>
+                        <div class="role">{t("overview.learners")}</div>
+                        <div class="node-meta">
+                          <span>{node.addr}</span>
+                          <span>{t("overview.catchingUp")}</span>
+                        </div>
+                      </div>
+                    </article>
+                  )}
+                </For>
+              </div>
+            </section>
           )}
+
+          {/* Footer */}
+          <footer class="footer">
+            <span>
+              <strong>{t("overview.lastUpdated")}</strong>{" "}
+              {lastUpdated() ? formatAgo(lastUpdated()! / 1000) : "—"}
+            </span>
+            <span>{t("overview.footer")}</span>
+          </footer>
+        </>
+      )}
     </>
-    );
-  }
+  );
+}

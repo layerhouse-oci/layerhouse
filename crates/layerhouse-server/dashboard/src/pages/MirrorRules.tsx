@@ -1,15 +1,5 @@
-import {
-  createEffect,
-  createSignal,
-  For,
-  onCleanup,
-  Show,
-} from "solid-js";
-import {
-  fetchMirrorRules,
-  createMirrorRule,
-  deleteMirrorRule,
-} from "../lib/api";
+import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { fetchMirrorRules, createMirrorRule, deleteMirrorRule } from "../lib/api";
 import type { MirrorRule, MirrorRuleCreate } from "../lib/types";
 import { normalizeOptionalPrefix, normalizeRegistry, prefixLabel } from "../lib/format";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -45,9 +35,7 @@ export default function MirrorRules() {
       setError(null);
       setErrorCount(0);
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Failed to fetch mirror rules"
-      );
+      setError(e instanceof Error ? e.message : "Failed to fetch mirror rules");
       setErrorCount((c) => c + 1);
     } finally {
       setLoading(false);
@@ -117,13 +105,7 @@ export default function MirrorRules() {
   }
 
   if (errorCount() >= 3) {
-    return (
-      <ErrorBanner
-        message={error() ?? "Unknown error"}
-        onRetry={load}
-        fullPage
-      />
-    );
+    return <ErrorBanner message={error() ?? "Unknown error"} onRetry={load} fullPage />;
   }
 
   return (
@@ -175,20 +157,13 @@ export default function MirrorRules() {
                     <td>{rule.upstream_registry}</td>
                     <td>{prefixLabel(rule.upstream_prefix)}</td>
                     <td>
-                      {rule.plain_http
-                        ? "Plain"
-                        : rule.insecure_tls
-                          ? "Insecure TLS"
-                          : "TLS"}
+                      {rule.plain_http ? "Plain" : rule.insecure_tls ? "Insecure TLS" : "TLS"}
                     </td>
                     <td>
                       <button class="btn" onClick={() => editRule(rule)}>
                         Edit
                       </button>{" "}
-                      <button
-                        class="btn btn-danger"
-                        onClick={() => handleDelete(rule.id)}
-                      >
+                      <button class="btn btn-danger" onClick={() => handleDelete(rule.id)}>
                         Delete
                       </button>
                     </td>
@@ -210,9 +185,7 @@ export default function MirrorRules() {
                 type="text"
                 value={form().id}
                 disabled={!!editId()}
-                onInput={(e) =>
-                  setForm({ ...form(), id: e.currentTarget.value })
-                }
+                onInput={(e) => setForm({ ...form(), id: e.currentTarget.value })}
               />
             </div>
             <div class="form-group">
@@ -220,9 +193,7 @@ export default function MirrorRules() {
               <input
                 type="text"
                 value={form().local_prefix}
-                onInput={(e) =>
-                  setForm({ ...form(), local_prefix: e.currentTarget.value })
-                }
+                onInput={(e) => setForm({ ...form(), local_prefix: e.currentTarget.value })}
               />
             </div>
             <div class="form-group">
@@ -289,9 +260,7 @@ export default function MirrorRules() {
                 type="text"
                 value={form().username ?? ""}
                 autocomplete="off"
-                onInput={(e) =>
-                  setForm({ ...form(), username: e.currentTarget.value })
-                }
+                onInput={(e) => setForm({ ...form(), username: e.currentTarget.value })}
               />
             </div>
             <div class="form-group">
@@ -300,20 +269,14 @@ export default function MirrorRules() {
                 type="password"
                 value={form().password ?? ""}
                 autocomplete="new-password"
-                onInput={(e) =>
-                  setForm({ ...form(), password: e.currentTarget.value })
-                }
+                onInput={(e) => setForm({ ...form(), password: e.currentTarget.value })}
               />
             </div>
             <div class="modal-actions">
               <button class="btn" onClick={() => setShowForm(false)}>
                 Cancel
               </button>
-              <button
-                class="btn btn-primary"
-                disabled={saving()}
-                onClick={handleSave}
-              >
+              <button class="btn btn-primary" disabled={saving()} onClick={handleSave}>
                 {saving() ? "Saving..." : "Save"}
               </button>
             </div>

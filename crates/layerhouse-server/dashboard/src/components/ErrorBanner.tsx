@@ -9,9 +9,7 @@ export default function ErrorBanner(props: {
     return (
       <div class="empty">
         <h3>{t("error.connectionLost")}</h3>
-        <p style={{ color: "var(--color-error)", "margin-bottom": "1rem" }}>
-          {props.message}
-        </p>
+        <p style={{ color: "var(--color-error)", "margin-bottom": "1rem" }}>{props.message}</p>
         {props.onRetry && (
           <button class="btn btn-primary" onClick={props.onRetry}>
             {t("common.retry")}

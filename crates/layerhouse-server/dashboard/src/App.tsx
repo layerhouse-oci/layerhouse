@@ -23,7 +23,6 @@ const Access = lazy(() => import("./pages/Access"));
 const Mirror = lazy(() => import("./pages/Mirror"));
 const ProxyCache = lazy(() => import("./pages/ProxyCache"));
 const Cluster = lazy(() => import("./pages/Cluster"));
-const KubernetesSetup = lazy(() => import("./pages/KubernetesSetup"));
 const OAuth2Error = lazy(() => import("./pages/OAuth2Error"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
@@ -40,13 +39,12 @@ const NAV_ITEMS = [
   { href: "/mirror", label: "app.nav.mirror" },
   { href: "/proxy-cache", label: "app.nav.proxyCache" },
   { href: "/cluster", label: "app.nav.cluster" },
-  { href: "/setup", label: "app.nav.setup" },
-  { href: "/access", label: "app.nav.access" },
 ];
 
 const AppShell: Component<RouteSectionProps> = (props) => {
   const [session, setSession] = createSignal<DashboardSession | null>(null);
   const [showAccountMenu, setShowAccountMenu] = createSignal(false);
+  const [showTokens, setShowTokens] = createSignal(false);
 
   createEffect(() => {
     syncLocaleDocument();
@@ -69,12 +67,16 @@ const AppShell: Component<RouteSectionProps> = (props) => {
     } finally {
       setSession(null);
       setShowAccountMenu(false);
-      window.location.hash = "/access";
+      window.location.hash = "/overview";
     }
   }
 
   const displayUser = () =>
-    session()?.display_name || session()?.username || session()?.email || session()?.subject || t("access.account");
+    session()?.display_name ||
+    session()?.username ||
+    session()?.email ||
+    session()?.subject ||
+    t("access.account");
   const secondaryUser = () => {
     const current = session();
     if (!current) return null;
@@ -93,10 +95,25 @@ const AppShell: Component<RouteSectionProps> = (props) => {
     <div class="page">
       <header class="topbar">
         <div class="nav-shell">
-          <A class="brand" href="/overview" activeClass="" inactiveClass="" aria-label={t("app.productName")} title={t("app.productName")}>
+          <A
+            class="brand"
+            href="/overview"
+            activeClass=""
+            inactiveClass=""
+            aria-label={t("app.productName")}
+            title={t("app.productName")}
+          >
             <span class="brand-mark" aria-hidden="true">
-              <img class="brand-mark-image brand-mark-light" src="/brand/layerhouse-mark-light.svg" alt="" />
-              <img class="brand-mark-image brand-mark-dark" src="/brand/layerhouse-mark-dark.svg" alt="" />
+              <img
+                class="brand-mark-image brand-mark-light"
+                src="/brand/layerhouse-mark-light.svg"
+                alt=""
+              />
+              <img
+                class="brand-mark-image brand-mark-dark"
+                src="/brand/layerhouse-mark-dark.svg"
+                alt=""
+              />
             </span>
             <span class="brand-label">{t("app.brandName")}</span>
           </A>
@@ -135,6 +152,11 @@ const AppShell: Component<RouteSectionProps> = (props) => {
                 </button>
               ))}
             </div>
+            <Show when={session()?.auth_enabled && !session()?.subject}>
+              <a class="btn" href="/oauth2/start">
+                {t("access.signInWithOidc")}
+              </a>
+            </Show>
             <Show when={session()?.auth_enabled && session()?.subject}>
               <div class="account-control">
                 <button
@@ -155,9 +177,16 @@ const AppShell: Component<RouteSectionProps> = (props) => {
                         <span>{secondaryUser() || t("access.sessionActive")}</span>
                       </div>
                     </div>
-                    <A href="/access" class="account-menu-row" onClick={() => setShowAccountMenu(false)}>
+                    <button
+                      type="button"
+                      class="account-menu-row"
+                      onClick={() => {
+                        setShowAccountMenu(false);
+                        setShowTokens(true);
+                      }}
+                    >
                       {t("access.personalTokens")}
-                    </A>
+                    </button>
                     <button type="button" class="account-menu-row" onClick={signOut}>
                       {t("access.signOut")}
                     </button>
@@ -171,6 +200,10 @@ const AppShell: Component<RouteSectionProps> = (props) => {
       <main class="main">
         <div class="shell">{props.children}</div>
       </main>
+
+      <Show when={showTokens()}>
+        <Access onClose={() => setShowTokens(false)} />
+      </Show>
     </div>
   );
 };
@@ -183,11 +216,9 @@ export default function App() {
       <Route path="/repos" component={Repositories} />
       <Route path="/repos/*name" component={RepoDetail} />
       <Route path="/diff/:name/:a/:b" component={TagDiff} />
-      <Route path="/access" component={Access} />
       <Route path="/mirror" component={Mirror} />
       <Route path="/proxy-cache" component={ProxyCache} />
       <Route path="/cluster" component={Cluster} />
-      <Route path="/setup" component={KubernetesSetup} />
       <Route path="/oauth2/start" component={OAuth2Start} />
       <Route path="/oauth2/error" component={OAuth2Error} />
       <Route path="*" component={NotFound} />

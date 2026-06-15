@@ -1,8 +1,4 @@
-export default function EmptyState(props: {
-  icon?: string;
-  title: string;
-  description?: string;
-}) {
+export default function EmptyState(props: { icon?: string; title: string; description?: string }) {
   return (
     <div class="empty">
       {props.icon && <div class="empty-icon">{props.icon}</div>}

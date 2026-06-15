@@ -175,6 +175,13 @@ const en: Messages = {
   "repos.pageSize": "{size} per page",
   "repos.fetchError": "Failed to fetch repositories",
   "repos.deleteError": "Failed to delete repository",
+  "repos.filter.all": "All repos",
+  "repos.filter.mine": "Mine",
+  "repos.filter.shared": "Shared",
+  "repos.filter.public": "Public",
+  "repos.colAccess": "Access",
+  "repos.manageTokens": "Manage tokens",
+  "repos.maxGrantable": "Max {action}",
 
   "access.eyebrow": "Identity & Tokens",
   "access.title": "Access",
@@ -211,23 +218,48 @@ const en: Messages = {
   "access.expiry.30": "30 days",
   "access.expiry.90": "90 days",
   "access.expiry.never": "Never",
-  "access.repositoryPattern": "Repository pattern",
-  "access.repositoryPatternHint": "Use a prefix like team/* or release/*. Use * only for trusted automation.",
-  "access.allowedActions": "Allowed actions",
-  "access.pull": "Pull",
-  "access.push": "Push",
-  "access.delete": "Delete",
+  "access.scopeSearch": "Search grantable repositories",
+  "access.scopeSearchPlaceholder": "Search by repository or namespace",
+  "access.searchScopes": "Search scopes",
+  "access.scopeSearchHint": "Only repositories and namespace patterns you can grant are shown.",
+  "access.scopeSearchError": "Failed to search grantable scopes",
+  "access.scopeRequired": "Select at least one repository or namespace pattern.",
+  "access.availableRepositories": "Available repositories",
+  "access.availablePatterns": "Namespace patterns",
+  "access.noRepositoryScopes": "No grantable repositories found.",
+  "access.noNamespaceScopes": "No grantable namespace patterns found.",
+  "access.maxGrantable": "Max {action}",
+  "access.currentMatchCount": "{count} current matches",
+  "access.namespacePatternWarning":
+    "Namespace patterns grant access to current and future matching repositories. Add them only when you intend that wider scope.",
+  "access.addScope": "Add",
+  "access.addPatternScope": "Add pattern",
+  "access.addedScope": "Added",
+  "access.selectedScopes": "Selected scopes",
+  "access.selectedScopesEmpty": "Add repositories or namespace patterns to define this token.",
+  "access.namespacePattern": "Namespace pattern",
+  "access.selectedActions": "Selected actions: {actions}",
+  "access.grantSource.personal": "Personal",
+  "access.grantSource.group_grant": "Group grant",
+  "access.grantSource.public": "Public",
+  "access.action.pull": "Pull",
+  "access.action.create": "Create",
+  "access.action.update": "Update",
+  "access.action.delete": "Delete",
   "access.createTitle": "Create personal access token",
-  "access.createDesc": "Name it, limit it to a repository pattern, then choose the registry actions it can perform.",
+  "access.createDesc":
+    "Search grantable repositories, add scopes, then choose exactly which registry actions this token can perform.",
   "access.createError": "Failed to create token",
   "access.revokeError": "Failed to revoke token",
-  "access.revokeTimeout": "Request timed out — token may still be active. Check the table and try again.",
+  "access.revokeTimeout":
+    "Request timed out — token may still be active. Check the table and try again.",
   "access.revokeNotFound": "Token was already removed. Refreshing…",
   "access.nameRequired": "Token name is required.",
   "access.patternRequired": "Repository pattern is required.",
   "access.actionRequired": "Select at least one action.",
   "access.tokenCreated": "Token created",
-  "access.tokenCreatedDesc": "Copy it now. After this modal closes, only the prefix remains visible.",
+  "access.tokenCreatedDesc":
+    "Copy it now. After this modal closes, only the prefix remains visible.",
   "access.fullToken": "Personal access token",
   "access.copyToken": "Copy token",
   "access.copyDocker": "Copy Docker login",
@@ -237,17 +269,20 @@ const en: Messages = {
   "access.createAnother": "Create another",
   "access.revoke": "Revoke",
   "access.revokeTitle": "Revoke token {name}?",
-  "access.revokeWarning": "Docker login and registry requests using prefix {prefix} will stop working immediately.",
+  "access.revokeWarning":
+    "Docker login and registry requests using prefix {prefix} will stop working immediately.",
   "access.sessionExpired": "Session expired",
   "access.sessionExpiredDesc": "Sign in again to continue managing registry access.",
   "access.groups": "Groups",
   "access.tokenType": "Token type",
   "access.authDisabled": "Authentication is not configured",
-  "access.authDisabledDesc": "This registry is currently open. Configure auth to manage dashboard sessions and personal access tokens.",
+  "access.authDisabledDesc":
+    "This registry is currently open. Configure auth to manage dashboard sessions and personal access tokens.",
 
   "oauth2.errorEyebrow": "OIDC sign in",
   "oauth2.stateErrorTitle": "Sign-in link expired",
-  "oauth2.stateErrorDesc": "This login attempt could not be verified. It may have expired or been opened in a different browser session.",
+  "oauth2.stateErrorDesc":
+    "This login attempt could not be verified. It may have expired or been opened in a different browser session.",
   "oauth2.restartLogin": "Start sign in again",
 
   "setup.eyebrow": "Kubernetes Pull Setup",
@@ -259,7 +294,8 @@ const en: Messages = {
   "setup.namespace": "Namespace",
   "setup.serverTlsSecret": "Server TLS secret",
   "setup.raftTlsSecret": "Raft mTLS secret",
-  "setup.runtimeNote": "v1 generates containerd trust snippets only. Install them through your normal node-management process.",
+  "setup.runtimeNote":
+    "v1 generates containerd trust snippets only. Install them through your normal node-management process.",
   "setup.boundary": "Trust boundary",
   "setup.boundaryCopy":
     "Kubernetes image pulls are performed by kubelet and the node container runtime before the pod starts.",
@@ -267,17 +303,21 @@ const en: Messages = {
   "setup.boundaryNode": "Install ca.crt and hosts.toml on every node that may pull images.",
   "setup.boundaryCa": "Keep ca.key offline and never mount it into Kubernetes.",
   "setup.snippet.cert": "Generate certificates",
-  "setup.snippet.certNote": "Creates registry TLS plus Raft mTLS certificates with StatefulSet DNS SANs.",
+  "setup.snippet.certNote":
+    "Creates registry TLS plus Raft mTLS certificates with StatefulSet DNS SANs.",
   "setup.snippet.bundle": "Generate Kubernetes bundle",
-  "setup.snippet.bundleNote": "Renders TLS Secrets, Helm values, containerd hosts.toml, and verification notes.",
+  "setup.snippet.bundleNote":
+    "Renders TLS Secrets, Helm values, containerd hosts.toml, and verification notes.",
   "setup.snippet.helm": "Install with Helm",
   "setup.snippet.helmNote": "Use the generated values file after filling in external S3 settings.",
   "setup.snippet.containerd": "Install containerd trust",
-  "setup.snippet.containerdNote": "Run equivalent steps through your node image, bootstrap, or machine config.",
+  "setup.snippet.containerdNote":
+    "Run equivalent steps through your node image, bootstrap, or machine config.",
   "setup.snippet.pullSecret": "Create image pull secret",
   "setup.snippet.pullSecretNote": "Use this only when registry authentication is enabled.",
   "setup.snippet.verify": "Verify pulls",
-  "setup.snippet.verifyNote": "Check the registry endpoint, node runtime pull, and Kubernetes pod scheduling.",
+  "setup.snippet.verifyNote":
+    "Check the registry endpoint, node runtime pull, and Kubernetes pod scheduling.",
 
   "repo.back": "← Back to Repositories",
   "repo.search": "Search digest, tag, type, summary",
@@ -313,8 +353,7 @@ const en: Messages = {
   "repo.subjectDigest": "Subject digest",
   "repo.configDigest": "Config digest",
   "repo.deleteDigestTitle": "Delete digest {digest}?",
-  "repo.deleteDigestWarning":
-    "This will delete {tags} tags. This action cannot be undone.",
+  "repo.deleteDigestWarning": "This will delete {tags} tags. This action cannot be undone.",
   "repo.deleteBatchTitle": "Delete {count} digests?",
   "repo.deleteBatchWarning":
     "This will delete {tags} tags across {count} digests. This action cannot be undone.",
@@ -325,6 +364,11 @@ const en: Messages = {
   "repo.deleteBatchError": "Failed to delete selected digests",
   "repo.expanded.config": "Config digest: {digest}\nLayer count: {layers}\nTotal size: {size}",
   "repo.type.unknown": "Unknown",
+  "repo.access": "Your access",
+  "repo.yourAccess": "You have {action} access to this repository.",
+  "repo.canGrant": "You can grant up to {action} access.",
+  "repo.accessSource": "Granted via {source}",
+  "repo.noAccess": "No access information available",
 
   "mirror.eyebrow": "Automation",
   "mirror.title": "Mirror",
@@ -385,7 +429,8 @@ const en: Messages = {
   "mirror.proxyPassword": "Proxy password",
   "mirror.httpsDeferred": "HTTPS proxy endpoints are deferred until aioduct exposes support.",
   "mirror.deleteTitle": "Delete mirror rule {id}?",
-  "mirror.deleteWarning": "Existing local repositories, manifests, tags, and blobs are not deleted.",
+  "mirror.deleteWarning":
+    "Existing local repositories, manifests, tags, and blobs are not deleted.",
   "mirror.fetchError": "Failed to fetch mirror state",
   "mirror.saveError": "Failed to save mirror rule",
   "mirror.triggerError": "Failed to trigger rule",
@@ -408,7 +453,8 @@ const en: Messages = {
   "proxy.sort.pushed": "Pushed",
   "proxy.sort.pulled": "Pulled",
   "proxy.warmSchedule": "Warm schedule",
-  "proxy.deleteWarning": "Delete proxy cache {id}. Cached blobs and manifests stay until normal cleanup removes them.",
+  "proxy.deleteWarning":
+    "Delete proxy cache {id}. Cached blobs and manifests stay until normal cleanup removes them.",
   "proxy.deleteTitle": "Delete proxy cache {id}?",
   "proxy.fetchError": "Failed to fetch proxy caches",
   "proxy.saveError": "Failed to save proxy cache",
@@ -435,12 +481,15 @@ const en: Messages = {
   "cluster.joining": "Joining...",
   "cluster.leaveLeaderTitle": "Leave leader node?",
   "cluster.removeNodeTitle": "Remove node {id}?",
-  "cluster.leaveWarning": "Leader leave may trigger an election. Confirm quorum remains available before continuing.",
-  "cluster.removeWarning": "Remove node {id} at {address}. Confirm quorum remains available before continuing.",
+  "cluster.leaveWarning":
+    "Leader leave may trigger an election. Confirm quorum remains available before continuing.",
+  "cluster.removeWarning":
+    "Remove node {id} at {address}. Confirm quorum remains available before continuing.",
   "cluster.fetchError": "Failed to fetch cluster status",
   "cluster.joinError": "Failed to join node",
   "cluster.removeError": "Failed to remove node",
-  "cluster.adminRequired": "Admin permission required — sign in with an admin account to manage cluster membership.",
+  "cluster.adminRequired":
+    "Admin permission required — sign in with an admin account to manage cluster membership.",
   "cluster.leader": "Leader",
   "cluster.term": "Term",
   "cluster.quorum": "Quorum",
@@ -931,9 +980,6 @@ export function syncLocaleDocument() {
 
 export function t(key: string, params: Record<string, string | number> = {}): string {
   const current = locale();
-  const raw =
-    current === "en"
-      ? en[key]
-      : commonOverrides[current]?.[key] ?? en[key] ?? key;
+  const raw = commonOverrides[current]?.[key] ?? en[key] ?? key;
   return raw.replace(/\{(\w+)\}/g, (_, name) => String(params[name] ?? ""));
 }

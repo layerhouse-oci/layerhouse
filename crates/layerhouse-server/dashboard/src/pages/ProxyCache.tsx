@@ -76,7 +76,8 @@ function warmLabel(cache: ProxyCache): string {
   return cache.warm_filters
     .map((filter) => {
       if (filter.type === "all") return t("mirror.allTags");
-      if (filter.type === "latest") return `${t("mirror.latestCount", { count: filter.count })} (${filter.sort_by})`;
+      if (filter.type === "latest")
+        return `${t("mirror.latestCount", { count: filter.count })} (${filter.sort_by})`;
       if (filter.type === "pattern") return filter.pattern;
       return t("common.none");
     })
@@ -258,7 +259,9 @@ export default function ProxyCache() {
               <For each={caches()}>
                 {(cache) => (
                   <tr>
-                    <td><code>{cache.id}</code></td>
+                    <td>
+                      <code>{cache.id}</code>
+                    </td>
                     <td>{cache.local_prefix}</td>
                     <td>
                       {upstreamLabel(cache.upstream_registry, cache.upstream_prefix)}
@@ -270,10 +273,17 @@ export default function ProxyCache() {
                     <td>
                       <Show when={session()?.is_admin}>
                         <div class="row-actions">
-                          <button class="btn btn-compact" disabled={warming() === cache.id} onClick={() => warm(cache.id)}>
+                          <button
+                            class="btn btn-compact"
+                            disabled={warming() === cache.id}
+                            onClick={() => warm(cache.id)}
+                          >
                             {warming() === cache.id ? t("proxy.warming") : t("proxy.warm")}
                           </button>
-                          <button class="btn btn-compact btn-danger" onClick={() => setDeleteTarget(cache)}>
+                          <button
+                            class="btn btn-compact btn-danger"
+                            onClick={() => setDeleteTarget(cache)}
+                          >
                             {t("common.delete")}
                           </button>
                         </div>
@@ -292,21 +302,110 @@ export default function ProxyCache() {
           <div class="modal modal-wide" onClick={(e) => e.stopPropagation()}>
             <h2>{t("proxy.createTitle")}</h2>
             <div class="form-grid">
-              <div class="form-group"><label>{t("common.id")}</label><input value={form().id} onInput={(e) => setForm({ ...form(), id: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("mirror.localPrefix")}</label><input value={form().local_prefix} onInput={(e) => setForm({ ...form(), local_prefix: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("mirror.upstreamRegistry")}</label><input value={form().upstream_registry} onInput={(e) => setForm({ ...form(), upstream_registry: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("mirror.upstreamPrefix")}</label><input value={form().upstream_prefix} onInput={(e) => setForm({ ...form(), upstream_prefix: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("proxy.warmFilter")}</label><select value={form().warm_type} onChange={(e) => setForm({ ...form(), warm_type: e.currentTarget.value as CacheForm["warm_type"] })}><option value="none">{t("common.none")}</option><option value="all">{t("mirror.allTags")}</option><option value="latest">{t("mirror.latestN")}</option><option value="pattern">{t("mirror.tagPattern")}</option></select></div>
+              <div class="form-group">
+                <label>{t("common.id")}</label>
+                <input
+                  value={form().id}
+                  onInput={(e) => setForm({ ...form(), id: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("mirror.localPrefix")}</label>
+                <input
+                  value={form().local_prefix}
+                  onInput={(e) => setForm({ ...form(), local_prefix: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("mirror.upstreamRegistry")}</label>
+                <input
+                  value={form().upstream_registry}
+                  onInput={(e) => setForm({ ...form(), upstream_registry: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("mirror.upstreamPrefix")}</label>
+                <input
+                  value={form().upstream_prefix}
+                  onInput={(e) => setForm({ ...form(), upstream_prefix: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("proxy.warmFilter")}</label>
+                <select
+                  value={form().warm_type}
+                  onChange={(e) =>
+                    setForm({
+                      ...form(),
+                      warm_type: e.currentTarget.value as CacheForm["warm_type"],
+                    })
+                  }
+                >
+                  <option value="none">{t("common.none")}</option>
+                  <option value="all">{t("mirror.allTags")}</option>
+                  <option value="latest">{t("mirror.latestN")}</option>
+                  <option value="pattern">{t("mirror.tagPattern")}</option>
+                </select>
+              </div>
               <Show when={form().warm_type === "latest"}>
-                <div class="form-group"><label>{t("mirror.count")}</label><input type="number" value={form().latest_count} onInput={(e) => setForm({ ...form(), latest_count: Number(e.currentTarget.value) || 1 })} /></div>
-                <div class="form-group"><label>{t("proxy.sortBy")}</label><select value={form().sort_by} onChange={(e) => setForm({ ...form(), sort_by: e.currentTarget.value as WarmSortBy })}><option value="created">{t("proxy.sort.created")}</option><option value="pushed">{t("proxy.sort.pushed")}</option><option value="pulled">{t("proxy.sort.pulled")}</option></select></div>
+                <div class="form-group">
+                  <label>{t("mirror.count")}</label>
+                  <input
+                    type="number"
+                    value={form().latest_count}
+                    onInput={(e) =>
+                      setForm({ ...form(), latest_count: Number(e.currentTarget.value) || 1 })
+                    }
+                  />
+                </div>
+                <div class="form-group">
+                  <label>{t("proxy.sortBy")}</label>
+                  <select
+                    value={form().sort_by}
+                    onChange={(e) =>
+                      setForm({ ...form(), sort_by: e.currentTarget.value as WarmSortBy })
+                    }
+                  >
+                    <option value="created">{t("proxy.sort.created")}</option>
+                    <option value="pushed">{t("proxy.sort.pushed")}</option>
+                    <option value="pulled">{t("proxy.sort.pulled")}</option>
+                  </select>
+                </div>
               </Show>
               <Show when={form().warm_type === "pattern"}>
-                <div class="form-group"><label>{t("mirror.glob")}</label><input value={form().pattern} onInput={(e) => setForm({ ...form(), pattern: e.currentTarget.value })} /></div>
+                <div class="form-group">
+                  <label>{t("mirror.glob")}</label>
+                  <input
+                    value={form().pattern}
+                    onInput={(e) => setForm({ ...form(), pattern: e.currentTarget.value })}
+                  />
+                </div>
               </Show>
-              <div class="form-group"><label>{t("proxy.warmSchedule")}</label><input placeholder="*/30 * * * *" value={form().warm_schedule} onInput={(e) => setForm({ ...form(), warm_schedule: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("common.username")}</label><input value={form().username} autocomplete="off" onInput={(e) => setForm({ ...form(), username: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("common.password")}</label><input type="password" value={form().password} autocomplete="new-password" onInput={(e) => setForm({ ...form(), password: e.currentTarget.value })} /></div>
+              <div class="form-group">
+                <label>{t("proxy.warmSchedule")}</label>
+                <input
+                  placeholder="*/30 * * * *"
+                  value={form().warm_schedule}
+                  onInput={(e) => setForm({ ...form(), warm_schedule: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("common.username")}</label>
+                <input
+                  value={form().username}
+                  autocomplete="off"
+                  onInput={(e) => setForm({ ...form(), username: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("common.password")}</label>
+                <input
+                  type="password"
+                  value={form().password}
+                  autocomplete="new-password"
+                  onInput={(e) => setForm({ ...form(), password: e.currentTarget.value })}
+                />
+              </div>
               <div class="form-group full advanced">
                 <h3>{t("mirror.advancedNetwork")}</h3>
                 <div class="form-grid">
@@ -314,7 +413,13 @@ export default function ProxyCache() {
                     <input
                       type="checkbox"
                       checked={form().plain_http}
-                      onChange={(e) => setForm({ ...form(), plain_http: e.currentTarget.checked, insecure_tls: e.currentTarget.checked ? false : form().insecure_tls })}
+                      onChange={(e) =>
+                        setForm({
+                          ...form(),
+                          plain_http: e.currentTarget.checked,
+                          insecure_tls: e.currentTarget.checked ? false : form().insecure_tls,
+                        })
+                      }
                     />
                     <span>{t("mirror.plainHttp")}</span>
                   </label>
@@ -322,23 +427,73 @@ export default function ProxyCache() {
                     <input
                       type="checkbox"
                       checked={form().insecure_tls}
-                      onChange={(e) => setForm({ ...form(), insecure_tls: e.currentTarget.checked, plain_http: e.currentTarget.checked ? false : form().plain_http })}
+                      onChange={(e) =>
+                        setForm({
+                          ...form(),
+                          insecure_tls: e.currentTarget.checked,
+                          plain_http: e.currentTarget.checked ? false : form().plain_http,
+                        })
+                      }
                     />
                     <span>{t("mirror.insecureTls")}</span>
                   </label>
-                  <div class="form-group"><label>{t("mirror.outboundProxy")}</label><select value={form().proxy_protocol} onChange={(e) => setForm({ ...form(), proxy_protocol: e.currentTarget.value as OutboundProxyProtocol })}><option value="none">{t("common.direct")}</option><option value="http">HTTP</option><option value="socks4">SOCKS4</option><option value="socks5">SOCKS5</option></select></div>
+                  <div class="form-group">
+                    <label>{t("mirror.outboundProxy")}</label>
+                    <select
+                      value={form().proxy_protocol}
+                      onChange={(e) =>
+                        setForm({
+                          ...form(),
+                          proxy_protocol: e.currentTarget.value as OutboundProxyProtocol,
+                        })
+                      }
+                    >
+                      <option value="none">{t("common.direct")}</option>
+                      <option value="http">HTTP</option>
+                      <option value="socks4">SOCKS4</option>
+                      <option value="socks5">SOCKS5</option>
+                    </select>
+                  </div>
                   <Show when={form().proxy_protocol !== "none"}>
-                    <div class="form-group"><label>{t("mirror.proxyUrl")}</label><input value={form().proxy_url} placeholder="proxy.internal:8080" onInput={(e) => setForm({ ...form(), proxy_url: e.currentTarget.value })} /></div>
-                    <div class="form-group"><label>{t("mirror.proxyUsername")}</label><input value={form().proxy_username} onInput={(e) => setForm({ ...form(), proxy_username: e.currentTarget.value })} /></div>
-                    <div class="form-group"><label>{t("mirror.proxyPassword")}</label><input type="password" value={form().proxy_password} onInput={(e) => setForm({ ...form(), proxy_password: e.currentTarget.value })} /></div>
+                    <div class="form-group">
+                      <label>{t("mirror.proxyUrl")}</label>
+                      <input
+                        value={form().proxy_url}
+                        placeholder="proxy.internal:8080"
+                        onInput={(e) => setForm({ ...form(), proxy_url: e.currentTarget.value })}
+                      />
+                    </div>
+                    <div class="form-group">
+                      <label>{t("mirror.proxyUsername")}</label>
+                      <input
+                        value={form().proxy_username}
+                        onInput={(e) =>
+                          setForm({ ...form(), proxy_username: e.currentTarget.value })
+                        }
+                      />
+                    </div>
+                    <div class="form-group">
+                      <label>{t("mirror.proxyPassword")}</label>
+                      <input
+                        type="password"
+                        value={form().proxy_password}
+                        onInput={(e) =>
+                          setForm({ ...form(), proxy_password: e.currentTarget.value })
+                        }
+                      />
+                    </div>
                   </Show>
                 </div>
                 <p class="hint">{t("mirror.httpsDeferred")}</p>
               </div>
             </div>
             <div class="modal-actions">
-              <button class="btn" onClick={() => setShowForm(false)}>{t("common.cancel")}</button>
-              <button class="btn btn-primary" disabled={saving()} onClick={save}>{saving() ? t("common.creating") : t("proxy.create")}</button>
+              <button class="btn" onClick={() => setShowForm(false)}>
+                {t("common.cancel")}
+              </button>
+              <button class="btn btn-primary" disabled={saving()} onClick={save}>
+                {saving() ? t("common.creating") : t("proxy.create")}
+              </button>
             </div>
           </div>
         </div>
@@ -349,12 +504,14 @@ export default function ProxyCache() {
           <div class="modal-overlay" onClick={() => setDeleteTarget(null)}>
             <div class="modal" onClick={(e) => e.stopPropagation()}>
               <h2>{t("proxy.deleteTitle", { id: cache().id })}</h2>
-              <p class="warning">
-                {t("proxy.deleteWarning", { id: cache().id })}
-              </p>
+              <p class="warning">{t("proxy.deleteWarning", { id: cache().id })}</p>
               <div class="modal-actions">
-                <button class="btn" onClick={() => setDeleteTarget(null)}>{t("common.cancel")}</button>
-                <button class="btn btn-danger" onClick={confirmDelete}>{t("common.confirmDelete")}</button>
+                <button class="btn" onClick={() => setDeleteTarget(null)}>
+                  {t("common.cancel")}
+                </button>
+                <button class="btn btn-danger" onClick={confirmDelete}>
+                  {t("common.confirmDelete")}
+                </button>
               </div>
             </div>
           </div>

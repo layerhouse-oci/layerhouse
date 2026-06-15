@@ -20,7 +20,14 @@ import type {
   SyncJob,
   SyncJobRun,
 } from "../lib/types";
-import { formatAgo, formatTime, normalizeOptionalPrefix, normalizeRegistry, strategyLabel, upstreamLabel } from "../lib/format";
+import {
+  formatAgo,
+  formatTime,
+  normalizeOptionalPrefix,
+  normalizeRegistry,
+  strategyLabel,
+  upstreamLabel,
+} from "../lib/format";
 import { t } from "../lib/i18n";
 import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
@@ -122,7 +129,7 @@ function progressSummary(run: SyncJobRun | null | undefined) {
   const totalTags = run.total_tags ?? 0;
   const completedTags = run.completed_tags ?? 0;
   if (totalTags <= 0) {
-    return run.status === "Running" ? run.phase ?? run.status : run.status;
+    return run.status === "Running" ? (run.phase ?? run.status) : run.status;
   }
   return `${completedTags} / ${totalTags} tags`;
 }
@@ -165,11 +172,11 @@ export default function Mirror() {
   const [deleteId, setDeleteId] = createSignal<string | null>(null);
   const selectedJob = createMemo(() => {
     const id = selectedJobId();
-    return id ? jobs().find((job) => job.id === id) ?? null : null;
+    return id ? (jobs().find((job) => job.id === id) ?? null) : null;
   });
   const selectedRun = createMemo(() => {
     const id = selectedJobId();
-    return id ? latestRuns()[id] ?? null : null;
+    return id ? (latestRuns()[id] ?? null) : null;
   });
   const selectedEvents = createMemo(() => (selectedRun()?.recent_events ?? []).slice().reverse());
 
@@ -211,7 +218,7 @@ export default function Mirror() {
   function pruneLatestRuns(nextJobs: SyncJob[]) {
     const jobIds = new Set(nextJobs.map((job) => job.id));
     setLatestRuns((current) =>
-      Object.fromEntries(Object.entries(current).filter(([jobId]) => jobIds.has(jobId)))
+      Object.fromEntries(Object.entries(current).filter(([jobId]) => jobIds.has(jobId))),
     );
   }
 
@@ -404,8 +411,12 @@ export default function Mirror() {
 
       <div class="card">
         <div class="tabs">
-          <button class={tab() === "rules" ? "active" : ""} onClick={() => setTab("rules")}>{t("mirror.rules")}</button>
-          <button class={tab() === "jobs" ? "active" : ""} onClick={() => setTab("jobs")}>{t("mirror.jobs")}</button>
+          <button class={tab() === "rules" ? "active" : ""} onClick={() => setTab("rules")}>
+            {t("mirror.rules")}
+          </button>
+          <button class={tab() === "jobs" ? "active" : ""} onClick={() => setTab("jobs")}>
+            {t("mirror.jobs")}
+          </button>
         </div>
 
         {loading() ? (
@@ -413,7 +424,9 @@ export default function Mirror() {
         ) : tab() === "rules" ? (
           <Show
             when={rules().length > 0}
-            fallback={<EmptyState title={t("mirror.noRules")} description={t("mirror.noRulesDesc")} />}
+            fallback={
+              <EmptyState title={t("mirror.noRules")} description={t("mirror.noRulesDesc")} />
+            }
           >
             <table>
               <thead>
@@ -432,9 +445,13 @@ export default function Mirror() {
                 <For each={rules()}>
                   {(rule) => (
                     <tr>
-                      <td><code>{rule.id}</code></td>
                       <td>
-                        <span class={`badge ${rule.direction === "pull" ? "badge-success" : "badge-blue"}`}>
+                        <code>{rule.id}</code>
+                      </td>
+                      <td>
+                        <span
+                          class={`badge ${rule.direction === "pull" ? "badge-success" : "badge-blue"}`}
+                        >
                           {directionLabel(rule)}
                         </span>
                       </td>
@@ -454,9 +471,14 @@ export default function Mirror() {
                               disabled={triggering() === rule.id}
                               onClick={() => runRule(rule.id)}
                             >
-                              {triggering() === rule.id ? t("mirror.triggering") : t("mirror.trigger")}
+                              {triggering() === rule.id
+                                ? t("mirror.triggering")
+                                : t("mirror.trigger")}
                             </button>
-                            <button class="btn btn-compact btn-danger" onClick={() => setDeleteId(rule.id)}>
+                            <button
+                              class="btn btn-compact btn-danger"
+                              onClick={() => setDeleteId(rule.id)}
+                            >
                               {t("common.delete")}
                             </button>
                           </div>
@@ -471,7 +493,9 @@ export default function Mirror() {
         ) : (
           <Show
             when={jobs().length > 0}
-            fallback={<EmptyState title={t("mirror.noJobs")} description={t("mirror.noJobsDesc")} />}
+            fallback={
+              <EmptyState title={t("mirror.noJobs")} description={t("mirror.noJobsDesc")} />
+            }
           >
             <div class="mirror-jobs-layout">
               <div class="mirror-jobs-table">
@@ -504,7 +528,9 @@ export default function Mirror() {
                               }
                             }}
                           >
-                            <td><code>{job.id}</code></td>
+                            <td>
+                              <code>{job.id}</code>
+                            </td>
                             <td>{job.rule_name ?? job.rule_id ?? "-"}</td>
                             <td>{job.image}</td>
                             <td>
@@ -520,7 +546,9 @@ export default function Mirror() {
                             </td>
                             <td>{statusBadge(job.status)}</td>
                             <td>{formatTime(job.last_run_at)}</td>
-                            <td class="error-cell">{job.last_error ?? rowRun()?.tags_failed?.[0]?.[1] ?? "-"}</td>
+                            <td class="error-cell">
+                              {job.last_error ?? rowRun()?.tags_failed?.[0]?.[1] ?? "-"}
+                            </td>
                           </tr>
                         );
                       }}
@@ -571,7 +599,11 @@ export default function Mirror() {
                         <div>
                           <p class="label">{t("mirror.progress")}</p>
                           <h3>{progressSummary(run())}</h3>
-                          <p>{t("mirror.elapsed", { duration: formatDuration(run().started_at, run().finished_at) })}</p>
+                          <p>
+                            {t("mirror.elapsed", {
+                              duration: formatDuration(run().started_at, run().finished_at),
+                            })}
+                          </p>
                         </div>
                       </div>
 
@@ -582,12 +614,12 @@ export default function Mirror() {
                           {run().current_tag
                             ? t("mirror.currentTag", { tag: run().current_tag ?? "" })
                             : t("mirror.updated", {
-                                time: formatAgo(run().updated_at ?? run().finished_at ?? run().started_at),
+                                time: formatAgo(
+                                  run().updated_at ?? run().finished_at ?? run().started_at,
+                                ),
                               })}
                         </p>
-                        <p>
-                          {t("mirror.failures", { count: (run().tags_failed ?? []).length })}
-                        </p>
+                        <p>{t("mirror.failures", { count: (run().tags_failed ?? []).length })}</p>
                       </div>
 
                       <div class="run-events">
@@ -606,7 +638,9 @@ export default function Mirror() {
                                   {event.kind}
                                 </span>
                                 <div>
-                                  <p>{event.tag ? `${event.tag} · ${event.message}` : event.message}</p>
+                                  <p>
+                                    {event.tag ? `${event.tag} · ${event.message}` : event.message}
+                                  </p>
                                   <span>{formatAgo(event.at)}</span>
                                 </div>
                               </div>
@@ -631,30 +665,130 @@ export default function Mirror() {
               <div class="form-group full">
                 <label>{t("common.type")}</label>
                 <div class="segmented">
-                  <button type="button" class={form().type === "scheduled" ? "active" : ""} onClick={() => setForm({ ...form(), type: "scheduled" })}>{t("mirror.scheduled")}</button>
-                  <button type="button" class={form().type === "manual" ? "active" : ""} onClick={() => setForm({ ...form(), type: "manual" })}>{t("common.manual")}</button>
+                  <button
+                    type="button"
+                    class={form().type === "scheduled" ? "active" : ""}
+                    onClick={() => setForm({ ...form(), type: "scheduled" })}
+                  >
+                    {t("mirror.scheduled")}
+                  </button>
+                  <button
+                    type="button"
+                    class={form().type === "manual" ? "active" : ""}
+                    onClick={() => setForm({ ...form(), type: "manual" })}
+                  >
+                    {t("common.manual")}
+                  </button>
                 </div>
               </div>
-              <Show when={form().type === "scheduled"} fallback={<p class="hint full">{t("mirror.manualHint")}</p>}>
+              <Show
+                when={form().type === "scheduled"}
+                fallback={<p class="hint full">{t("mirror.manualHint")}</p>}
+              >
                 <div class="form-group full">
                   <label>{t("mirror.crontab")}</label>
-                  <input value={form().schedule} placeholder="*/30 * * * *" onInput={(e) => setForm({ ...form(), schedule: e.currentTarget.value })} />
+                  <input
+                    value={form().schedule}
+                    placeholder="*/30 * * * *"
+                    onInput={(e) => setForm({ ...form(), schedule: e.currentTarget.value })}
+                  />
                 </div>
               </Show>
-              <div class="form-group"><label>{t("common.id")}</label><input value={form().id} onInput={(e) => setForm({ ...form(), id: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("mirror.direction")}</label><select value={form().direction} onChange={(e) => setForm({ ...form(), direction: e.currentTarget.value as MirrorDirection })}><option value="pull">{t("mirror.direction.pull")}</option><option value="push">{t("mirror.direction.push")}</option></select></div>
-              <div class="form-group"><label>{t("mirror.localPrefix")}</label><input value={form().local_prefix} onInput={(e) => setForm({ ...form(), local_prefix: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("mirror.upstreamRegistry")}</label><input value={form().upstream_registry} onInput={(e) => setForm({ ...form(), upstream_registry: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("mirror.upstreamPrefix")}</label><input value={form().upstream_prefix} onInput={(e) => setForm({ ...form(), upstream_prefix: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("mirror.strategy")}</label><select value={form().strategy_type} onChange={(e) => setForm({ ...form(), strategy_type: e.currentTarget.value as RuleForm["strategy_type"] })}><option value="all">{t("mirror.allTags")}</option><option value="latest">{t("mirror.latestN")}</option><option value="pattern">{t("mirror.tagPattern")}</option></select></div>
+              <div class="form-group">
+                <label>{t("common.id")}</label>
+                <input
+                  value={form().id}
+                  onInput={(e) => setForm({ ...form(), id: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("mirror.direction")}</label>
+                <select
+                  value={form().direction}
+                  onChange={(e) =>
+                    setForm({ ...form(), direction: e.currentTarget.value as MirrorDirection })
+                  }
+                >
+                  <option value="pull">{t("mirror.direction.pull")}</option>
+                  <option value="push">{t("mirror.direction.push")}</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>{t("mirror.localPrefix")}</label>
+                <input
+                  value={form().local_prefix}
+                  onInput={(e) => setForm({ ...form(), local_prefix: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("mirror.upstreamRegistry")}</label>
+                <input
+                  value={form().upstream_registry}
+                  onInput={(e) => setForm({ ...form(), upstream_registry: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("mirror.upstreamPrefix")}</label>
+                <input
+                  value={form().upstream_prefix}
+                  onInput={(e) => setForm({ ...form(), upstream_prefix: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("mirror.strategy")}</label>
+                <select
+                  value={form().strategy_type}
+                  onChange={(e) =>
+                    setForm({
+                      ...form(),
+                      strategy_type: e.currentTarget.value as RuleForm["strategy_type"],
+                    })
+                  }
+                >
+                  <option value="all">{t("mirror.allTags")}</option>
+                  <option value="latest">{t("mirror.latestN")}</option>
+                  <option value="pattern">{t("mirror.tagPattern")}</option>
+                </select>
+              </div>
               <Show when={form().strategy_type === "latest"}>
-                <div class="form-group"><label>{t("mirror.count")}</label><input type="number" value={form().latest_count} onInput={(e) => setForm({ ...form(), latest_count: Number(e.currentTarget.value) || 1 })} /></div>
+                <div class="form-group">
+                  <label>{t("mirror.count")}</label>
+                  <input
+                    type="number"
+                    value={form().latest_count}
+                    onInput={(e) =>
+                      setForm({ ...form(), latest_count: Number(e.currentTarget.value) || 1 })
+                    }
+                  />
+                </div>
               </Show>
               <Show when={form().strategy_type === "pattern"}>
-                <div class="form-group"><label>{t("mirror.glob")}</label><input value={form().pattern} placeholder="v2.*" onInput={(e) => setForm({ ...form(), pattern: e.currentTarget.value })} /></div>
+                <div class="form-group">
+                  <label>{t("mirror.glob")}</label>
+                  <input
+                    value={form().pattern}
+                    placeholder="v2.*"
+                    onInput={(e) => setForm({ ...form(), pattern: e.currentTarget.value })}
+                  />
+                </div>
               </Show>
-              <div class="form-group"><label>{t("common.username")}</label><input value={form().username} autocomplete="off" onInput={(e) => setForm({ ...form(), username: e.currentTarget.value })} /></div>
-              <div class="form-group"><label>{t("common.password")}</label><input type="password" value={form().password} autocomplete="new-password" onInput={(e) => setForm({ ...form(), password: e.currentTarget.value })} /></div>
+              <div class="form-group">
+                <label>{t("common.username")}</label>
+                <input
+                  value={form().username}
+                  autocomplete="off"
+                  onInput={(e) => setForm({ ...form(), username: e.currentTarget.value })}
+                />
+              </div>
+              <div class="form-group">
+                <label>{t("common.password")}</label>
+                <input
+                  type="password"
+                  value={form().password}
+                  autocomplete="new-password"
+                  onInput={(e) => setForm({ ...form(), password: e.currentTarget.value })}
+                />
+              </div>
               <div class="form-group full advanced">
                 <h3>{t("mirror.advancedNetwork")}</h3>
                 <div class="form-grid">
@@ -662,7 +796,13 @@ export default function Mirror() {
                     <input
                       type="checkbox"
                       checked={form().plain_http}
-                      onChange={(e) => setForm({ ...form(), plain_http: e.currentTarget.checked, insecure_tls: e.currentTarget.checked ? false : form().insecure_tls })}
+                      onChange={(e) =>
+                        setForm({
+                          ...form(),
+                          plain_http: e.currentTarget.checked,
+                          insecure_tls: e.currentTarget.checked ? false : form().insecure_tls,
+                        })
+                      }
                     />
                     <span>{t("mirror.plainHttp")}</span>
                   </label>
@@ -670,23 +810,73 @@ export default function Mirror() {
                     <input
                       type="checkbox"
                       checked={form().insecure_tls}
-                      onChange={(e) => setForm({ ...form(), insecure_tls: e.currentTarget.checked, plain_http: e.currentTarget.checked ? false : form().plain_http })}
+                      onChange={(e) =>
+                        setForm({
+                          ...form(),
+                          insecure_tls: e.currentTarget.checked,
+                          plain_http: e.currentTarget.checked ? false : form().plain_http,
+                        })
+                      }
                     />
                     <span>{t("mirror.insecureTls")}</span>
                   </label>
-                  <div class="form-group"><label>{t("mirror.outboundProxy")}</label><select value={form().proxy_protocol} onChange={(e) => setForm({ ...form(), proxy_protocol: e.currentTarget.value as OutboundProxyProtocol })}><option value="none">{t("common.direct")}</option><option value="http">HTTP</option><option value="socks4">SOCKS4</option><option value="socks5">SOCKS5</option></select></div>
+                  <div class="form-group">
+                    <label>{t("mirror.outboundProxy")}</label>
+                    <select
+                      value={form().proxy_protocol}
+                      onChange={(e) =>
+                        setForm({
+                          ...form(),
+                          proxy_protocol: e.currentTarget.value as OutboundProxyProtocol,
+                        })
+                      }
+                    >
+                      <option value="none">{t("common.direct")}</option>
+                      <option value="http">HTTP</option>
+                      <option value="socks4">SOCKS4</option>
+                      <option value="socks5">SOCKS5</option>
+                    </select>
+                  </div>
                   <Show when={form().proxy_protocol !== "none"}>
-                    <div class="form-group"><label>{t("mirror.proxyUrl")}</label><input value={form().proxy_url} placeholder="proxy.internal:8080" onInput={(e) => setForm({ ...form(), proxy_url: e.currentTarget.value })} /></div>
-                    <div class="form-group"><label>{t("mirror.proxyUsername")}</label><input value={form().proxy_username} onInput={(e) => setForm({ ...form(), proxy_username: e.currentTarget.value })} /></div>
-                    <div class="form-group"><label>{t("mirror.proxyPassword")}</label><input type="password" value={form().proxy_password} onInput={(e) => setForm({ ...form(), proxy_password: e.currentTarget.value })} /></div>
+                    <div class="form-group">
+                      <label>{t("mirror.proxyUrl")}</label>
+                      <input
+                        value={form().proxy_url}
+                        placeholder="proxy.internal:8080"
+                        onInput={(e) => setForm({ ...form(), proxy_url: e.currentTarget.value })}
+                      />
+                    </div>
+                    <div class="form-group">
+                      <label>{t("mirror.proxyUsername")}</label>
+                      <input
+                        value={form().proxy_username}
+                        onInput={(e) =>
+                          setForm({ ...form(), proxy_username: e.currentTarget.value })
+                        }
+                      />
+                    </div>
+                    <div class="form-group">
+                      <label>{t("mirror.proxyPassword")}</label>
+                      <input
+                        type="password"
+                        value={form().proxy_password}
+                        onInput={(e) =>
+                          setForm({ ...form(), proxy_password: e.currentTarget.value })
+                        }
+                      />
+                    </div>
                   </Show>
                 </div>
                 <p class="hint">{t("mirror.httpsDeferred")}</p>
               </div>
             </div>
             <div class="modal-actions">
-              <button class="btn" onClick={() => setShowForm(false)}>{t("common.cancel")}</button>
-              <button class="btn btn-primary" disabled={saving()} onClick={saveRule}>{saving() ? t("common.creating") : t("mirror.create")}</button>
+              <button class="btn" onClick={() => setShowForm(false)}>
+                {t("common.cancel")}
+              </button>
+              <button class="btn btn-primary" disabled={saving()} onClick={saveRule}>
+                {saving() ? t("common.creating") : t("mirror.create")}
+              </button>
             </div>
           </div>
         </div>
@@ -699,8 +889,12 @@ export default function Mirror() {
               <h2>{t("mirror.deleteTitle", { id: id() })}</h2>
               <p class="warning">{t("mirror.deleteWarning")}</p>
               <div class="modal-actions">
-                <button class="btn" onClick={() => setDeleteId(null)}>{t("common.cancel")}</button>
-                <button class="btn btn-danger" onClick={() => confirmDelete(id())}>{t("common.confirmDelete")}</button>
+                <button class="btn" onClick={() => setDeleteId(null)}>
+                  {t("common.cancel")}
+                </button>
+                <button class="btn btn-danger" onClick={() => confirmDelete(id())}>
+                  {t("common.confirmDelete")}
+                </button>
               </div>
             </div>
           </div>

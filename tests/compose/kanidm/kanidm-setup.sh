@@ -162,15 +162,15 @@ echo "  redirect/landing mapping verified"
 echo "=== Configuring scopemaps ==="
 $CURL -f -H "$AUTH" \
   -H "Content-Type: application/json" \
-  -d '["openid","profile","email","oci_admin"]' \
+  -d '["openid","profile","email","groups","oci_admin"]' \
   "$KANIDM_URL/v1/oauth2/layerhouse/_scopemap/registry_admins" -X POST >/dev/null 2>&1 || true
-echo "  registry_admins -> openid, profile, email, oci_admin"
+echo "  registry_admins -> openid, profile, email, groups, oci_admin"
 
 $CURL -f -H "$AUTH" \
   -H "Content-Type: application/json" \
-  -d '["openid","profile","email","oci_push","oci_pull"]' \
+  -d '["openid","profile","email","groups","oci_push","oci_pull"]' \
   "$KANIDM_URL/v1/oauth2/layerhouse/_scopemap/registry_developers" -X POST >/dev/null 2>&1 || true
-echo "  registry_developers -> openid, profile, email, oci_push, oci_pull"
+echo "  registry_developers -> openid, profile, email, groups, oci_push, oci_pull"
 
 echo "=== Getting client secret ==="
 SECRET_RESP=$($CURL -f -H "$AUTH" \

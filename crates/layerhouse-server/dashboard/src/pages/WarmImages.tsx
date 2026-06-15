@@ -1,15 +1,5 @@
-import {
-  createEffect,
-  createSignal,
-  For,
-  onCleanup,
-  Show,
-} from "solid-js";
-import {
-  fetchWarmImages,
-  createWarmImage,
-  deleteWarmImage,
-} from "../lib/api";
+import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { fetchWarmImages, createWarmImage, deleteWarmImage } from "../lib/api";
 import type { WarmImage } from "../lib/types";
 import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
@@ -38,9 +28,7 @@ export default function WarmImages() {
       setError(null);
       setErrorCount(0);
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Failed to fetch warm images"
-      );
+      setError(e instanceof Error ? e.message : "Failed to fetch warm images");
       setErrorCount((c) => c + 1);
     } finally {
       setLoading(false);
@@ -74,20 +62,12 @@ export default function WarmImages() {
       await deleteWarmImage(id);
       await load();
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Failed to delete warm image"
-      );
+      setError(e instanceof Error ? e.message : "Failed to delete warm image");
     }
   }
 
   if (errorCount() >= 3) {
-    return (
-      <ErrorBanner
-        message={error() ?? "Unknown error"}
-        onRetry={load}
-        fullPage
-      />
-    );
+    return <ErrorBanner message={error() ?? "Unknown error"} onRetry={load} fullPage />;
   }
 
   return (
@@ -140,10 +120,7 @@ export default function WarmImages() {
                     </td>
                     <td>{img.interval_secs}</td>
                     <td>
-                      <button
-                        class="btn btn-danger"
-                        onClick={() => handleDelete(img.id)}
-                      >
+                      <button class="btn btn-danger" onClick={() => handleDelete(img.id)}>
                         Delete
                       </button>
                     </td>
@@ -164,9 +141,7 @@ export default function WarmImages() {
               <input
                 type="text"
                 value={form().id}
-                onInput={(e) =>
-                  setForm({ ...form(), id: e.currentTarget.value })
-                }
+                onInput={(e) => setForm({ ...form(), id: e.currentTarget.value })}
               />
             </div>
             <div class="form-group">
@@ -174,9 +149,7 @@ export default function WarmImages() {
               <input
                 type="text"
                 value={form().image}
-                onInput={(e) =>
-                  setForm({ ...form(), image: e.currentTarget.value })
-                }
+                onInput={(e) => setForm({ ...form(), image: e.currentTarget.value })}
               />
             </div>
             <div class="form-group">
@@ -213,11 +186,7 @@ export default function WarmImages() {
               <button class="btn" onClick={() => setShowForm(false)}>
                 Cancel
               </button>
-              <button
-                class="btn btn-primary"
-                disabled={saving()}
-                onClick={handleSave}
-              >
+              <button class="btn btn-primary" disabled={saving()} onClick={handleSave}>
                 {saving() ? "Saving..." : "Save"}
               </button>
             </div>

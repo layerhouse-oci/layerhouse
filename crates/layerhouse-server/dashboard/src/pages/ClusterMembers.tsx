@@ -56,13 +56,7 @@ export default function ClusterMembers() {
   }
 
   if (errorCount() >= 3) {
-    return (
-      <ErrorBanner
-        message={error() ?? "Unknown error"}
-        onRetry={load}
-        fullPage
-      />
-    );
+    return <ErrorBanner message={error() ?? "Unknown error"} onRetry={load} fullPage />;
   }
 
   return (
@@ -89,9 +83,7 @@ export default function ClusterMembers() {
         <>
           {status() && (
             <div class="card">
-              <div class="card-header">
-                Voters ({status()!.voters.length})
-              </div>
+              <div class="card-header">Voters ({status()!.voters.length})</div>
               <table>
                 <thead>
                   <tr>
@@ -115,10 +107,7 @@ export default function ClusterMembers() {
                       <td>{node.addr}</td>
                       <td>Voter</td>
                       <td>
-                        <button
-                          class="btn btn-danger"
-                          onClick={() => handleLeave(node.id)}
-                        >
+                        <button class="btn btn-danger" onClick={() => handleLeave(node.id)}>
                           Remove
                         </button>
                       </td>
@@ -131,9 +120,7 @@ export default function ClusterMembers() {
 
           {status() && status()!.learners.length > 0 && (
             <div class="card">
-              <div class="card-header">
-                Learners ({status()!.learners.length})
-              </div>
+              <div class="card-header">Learners ({status()!.learners.length})</div>
               <table>
                 <thead>
                   <tr>
@@ -145,7 +132,9 @@ export default function ClusterMembers() {
                 <tbody>
                   {status()!.learners.map((node) => (
                     <tr>
-                      <td><code>{node.id}</code></td>
+                      <td>
+                        <code>{node.id}</code>
+                      </td>
                       <td>{node.addr}</td>
                       <td>Learner</td>
                     </tr>
@@ -179,9 +168,7 @@ export default function ClusterMembers() {
               <input
                 type="text"
                 value={joinForm().addr}
-                onInput={(e) =>
-                  setJoinForm({ ...joinForm(), addr: e.currentTarget.value })
-                }
+                onInput={(e) => setJoinForm({ ...joinForm(), addr: e.currentTarget.value })}
               />
             </div>
             <div class="modal-actions">
