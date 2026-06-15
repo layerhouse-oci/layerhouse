@@ -10,20 +10,11 @@ import ErrorBanner from "../components/ErrorBanner";
 import Pagination from "../components/Pagination";
 import Access from "./Access";
 
-type ActionBadge = "badge-blue" | "badge-teal" | "badge-amber" | "badge-purple" | "badge-gray";
-
-const ACCESS_BADGE: Record<string, ActionBadge> = {
-  pull: "badge-blue",
-  create: "badge-teal",
-  update: "badge-amber",
-  delete: "badge-purple",
-};
-
-const GRANT_BADGE: Record<string, string> = {
-  personal: "badge-blue",
-  group_grant: "badge-teal",
-  public: "badge-gray",
-};
+function repoInitials(name: string): string {
+  const segment = name.split("/").filter(Boolean).pop() ?? name;
+  const letters = segment.replace(/[^a-zA-Z0-9]/g, "");
+  return (letters.slice(0, 2) || "OC").toUpperCase();
+}
 
 export default function Repositories() {
   const navigate = useNavigate();
@@ -103,62 +94,79 @@ export default function Repositories() {
     }
   }
 
+  const FILTERS: { value: RepositoryFilter; label: string }[] = [
+    { value: "all", label: t("repos.filter.all") },
+    { value: "mine", label: t("repos.filter.mine") },
+    { value: "shared", label: t("repos.filter.shared") },
+    { value: "public", label: t("repos.filter.public") },
+  ];
+
   if (errorCount() >= 3) {
     return <ErrorBanner message={error() ?? t("common.unknown")} onRetry={load} fullPage />;
   }
 
   return (
-    <div>
-      <div class="page-header">
+    <div class="repos-page">
+      <section class="hero glass">
         <div>
-          <p class="eyebrow">{t("repos.eyebrow")}</p>
+          <p class="eyebrow">
+            <span class="status-dot" aria-hidden="true" />
+            {t("repos.heroEyebrow")}
+          </p>
           <h1>{t("repos.title")}</h1>
+          <p class="hero-copy">{t("repos.heroCopy")}</p>
         </div>
-        <span class="freshness">
-          {lastUpdated() ? `${t("common.updated")} ${formatAgo(lastUpdated()! / 1000)}` : ""}
-        </span>
-      </div>
+      </section>
 
       {error() && <ErrorBanner message={error()!} onRetry={load} />}
       <Show when={toast()}>{(message) => <div class="toast">{message()}</div>}</Show>
 
-      <div class="card">
+      <section class="panel glass">
         <div class="toolbar">
-          <input
-            type="search"
-            placeholder={t("repos.search")}
-            value={search()}
-            onInput={(e) => setSearch(e.currentTarget.value)}
-          />
-          <div class="segmented">
-            <button class={filter() === "all" ? "active" : ""} onClick={() => setFilter("all")}>
-              {t("repos.filter.all")}
-            </button>
-            <button class={filter() === "mine" ? "active" : ""} onClick={() => setFilter("mine")}>
-              {t("repos.filter.mine")}
-            </button>
-            <button
-              class={filter() === "shared" ? "active" : ""}
-              onClick={() => setFilter("shared")}
-            >
-              {t("repos.filter.shared")}
-            </button>
-            <button
-              class={filter() === "public" ? "active" : ""}
-              onClick={() => setFilter("public")}
-            >
-              {t("repos.filter.public")}
+          <div class="toolbar-title">
+            <p class="section-label">{t("repos.catalog")}</p>
+            <h2>{t("repos.eyebrow")}</h2>
+          </div>
+          <div class="list-controls">
+            <div class="search" role="search">
+              <input
+                type="search"
+                aria-label={t("repos.search")}
+                placeholder={t("repos.search")}
+                value={search()}
+                onInput={(e) => setSearch(e.currentTarget.value)}
+              />
+            </div>
+            <div class="filter-group">
+              <For each={FILTERS}>
+                {(item) => (
+                  <button
+                    type="button"
+                    class={`filter${filter() === item.value ? " active" : ""}`}
+                    onClick={() => setFilter(item.value)}
+                  >
+                    {item.label}
+                  </button>
+                )}
+              </For>
+            </div>
+            <div class="sort-control">
+              <label for="repo-sort">{t("repos.sort")}</label>
+              <select
+                id="repo-sort"
+                value={sort()}
+                onChange={(e) => setSort(e.currentTarget.value)}
+              >
+                <option value="updated_desc">{t("repos.sort.recent")}</option>
+                <option value="updated_asc">{t("repos.sort.oldest")}</option>
+                <option value="name_asc">{t("repos.sort.name")}</option>
+                <option value="tag_count_desc">{t("repos.sort.tags")}</option>
+              </select>
+            </div>
+            <button class="action" type="button" onClick={() => setShowTokens(true)}>
+              {t("repos.manageTokens")}
             </button>
           </div>
-          <select value={sort()} onChange={(e) => setSort(e.currentTarget.value)}>
-            <option value="updated_desc">{t("repos.sort.recent")}</option>
-            <option value="updated_asc">{t("repos.sort.oldest")}</option>
-            <option value="name_asc">{t("repos.sort.name")}</option>
-            <option value="tag_count_desc">{t("repos.sort.tags")}</option>
-          </select>
-          <button class="btn" onClick={() => setShowTokens(true)}>
-            {t("repos.manageTokens")}
-          </button>
         </div>
 
         {loading() ? (
@@ -169,16 +177,13 @@ export default function Repositories() {
             description={search() ? t("repos.empty.filteredDesc") : t("repos.emptyDesc")}
           />
         ) : (
-          <>
+          <div class="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>{t("common.repository")}</th>
                   <th>{t("common.tags")}</th>
-                  <th>{t("common.digests")}</th>
-                  <th>{t("common.size")}</th>
                   <th>{t("common.updated")}</th>
-                  <th>{t("repos.colAccess")}</th>
                   <th>{t("common.actions")}</th>
                 </tr>
               </thead>
@@ -187,48 +192,37 @@ export default function Repositories() {
                   {(repo) => (
                     <tr>
                       <td>
-                        <button
-                          class="link-button repo-name"
-                          onClick={() => navigate(`/repos/${repo.name}`)}
-                        >
-                          {repo.name}
+                        <button class="repo-name" onClick={() => navigate(`/repos/${repo.name}`)}>
+                          <span class="repo-icon" aria-hidden="true">
+                            {repoInitials(repo.name)}
+                          </span>
+                          <span>{repo.name}</span>
                         </button>
                       </td>
-                      <td>{repo.tag_count}</td>
-                      <td>{repo.manifest_count}</td>
-                      <td>{formatBytes(repo.stored_size_bytes)}</td>
-                      <td>{formatAgo(repo.last_modified)}</td>
-                      <td>
-                        <div class="repo-access-badges">
-                          <span class={`badge ${ACCESS_BADGE[repo.access_level] ?? "badge-gray"}`}>
-                            {t(`access.action.${repo.access_level}`)}
-                          </span>
-                          <Show when={repo.max_grantable !== repo.access_level}>
-                            <span class="badge badge-gray">
-                              {t("repos.maxGrantable", {
-                                action: t(`access.action.${repo.max_grantable}`),
-                              })}
-                            </span>
-                          </Show>
-                          <span class={`badge ${GRANT_BADGE[repo.grant_source] ?? "badge-gray"}`}>
-                            {t(`access.grantSource.${repo.grant_source}`)}
-                          </span>
-                        </div>
+                      <td class="value">{repo.tag_count}</td>
+                      <td class="muted">
+                        <span class="mono">{formatAgo(repo.last_modified)}</span>
                       </td>
                       <td>
                         <div class="row-actions">
-                          <button class="btn btn-compact" onClick={() => copyRepo(repo.name)}>
+                          <button
+                            class="action copy"
+                            type="button"
+                            onClick={() => copyRepo(repo.name)}
+                          >
                             {copied() === repo.name ? t("common.copied") : t("common.copy")}
                           </button>
                           <button
-                            class="btn btn-compact"
+                            class="action"
+                            type="button"
                             onClick={() => navigate(`/repos/${repo.name}`)}
                           >
                             {t("common.details")}
                           </button>
                           <Show when={repo.access_level === "delete"}>
                             <button
-                              class="btn btn-compact btn-danger"
+                              class="action danger"
+                              type="button"
                               onClick={() => setPendingDelete(repo)}
                             >
                               {t("common.delete")}
@@ -241,38 +235,69 @@ export default function Repositories() {
                 </For>
               </tbody>
             </table>
-            <Pagination shown={repos().length} total={total()} />
-          </>
+            <div class="table-footer">
+              <Pagination shown={repos().length} total={total()} />
+            </div>
+          </div>
         )}
-      </div>
+      </section>
+
+      <footer class="footer">
+        <span>
+          <strong>{t("common.updated")}:</strong>{" "}
+          {lastUpdated() ? formatAgo(lastUpdated()! / 1000) : "—"}
+        </span>
+        <span>{t("app.productName")}</span>
+      </footer>
 
       <Show when={pendingDelete()}>
         {(repo) => (
-          <div class="modal-overlay" onClick={() => setPendingDelete(null)}>
-            <div class="modal" onClick={(e) => e.stopPropagation()}>
-              <h2>{t("repos.deleteTitle", { name: repo().name })}</h2>
-              <p class="warning">{t("repos.deleteWarning")}</p>
-              <div class="fact-grid">
+          <div class="modal-backdrop" onClick={() => setPendingDelete(null)}>
+            <div class="modal glass" onClick={(e) => e.stopPropagation()}>
+              <div class="modal-head">
                 <div>
-                  <span>{t("repos.manifests")}</span>
-                  <strong>{repo().manifest_count}</strong>
+                  <p class="section-label">{t("repos.deleteEyebrow")}</p>
+                  <h2 class="modal-title">{t("repos.deleteTitle", { name: repo().name })}</h2>
                 </div>
-                <div>
-                  <span>{t("common.tags")}</span>
-                  <strong>{repo().tag_count}</strong>
-                </div>
-                <div>
-                  <span>{t("repos.storedSize")}</span>
-                  <strong>{formatBytes(repo().stored_size_bytes)}</strong>
-                </div>
+                <button
+                  class="close"
+                  type="button"
+                  aria-label={t("common.cancel")}
+                  onClick={() => setPendingDelete(null)}
+                />
               </div>
-              <div class="modal-actions">
-                <button class="btn" disabled={deleting()} onClick={() => setPendingDelete(null)}>
-                  {t("common.cancel")}
-                </button>
-                <button class="btn btn-danger" disabled={deleting()} onClick={confirmDelete}>
-                  {deleting() ? t("common.deleting") : t("common.confirmDelete")}
-                </button>
+              <div class="modal-body">
+                <p class="warning">{t("repos.deleteWarning")}</p>
+                <div class="delete-facts">
+                  <div class="delete-fact">
+                    <span>{t("repos.manifests")}</span>
+                    <strong>{repo().manifest_count}</strong>
+                  </div>
+                  <div class="delete-fact">
+                    <span>{t("common.tags")}</span>
+                    <strong>{repo().tag_count}</strong>
+                  </div>
+                  <div class="delete-fact">
+                    <span>{t("repos.storedSize")}</span>
+                    <strong>{formatBytes(repo().stored_size_bytes)}</strong>
+                  </div>
+                </div>
+                <div class="modal-actions">
+                  <button
+                    class="action"
+                    disabled={deleting()}
+                    onClick={() => setPendingDelete(null)}
+                  >
+                    {t("common.cancel")}
+                  </button>
+                  <button
+                    class="action confirm-delete"
+                    disabled={deleting()}
+                    onClick={confirmDelete}
+                  >
+                    {deleting() ? t("common.deleting") : t("common.confirmDelete")}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
