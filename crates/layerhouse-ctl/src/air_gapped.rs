@@ -22,7 +22,7 @@ const DEFAULT_STATEFULSET_NAME: &str = "layerhouse";
 const DEFAULT_HEADLESS_SERVICE: &str = "layerhouse-headless";
 const DEFAULT_REPLICAS: u16 = 3;
 const DEFAULT_OUT: &str = "./layerhouse-airgap";
-const DEFAULT_IMAGE_REPOSITORY: &str = "ghcr.io/adamcavendish/layerhouse-server";
+const DEFAULT_IMAGE_REPOSITORY: &str = "ghcr.io/layerhouse-oci/layerhouse-server";
 const DEFAULT_IMAGE_TAG: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Subcommand)]

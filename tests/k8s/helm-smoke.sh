@@ -32,7 +32,7 @@ chart_app_version() {
     awk -F: '/^appVersion:/ { gsub(/[ "]/, "", $2); print $2; exit }' "$CHART/Chart.yaml"
 }
 
-SERVER_IMAGE_REPOSITORY="${SERVER_IMAGE_REPOSITORY:-ghcr.io/adamcavendish/layerhouse-server}"
+SERVER_IMAGE_REPOSITORY="${SERVER_IMAGE_REPOSITORY:-ghcr.io/layerhouse-oci/layerhouse-server}"
 SERVER_IMAGE_TAG="${SERVER_IMAGE_TAG:-$(chart_app_version)}"
 if [ -z "$SERVER_IMAGE_TAG" ]; then
     echo "ERROR: unable to resolve SERVER_IMAGE_TAG from $CHART/Chart.yaml" >&2

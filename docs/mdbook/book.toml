@@ -8,8 +8,8 @@ title = "layerhouse Documentation"
 create-missing = true
 
 [output.html]
-edit-url-template = "https://github.com/adamcavendish/layerhouse/edit/master/docs/mdbook/{path}"
-git-repository-url = "https://github.com/adamcavendish/layerhouse"
+edit-url-template = "https://github.com/layerhouse-oci/layerhouse/edit/main/docs/mdbook/{path}"
+git-repository-url = "https://github.com/layerhouse-oci/layerhouse"
 
 [preprocessor.mermaid]
 command = "mdbook-mermaid"

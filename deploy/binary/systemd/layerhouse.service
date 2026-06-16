@@ -1,6 +1,6 @@
 [Unit]
 Description=layerhouse OCI container registry
-Documentation=https://github.com/adamcavendish/layerhouse
+Documentation=https://github.com/layerhouse-oci/layerhouse
 After=network-online.target
 Wants=network-online.target
 

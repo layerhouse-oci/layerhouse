@@ -45,7 +45,7 @@ services:
       "
 
   layerhouse-0:
-    image: ghcr.io/adamcavendish/layerhouse-server:latest
+    image: ghcr.io/layerhouse-oci/layerhouse-server:latest
     hostname: layerhouse-0
     ports:
       - "5050:5050"
@@ -59,7 +59,7 @@ services:
         condition: service_completed_successfully
 
   layerhouse-1:
-    image: ghcr.io/adamcavendish/layerhouse-server:latest
+    image: ghcr.io/layerhouse-oci/layerhouse-server:latest
     hostname: layerhouse-1
     ports:
       - "5051:5050"
@@ -73,7 +73,7 @@ services:
         condition: service_completed_successfully
 
   layerhouse-2:
-    image: ghcr.io/adamcavendish/layerhouse-server:latest
+    image: ghcr.io/layerhouse-oci/layerhouse-server:latest
     hostname: layerhouse-2
     ports:
       - "5052:5050"

@@ -215,7 +215,7 @@ jobs:
     env:
       LAYERHOUSE_SKIP_DASHBOARD: ""
       REGISTRY: ghcr.io
-      IMAGE_NAME: adamcavendish/layerhouse-server
+      IMAGE_NAME: layerhouse-oci/layerhouse-server
     steps:
       - uses: actions/checkout@v6
 
@@ -312,7 +312,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REGISTRY: ghcr.io
-      IMAGE_NAME: adamcavendish/layerhouse-server
+      IMAGE_NAME: layerhouse-oci/layerhouse-server
     steps:
       - name: Download digests
         uses: actions/download-artifact@v8
