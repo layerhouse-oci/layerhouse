@@ -2061,6 +2061,127 @@ label {
   min-width: 620px;
 }
 
+.access-grants-panel {
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-solid) 78%, transparent);
+}
+
+.access-grants-panel h3,
+.access-audit-log h3 {
+  margin: 0 0 6px;
+  color: var(--strong);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.access-grants-table {
+  margin-top: 12px;
+  overflow-x: auto;
+}
+
+.access-grants-table table {
+  min-width: 640px;
+}
+
+.access-grant-form {
+  display: grid;
+  gap: 16px;
+}
+
+.access-action-ladder {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--button-radius);
+  background: var(--control);
+}
+
+.access-action-ladder button {
+  min-height: 38px;
+  border: 0;
+  border-radius: var(--button-radius);
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.access-action-ladder button.active {
+  color: var(--strong);
+  background: var(--control-active);
+}
+
+.access-action-ladder button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.access-user-results {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.access-user-results button,
+.access-public-grant,
+.access-audit-event {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--surface-solid);
+  text-align: start;
+}
+
+.access-user-results button {
+  cursor: pointer;
+}
+
+.access-user-results button.active {
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue-soft) 55%, var(--surface-solid));
+}
+
+.access-user-results span,
+.access-public-grant span,
+.access-audit-event span,
+.access-audit-event p {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.access-public-grant {
+  background: color-mix(in srgb, var(--blue-soft) 30%, var(--surface-solid));
+}
+
+.access-audit-log {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.access-audit-event div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.access-audit-event p {
+  margin: 0;
+}
+
 .access-owner-cell {
   display: grid;
   gap: 3px;

@@ -72,6 +72,21 @@ pub async fn auth_middleware<M: MetadataStore, B: BlobStore>(
     };
 
     let credential = extract_credential(&req);
+    if credential.is_none()
+        && path.starts_with("/v2/")
+        && oci_action == Some(OciAction::Pull)
+        && matches!(*req.method(), http::Method::GET | http::Method::HEAD)
+    {
+        let repository = extract_repository_from_path(&path);
+        if !repository.is_empty()
+            && auth_service
+                .check_public_pull(&repository, &state.core.metadata)
+                .await
+                .is_ok()
+        {
+            return next.run(req).await;
+        }
+    }
     let uses_session_cookie = matches!(credential, Some(RequestCredential::SessionCookies(_)));
     let identity = match authenticate_request(auth_service, &state.core.metadata, credential).await
     {

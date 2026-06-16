@@ -206,6 +206,70 @@ export interface ReleaseNamespaceRequest {
   reason?: string | null;
 }
 
+export type NamespaceGrantGrantee =
+  | { kind: "group"; name: string }
+  | { kind: "user"; subject: string }
+  | { kind: "public" };
+
+export interface NamespaceGrant {
+  id: string;
+  namespace: string;
+  grantee: NamespaceGrantGrantee;
+  action: OciAction;
+  label: string;
+  created_by: string;
+  created_at: number;
+  updated_by: string;
+  updated_at: number;
+}
+
+export interface NamespaceGrantListResponse {
+  grants: NamespaceGrant[];
+}
+
+export interface PutNamespaceGrantRequest {
+  grantee: NamespaceGrantGrantee;
+  action: OciAction;
+  label?: string | null;
+  reason?: string | null;
+}
+
+export interface PatchNamespaceGrantRequest {
+  action: OciAction;
+  label?: string | null;
+  reason?: string | null;
+}
+
+export interface NamespaceGrantAuditEvent {
+  id: string;
+  namespace: string;
+  grant_id: string | null;
+  operation: "create" | "update" | "delete";
+  actor: string;
+  actor_label: string;
+  reason: string;
+  before: NamespaceGrant | null;
+  after: NamespaceGrant | null;
+  created_at: number;
+}
+
+export interface NamespaceGrantAuditListResponse {
+  audit: NamespaceGrantAuditEvent[];
+}
+
+export interface ObservedIdentity {
+  subject: string;
+  username: string | null;
+  display_name: string | null;
+  email: string | null;
+  groups: string[];
+  last_seen_at: number;
+}
+
+export interface ObservedIdentityListResponse {
+  users: ObservedIdentity[];
+}
+
 // ---- Mirror Rules ----
 
 export type MirrorDirection = "pull" | "push";

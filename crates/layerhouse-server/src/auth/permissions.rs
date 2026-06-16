@@ -180,7 +180,7 @@ impl PermissionResolver {
     }
 }
 
-fn group_matches(configured: &str, user_group: &str) -> bool {
+pub(crate) fn group_matches(configured: &str, user_group: &str) -> bool {
     if configured == user_group {
         return true;
     }

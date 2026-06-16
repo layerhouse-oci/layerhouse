@@ -20,13 +20,15 @@ use crate::oci::manifest::extract_referenced_digests;
 use crate::store::metadata::handle::{handle_of, is_handle_reserved, validate_handle};
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion,
-    ManifestEntry, ManifestSummary, MirrorRule, Namespace, PermissionRule, PersonalAccessToken,
-    ProxyCache, ReferrerEntry, ReleaseReason, ReleasedHandle, Repository, RepositorySummary,
-    SyncJob, SyncJobKind, SyncJobRun, SyncJobStatus, WarmImage,
-    clear_proxy_cache_tag_validations_for_cache, clear_proxy_cache_tag_validations_for_repository,
-    clear_proxy_cache_tag_validations_for_tag, get_proxy_cache_tag_validation, mirror_rule_job,
-    now_epoch, proxy_cache_warm_job, put_proxy_cache_tag_validation,
-    repository_manifest_size_bytes, repository_stored_size_bytes, sync_job_blocks_trigger,
+    ManifestEntry, ManifestSummary, MirrorRule, Namespace, NamespaceGrant,
+    NamespaceGrantAuditEvent, NamespaceGrantAuditOperation, NamespaceGrantGrantee,
+    ObservedIdentity, PermissionRule, PersonalAccessToken, ProxyCache, ReferrerEntry,
+    ReleaseReason, ReleasedHandle, Repository, RepositorySummary, SyncJob, SyncJobKind, SyncJobRun,
+    SyncJobStatus, WarmImage, clear_proxy_cache_tag_validations_for_cache,
+    clear_proxy_cache_tag_validations_for_repository, clear_proxy_cache_tag_validations_for_tag,
+    get_proxy_cache_tag_validation, mirror_rule_job, now_epoch, proxy_cache_warm_job,
+    put_proxy_cache_tag_validation, repository_manifest_size_bytes, repository_stored_size_bytes,
+    sync_job_blocks_trigger,
 };
 
 /// On-disk snapshot format version. The single source of truth for both the
@@ -86,6 +88,17 @@ pub struct StateMachineData {
     /// last-known owner even after the IdP-side label changes.
     #[serde(default)]
     pub released_handles: BTreeMap<String, ReleasedHandle>,
+    /// Namespace-scoped grants. Outer key is namespace handle, inner key is
+    /// grant id, so auth checks never scan unrelated namespaces.
+    #[serde(default)]
+    pub namespace_grants: BTreeMap<String, BTreeMap<String, NamespaceGrant>>,
+    /// Login-observed identities for one-off user grants. This intentionally
+    /// does not model a full IdP directory.
+    #[serde(default)]
+    pub observed_identities: BTreeMap<crate::auth::identity::Subject, ObservedIdentity>,
+    /// Durable grant-change audit, grouped by namespace.
+    #[serde(default)]
+    pub namespace_grant_audit: BTreeMap<String, Vec<NamespaceGrantAuditEvent>>,
 }
 
 pub struct StateMachine {
@@ -550,17 +563,28 @@ pub(crate) fn apply_namespace(
     let StateMachineData {
         namespaces,
         released_handles,
+        namespace_grants,
+        namespace_grant_audit,
+        observed_identities,
         manifests,
         tags,
         repositories,
         ..
     } = data;
-    apply_namespace_core(namespaces, released_handles, req, |handle| {
-        let prefix = format!("{handle}/");
-        any_key_with_prefix(manifests, &prefix)
-            || any_key_with_prefix(tags, &prefix)
-            || any_key_with_prefix(repositories, &prefix)
-    })
+    apply_namespace_core(
+        namespaces,
+        released_handles,
+        namespace_grants,
+        namespace_grant_audit,
+        observed_identities,
+        req,
+        |handle| {
+            let prefix = format!("{handle}/");
+            any_key_with_prefix(manifests, &prefix)
+                || any_key_with_prefix(tags, &prefix)
+                || any_key_with_prefix(repositories, &prefix)
+        },
+    )
 }
 
 /// Core claim / release / revoke logic, parameterized over the two namespace
@@ -574,6 +598,9 @@ pub(crate) fn apply_namespace(
 pub(crate) fn apply_namespace_core(
     namespaces: &mut BTreeMap<String, Namespace>,
     released_handles: &mut BTreeMap<String, ReleasedHandle>,
+    namespace_grants: &mut BTreeMap<String, BTreeMap<String, NamespaceGrant>>,
+    namespace_grant_audit: &mut BTreeMap<String, Vec<NamespaceGrantAuditEvent>>,
+    observed_identities: &mut BTreeMap<crate::auth::identity::Subject, ObservedIdentity>,
     req: NamespaceRequest,
     has_content: impl Fn(&str) -> bool,
 ) -> Result<NamespaceResponse, LayerhouseError> {
@@ -655,6 +682,7 @@ pub(crate) fn apply_namespace_core(
                 )));
             }
             let ns = namespaces.remove(&handle).expect("namespace just verified");
+            namespace_grants.remove(&handle);
             released_handles.insert(
                 handle.clone(),
                 ReleasedHandle {
@@ -674,6 +702,7 @@ pub(crate) fn apply_namespace_core(
                     "handle {handle:?} is not currently claimed"
                 )));
             };
+            namespace_grants.remove(&handle);
             released_handles.insert(
                 handle.clone(),
                 ReleasedHandle {
@@ -687,6 +716,120 @@ pub(crate) fn apply_namespace_core(
             );
             Ok(NamespaceResponse::Ok)
         }
+        NamespaceRequest::PutGrant {
+            mut grant,
+            actor_label,
+            reason,
+            audit_id,
+        } => {
+            validate_namespace_grant(namespaces, &grant)?;
+            let grants = namespace_grants.entry(grant.namespace.clone()).or_default();
+            let before = grants.get(&grant.id).cloned();
+            if let Some(existing) = &before {
+                grant.created_by = existing.created_by.clone();
+                grant.created_at = existing.created_at;
+            }
+            let operation = if before.is_some() {
+                NamespaceGrantAuditOperation::Update
+            } else {
+                NamespaceGrantAuditOperation::Create
+            };
+            grants.insert(grant.id.clone(), grant.clone());
+            namespace_grant_audit
+                .entry(grant.namespace.clone())
+                .or_default()
+                .push(NamespaceGrantAuditEvent {
+                    id: audit_id,
+                    namespace: grant.namespace.clone(),
+                    grant_id: Some(grant.id.clone()),
+                    operation,
+                    actor: grant.updated_by.clone(),
+                    actor_label,
+                    reason,
+                    before,
+                    after: Some(grant.clone()),
+                    created_at: grant.updated_at,
+                });
+            Ok(NamespaceResponse::Grant(grant))
+        }
+        NamespaceRequest::DeleteGrant {
+            handle,
+            grant_id,
+            actor,
+            actor_label,
+            reason,
+            now,
+            audit_id,
+        } => {
+            validate_handle(&handle)?;
+            if !namespaces.contains_key(&handle) {
+                return Err(LayerhouseError::NameUnknown(format!(
+                    "namespace {handle:?} is not currently claimed"
+                )));
+            }
+            let before = namespace_grants
+                .get_mut(&handle)
+                .and_then(|grants| grants.remove(&grant_id));
+            let should_remove_map = namespace_grants
+                .get(&handle)
+                .is_some_and(BTreeMap::is_empty);
+            if should_remove_map {
+                namespace_grants.remove(&handle);
+            }
+            if let Some(before) = before.clone() {
+                namespace_grant_audit
+                    .entry(handle.clone())
+                    .or_default()
+                    .push(NamespaceGrantAuditEvent {
+                        id: audit_id,
+                        namespace: handle,
+                        grant_id: Some(grant_id),
+                        operation: NamespaceGrantAuditOperation::Delete,
+                        actor,
+                        actor_label,
+                        reason,
+                        before: Some(before),
+                        after: None,
+                        created_at: now,
+                    });
+                Ok(NamespaceResponse::Bool(true))
+            } else {
+                Ok(NamespaceResponse::Bool(false))
+            }
+        }
+        NamespaceRequest::PutObservedIdentity { identity } => {
+            observed_identities.insert(identity.subject.clone(), identity);
+            Ok(NamespaceResponse::Ok)
+        }
+    }
+}
+
+fn validate_namespace_grant(
+    namespaces: &BTreeMap<String, Namespace>,
+    grant: &NamespaceGrant,
+) -> Result<(), LayerhouseError> {
+    validate_handle(&grant.namespace)?;
+    if !namespaces.contains_key(&grant.namespace) {
+        return Err(LayerhouseError::NameUnknown(format!(
+            "namespace {:?} is not currently claimed",
+            grant.namespace
+        )));
+    }
+    match &grant.grantee {
+        NamespaceGrantGrantee::Group { name } if name.trim().is_empty() => Err(
+            LayerhouseError::NameInvalid("group grant requires a group name".to_string()),
+        ),
+        NamespaceGrantGrantee::User { subject } if subject.as_str().trim().is_empty() => Err(
+            LayerhouseError::NameInvalid("user grant requires a subject".to_string()),
+        ),
+        NamespaceGrantGrantee::Public
+            if grant.action != crate::auth::permissions::OciAction::Pull =>
+        {
+            Err(LayerhouseError::Denied(
+                "public namespace grants are pull-only".to_string(),
+            ))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -1112,6 +1255,59 @@ impl StateMachineData {
     #[allow(dead_code)]
     pub fn list_namespaces(&self) -> Vec<Namespace> {
         self.namespaces.values().cloned().collect()
+    }
+
+    pub fn list_namespace_grants(&self, handle: &str) -> Vec<NamespaceGrant> {
+        self.namespace_grants
+            .get(handle)
+            .map(|grants| grants.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn get_namespace_grant(&self, handle: &str, grant_id: &str) -> Option<NamespaceGrant> {
+        self.namespace_grants
+            .get(handle)
+            .and_then(|grants| grants.get(grant_id))
+            .cloned()
+    }
+
+    pub fn list_namespace_grant_audit(&self, handle: &str) -> Vec<NamespaceGrantAuditEvent> {
+        self.namespace_grant_audit
+            .get(handle)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn search_observed_identities(&self, query: &str, limit: usize) -> Vec<ObservedIdentity> {
+        let query = query.trim().to_lowercase();
+        let mut identities: Vec<_> = self
+            .observed_identities
+            .values()
+            .filter(|identity| {
+                query.is_empty()
+                    || identity.subject.as_str().to_lowercase().contains(&query)
+                    || identity
+                        .username
+                        .as_deref()
+                        .is_some_and(|value| value.to_lowercase().contains(&query))
+                    || identity
+                        .display_name
+                        .as_deref()
+                        .is_some_and(|value| value.to_lowercase().contains(&query))
+                    || identity
+                        .email
+                        .as_deref()
+                        .is_some_and(|value| value.to_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect();
+        identities.sort_by(|a, b| {
+            b.last_seen_at
+                .cmp(&a.last_seen_at)
+                .then_with(|| a.subject.cmp(&b.subject))
+        });
+        identities.truncate(limit);
+        identities
     }
 
     // Consumed by the reclaim/reserved-handle flow in a follow-up.
@@ -1633,6 +1829,49 @@ mod tests {
                 created_at: 100,
             },
         );
+        let grant = NamespaceGrant {
+            id: "grant-1".to_string(),
+            namespace: "alice".to_string(),
+            grantee: NamespaceGrantGrantee::Group {
+                name: "team-a".to_string(),
+            },
+            action: crate::auth::permissions::OciAction::Create,
+            label: "team-a".to_string(),
+            created_by: Subject::new("subject-alice"),
+            created_at: 102,
+            updated_by: Subject::new("subject-alice"),
+            updated_at: 103,
+        };
+        data.namespace_grants
+            .entry("alice".to_string())
+            .or_default()
+            .insert(grant.id.clone(), grant.clone());
+        data.observed_identities.insert(
+            Subject::new("subject-ci"),
+            ObservedIdentity {
+                subject: Subject::new("subject-ci"),
+                username: Some("ci".to_string()),
+                display_name: Some("CI User".to_string()),
+                email: Some("ci@example.test".to_string()),
+                groups: vec!["team-a".to_string()],
+                last_seen_at: 104,
+            },
+        );
+        data.namespace_grant_audit
+            .entry("alice".to_string())
+            .or_default()
+            .push(NamespaceGrantAuditEvent {
+                id: "audit-1".to_string(),
+                namespace: "alice".to_string(),
+                grant_id: Some("grant-1".to_string()),
+                operation: NamespaceGrantAuditOperation::Create,
+                actor: Subject::new("subject-alice"),
+                actor_label: "alice".to_string(),
+                reason: "initial grant".to_string(),
+                before: None,
+                after: Some(grant),
+                created_at: 105,
+            });
         data.released_handles.insert(
             "bob".to_string(),
             ReleasedHandle {
@@ -1694,6 +1933,29 @@ mod tests {
             .expect("namespace preserved");
         assert_eq!(ns.owner_label, "alice");
         assert_eq!(ns.created_at, 100);
+
+        let grant = restored
+            .namespace_grants
+            .get("alice")
+            .and_then(|grants| grants.get("grant-1"))
+            .expect("grant preserved");
+        assert_eq!(grant.action, crate::auth::permissions::OciAction::Create);
+        assert!(matches!(
+            grant.grantee,
+            NamespaceGrantGrantee::Group { ref name } if name == "team-a"
+        ));
+
+        let observed = restored
+            .observed_identities
+            .get(&Subject::new("subject-ci"))
+            .expect("observed identity preserved");
+        assert_eq!(observed.email.as_deref(), Some("ci@example.test"));
+
+        let audit = restored
+            .namespace_grant_audit
+            .get("alice")
+            .expect("grant audit preserved");
+        assert_eq!(audit[0].reason, "initial grant");
 
         let released = restored
             .released_handles

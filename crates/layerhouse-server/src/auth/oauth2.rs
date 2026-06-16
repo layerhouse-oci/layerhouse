@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use crate::error::LayerhouseError;
 use crate::routes::AppState;
+use crate::store::metadata::{NamespaceStore, ObservedIdentity};
 
+use super::identity::Subject;
 use super::session::DashboardSession;
 
 const OAUTH2_COOKIE: &str = "layerhouse_oauth2";
@@ -105,7 +107,10 @@ pub async fn oauth2_callback<M, B>(
     axum::extract::State(state): axum::extract::State<Arc<AppState<M, B>>>,
     headers: HeaderMap,
     Query(query): Query<CallbackQuery>,
-) -> Result<Response, LayerhouseError> {
+) -> Result<Response, LayerhouseError>
+where
+    M: NamespaceStore,
+{
     let Some(code) = query.code.as_deref().filter(|code| !code.is_empty()) else {
         return Ok(Redirect::temporary("/oauth2/start").into_response());
     };
@@ -245,6 +250,22 @@ pub async fn oauth2_callback<M, B>(
         groups: all_groups,
         expires_at: now + session_max_age,
     };
+
+    if let Err(error) = state
+        .core
+        .metadata
+        .put_observed_identity(ObservedIdentity {
+            subject: Subject::new(session.subject.clone()),
+            username: session.username.clone(),
+            display_name: session.display_name.clone(),
+            email: session.email.clone(),
+            groups: session.groups.clone(),
+            last_seen_at: now,
+        })
+        .await
+    {
+        tracing::warn!(error = %error, "failed to record observed identity");
+    }
 
     let cookie_value = session.encrypt(auth.session_key())?;
     let session_group_count = session.groups.len();
