@@ -12,6 +12,10 @@ use crate::store::metadata::NamespaceStore;
 pub fn routes<M: NamespaceStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
     Router::new()
         .route(
+            "/api/v1/account/namespaces",
+            axum::routing::get(handlers::list_account_namespaces::<M, B>),
+        )
+        .route(
             "/api/v1/admin/namespaces",
             axum::routing::get(handlers::list_namespaces::<M, B>),
         )
@@ -69,6 +73,18 @@ mod tests {
         }
     }
 
+    fn other_user_identity() -> AuthIdentity {
+        AuthIdentity {
+            subject: Subject::new("user-2"),
+            username: Some("bob".to_string()),
+            display_name: None,
+            email: None,
+            groups: vec![],
+            scopes: vec![],
+            token_type: crate::auth::token::TokenType::PersonalAccess,
+        }
+    }
+
     fn post_json(
         uri: &str,
         body: &impl Serialize,
@@ -92,6 +108,14 @@ mod tests {
             .unwrap();
         req.extensions_mut().insert(identity.clone());
         req
+    }
+
+    fn get_unauthenticated(uri: &str) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
     }
 
     #[tokio::test]
@@ -151,6 +175,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn account_namespaces_requires_auth() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        let resp = app
+            .oneshot(get_unauthenticated("/api/v1/account/namespaces"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn account_namespaces_returns_current_user_claims() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/admin/namespaces/acme/claim",
+                &serde_json::json!({}),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/admin/namespaces/other/claim",
+                &serde_json::json!({}),
+                &other_user_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+
+        let resp = app
+            .oneshot(get("/api/v1/account/namespaces", &user_identity()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data["namespaces"].as_array().unwrap().len(), 1);
+        assert_eq!(data["namespaces"][0]["handle"], "acme");
+        assert_eq!(data["namespaces"][0]["owner_kind"], "user");
     }
 
     #[tokio::test]

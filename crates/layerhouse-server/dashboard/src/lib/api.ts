@@ -274,6 +274,10 @@ export function fetchGrantableScopes(
   return fetchJson(`/api/v1/tokens/grantable-scopes${qs(params)}`);
 }
 
+export function fetchAccountNamespaces(): Promise<NamespaceListResponse> {
+  return fetchJson("/api/v1/account/namespaces");
+}
+
 export function fetchNamespaces(): Promise<NamespaceListResponse> {
   return fetchJson("/api/v1/admin/namespaces");
 }

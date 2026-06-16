@@ -7,6 +7,7 @@ import {
   claimNamespace,
   createPersonalAccessToken,
   deletePersonalAccessToken,
+  fetchAccountNamespaces,
   fetchGrantableScopes,
   fetchNamespaces,
   fetchPersonalAccessTokens,
@@ -28,7 +29,7 @@ import type {
   PersonalAccessToken,
 } from "../lib/types";
 
-type AccessTab = "tokens" | "namespaces" | "session" | "permissions";
+type AccessTab = "tokens" | "namespaces" | "session" | "permissions" | "admin";
 type ScopeKind = "repository" | "namespace_pattern";
 
 interface TokenForm {
@@ -152,8 +153,9 @@ export default function Access(props: { onClose?: () => void }) {
   const [tab, setTab] = createSignal<AccessTab>("tokens");
   const [session, setSession] = createSignal<DashboardSession | null>(null);
   const [tokens, setTokens] = createSignal<PersonalAccessToken[]>([]);
-  const [namespaces, setNamespaces] = createSignal<NamespaceResponse[]>([]);
-  const [sessionNamespaces, setSessionNamespaces] = createSignal<NamespaceResponse[]>([]);
+  const [accountNamespaces, setAccountNamespaces] = createSignal<NamespaceResponse[]>([]);
+  const [adminNamespaces, setAdminNamespaces] = createSignal<NamespaceResponse[]>([]);
+  const [adminNamespaceSearch, setAdminNamespaceSearch] = createSignal("");
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
   const [showCreate, setShowCreate] = createSignal(false);
@@ -179,8 +181,9 @@ export default function Access(props: { onClose?: () => void }) {
   const [releaseTarget, setReleaseTarget] = createSignal<NamespaceResponse | null>(null);
   const [releaseReason, setReleaseReason] = createSignal("");
   const [releasing, setReleasing] = createSignal(false);
-  const [revokeNamespaceTarget, setRevokeNamespaceTarget] =
-    createSignal<NamespaceResponse | null>(null);
+  const [revokeNamespaceTarget, setRevokeNamespaceTarget] = createSignal<NamespaceResponse | null>(
+    null,
+  );
   const [revokingNamespace, setRevokingNamespace] = createSignal(false);
 
   async function load() {
@@ -190,21 +193,26 @@ export default function Access(props: { onClose?: () => void }) {
       setSession(nextSession);
       if (nextSession.auth_enabled) {
         setTokens(await fetchPersonalAccessTokens());
+        const accountResponse = await fetchAccountNamespaces();
+        setAccountNamespaces(accountResponse.namespaces);
         if (nextSession.is_admin) {
           const response = await fetchNamespaces();
-          setNamespaces(response.namespaces);
+          setAdminNamespaces(response.namespaces);
         } else {
-          setNamespaces([]);
+          setAdminNamespaces([]);
         }
       } else {
         setTokens([]);
-        setNamespaces([]);
+        setAccountNamespaces([]);
+        setAdminNamespaces([]);
       }
       setError(null);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         setSession(null);
         setTokens([]);
+        setAccountNamespaces([]);
+        setAdminNamespaces([]);
         setError(null);
       } else {
         setError(e instanceof Error ? e.message : t("access.loadError"));
@@ -373,11 +381,22 @@ export default function Access(props: { onClose?: () => void }) {
     }
   }
 
-  async function refreshNamespaces() {
+  async function refreshAccountNamespaces() {
+    try {
+      const response = await fetchAccountNamespaces();
+      setAccountNamespaces(response.namespaces);
+      return response.namespaces;
+    } catch (e) {
+      setNamespaceError(e instanceof Error ? e.message : t("access.namespaceLoadError"));
+      return accountNamespaces();
+    }
+  }
+
+  async function refreshAdminNamespaces() {
     if (!session()?.is_admin) return;
     try {
       const response = await fetchNamespaces();
-      setNamespaces(response.namespaces);
+      setAdminNamespaces(response.namespaces);
     } catch (e) {
       setNamespaceError(e instanceof Error ? e.message : t("access.namespaceLoadError"));
     }
@@ -396,16 +415,24 @@ export default function Access(props: { onClose?: () => void }) {
       const namespace = await claimNamespace(handle, {
         owner_label: claimOwnerLabel().trim() || userLabel(session()),
       });
-      setSessionNamespaces([
-        namespace,
-        ...sessionNamespaces().filter((item) => item.handle !== namespace.handle),
-      ]);
-      if (session()?.is_admin) await refreshNamespaces();
+      await refreshAccountNamespaces();
+      if (session()?.is_admin) await refreshAdminNamespaces();
       setClaimHandle("");
       setClaimOwnerLabel("");
       setNamespaceMessage(t("access.namespaceClaimed", { handle: namespace.handle }));
     } catch (e) {
-      setNamespaceError(e instanceof Error ? e.message : t("access.namespaceClaimError"));
+      const nextNamespaces = await refreshAccountNamespaces();
+      if (
+        e instanceof ApiError &&
+        e.status === 409 &&
+        nextNamespaces.some((item) => item.handle === handle)
+      ) {
+        setClaimHandle("");
+        setClaimOwnerLabel("");
+        setNamespaceMessage(t("access.namespaceAlreadyClaimedByYou", { handle }));
+      } else {
+        setNamespaceError(e instanceof Error ? e.message : t("access.namespaceClaimError"));
+      }
     } finally {
       setClaiming(false);
     }
@@ -419,8 +446,8 @@ export default function Access(props: { onClose?: () => void }) {
     setNamespaceMessage(null);
     try {
       await releaseNamespace(target.handle, { reason: releaseReason().trim() || null });
-      setSessionNamespaces(sessionNamespaces().filter((item) => item.handle !== target.handle));
-      if (session()?.is_admin) await refreshNamespaces();
+      await refreshAccountNamespaces();
+      if (session()?.is_admin) await refreshAdminNamespaces();
       setNamespaceMessage(t("access.namespaceReleased", { handle: target.handle }));
       setReleaseTarget(null);
       setReleaseReason("");
@@ -439,7 +466,8 @@ export default function Access(props: { onClose?: () => void }) {
     setNamespaceMessage(null);
     try {
       await revokeNamespace(target.handle);
-      await refreshNamespaces();
+      await refreshAdminNamespaces();
+      await refreshAccountNamespaces();
       setNamespaceMessage(t("access.namespaceRevoked", { handle: target.handle }));
       setRevokeNamespaceTarget(null);
     } catch (e) {
@@ -460,7 +488,16 @@ export default function Access(props: { onClose?: () => void }) {
 
   const activeTokens = () => tokens().length;
   const expiringSoonCount = () => tokens().filter(expiresSoon).length;
-  const visibleNamespaces = () => (session()?.is_admin ? namespaces() : sessionNamespaces());
+  const filteredAdminNamespaces = () => {
+    const query = adminNamespaceSearch().trim().toLowerCase();
+    if (!query) return adminNamespaces();
+    return adminNamespaces().filter(
+      (namespace) =>
+        namespace.handle.toLowerCase().includes(query) ||
+        namespace.owner_label.toLowerCase().includes(query) ||
+        namespace.owner_kind.toLowerCase().includes(query),
+    );
+  };
 
   const content = (
     <div>
@@ -570,6 +607,15 @@ export default function Access(props: { onClose?: () => void }) {
               >
                 {t("access.permissions")}
               </button>
+              <Show when={session()?.is_admin}>
+                <button
+                  class={tab() === "admin" ? "active" : ""}
+                  type="button"
+                  onClick={() => setTab("admin")}
+                >
+                  {t("access.admin")}
+                </button>
+              </Show>
             </div>
 
             <Show when={tab() === "tokens"}>
@@ -639,9 +685,6 @@ export default function Access(props: { onClose?: () => void }) {
                     <h2 class="card-header">{t("access.namespaceTitle")}</h2>
                     <p class="hint">{t("access.namespaceDesc")}</p>
                   </div>
-                  <Show when={session()?.is_admin}>
-                    <span class="badge badge-blue">{t("access.adminInventory")}</span>
-                  </Show>
                 </div>
 
                 {namespaceError() && <p class="warning">{namespaceError()}</p>}
@@ -685,9 +728,9 @@ export default function Access(props: { onClose?: () => void }) {
                 </div>
 
                 <div class="access-namespace-list">
-                  <h3>{session()?.is_admin ? t("access.allNamespaces") : t("access.claimedThisSession")}</h3>
+                  <h3>{t("access.claimedNamespaces")}</h3>
                   <Show
-                    when={visibleNamespaces().length > 0}
+                    when={accountNamespaces().length > 0}
                     fallback={<p class="hint">{t("access.noNamespaces")}</p>}
                   >
                     <table>
@@ -700,7 +743,7 @@ export default function Access(props: { onClose?: () => void }) {
                         </tr>
                       </thead>
                       <tbody>
-                        <For each={visibleNamespaces()}>
+                        <For each={accountNamespaces()}>
                           {(namespace) => (
                             <tr>
                               <td>
@@ -715,26 +758,22 @@ export default function Access(props: { onClose?: () => void }) {
                               <td>{formatTime(namespace.created_at)}</td>
                               <td>
                                 <div class="row-actions">
-                                  <Show
-                                    when={sessionNamespaces().some(
-                                      (item) => item.handle === namespace.handle,
-                                    )}
+                                  <button
+                                    class="btn btn-compact"
+                                    onClick={() =>
+                                      copyValue(`namespace-${namespace.handle}`, namespace.handle)
+                                    }
                                   >
-                                    <button
-                                      class="btn btn-compact"
-                                      onClick={() => setReleaseTarget(namespace)}
-                                    >
-                                      {t("access.releaseNamespace")}
-                                    </button>
-                                  </Show>
-                                  <Show when={session()?.is_admin}>
-                                    <button
-                                      class="btn btn-compact btn-danger"
-                                      onClick={() => setRevokeNamespaceTarget(namespace)}
-                                    >
-                                      {t("access.revokeNamespace")}
-                                    </button>
-                                  </Show>
+                                    {copied() === `namespace-${namespace.handle}`
+                                      ? t("common.copied")
+                                      : t("common.copy")}
+                                  </button>
+                                  <button
+                                    class="btn btn-compact"
+                                    onClick={() => setReleaseTarget(namespace)}
+                                  >
+                                    {t("access.releaseNamespace")}
+                                  </button>
                                 </div>
                               </td>
                             </tr>
@@ -776,6 +815,76 @@ export default function Access(props: { onClose?: () => void }) {
                   >
                     {(scope) => <span class="chip">{scope}</span>}
                   </For>
+                </div>
+              </div>
+            </Show>
+
+            <Show when={tab() === "admin" && session()?.is_admin}>
+              <div class="card access-namespace-card">
+                <div class="access-section-head">
+                  <div>
+                    <h2 class="card-header">{t("access.namespaceInventory")}</h2>
+                    <p class="hint">{t("access.namespaceInventoryDesc")}</p>
+                  </div>
+                  <span class="badge badge-blue">{t("access.adminInventory")}</span>
+                </div>
+
+                {namespaceError() && <p class="warning">{namespaceError()}</p>}
+                {namespaceMessage() && <p class="hint access-success">{namespaceMessage()}</p>}
+
+                <div class="access-admin-search">
+                  <input
+                    type="search"
+                    value={adminNamespaceSearch()}
+                    placeholder={t("access.searchNamespaces")}
+                    onInput={(event) => setAdminNamespaceSearch(event.currentTarget.value)}
+                  />
+                </div>
+
+                <div class="access-namespace-list">
+                  <Show
+                    when={filteredAdminNamespaces().length > 0}
+                    fallback={<p class="hint">{t("access.noNamespaces")}</p>}
+                  >
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>{t("access.namespaceHandle")}</th>
+                          <th>{t("access.owner")}</th>
+                          <th>{t("access.created")}</th>
+                          <th>{t("common.actions")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <For each={filteredAdminNamespaces()}>
+                          {(namespace) => (
+                            <tr>
+                              <td>
+                                <code>{namespace.handle}</code>
+                              </td>
+                              <td>
+                                <div class="access-owner-cell">
+                                  <strong>{namespace.owner_label}</strong>
+                                  <span>{t(`access.ownerKind.${namespace.owner_kind}`)}</span>
+                                </div>
+                              </td>
+                              <td>{formatTime(namespace.created_at)}</td>
+                              <td>
+                                <div class="row-actions">
+                                  <button
+                                    class="btn btn-compact btn-danger"
+                                    onClick={() => setRevokeNamespaceTarget(namespace)}
+                                  >
+                                    {t("access.revokeNamespace")}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </For>
+                      </tbody>
+                    </table>
+                  </Show>
                 </div>
               </div>
             </Show>
@@ -1067,7 +1176,11 @@ export default function Access(props: { onClose?: () => void }) {
                 <button class="btn" onClick={() => setReleaseTarget(null)}>
                   {t("common.cancel")}
                 </button>
-                <button class="btn btn-danger" disabled={releasing()} onClick={confirmReleaseNamespace}>
+                <button
+                  class="btn btn-danger"
+                  disabled={releasing()}
+                  onClick={confirmReleaseNamespace}
+                >
                   {releasing() ? t("common.deleting") : t("access.releaseNamespace")}
                 </button>
               </div>
