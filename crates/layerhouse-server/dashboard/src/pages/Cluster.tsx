@@ -76,177 +76,312 @@ export default function Cluster() {
     }
   }
 
-  function memberRows() {
-    const s = status();
-    return s ? [...s.voters, ...s.learners] : [];
-  }
-
   if (errorCount() >= 3) {
-    return <ErrorBanner message={error() ?? t("common.unknown")} onRetry={load} fullPage />;
+    return (
+      <div class="cluster-page">
+        <ErrorBanner message={error() ?? t("common.unknown")} onRetry={load} fullPage />
+      </div>
+    );
   }
 
   return (
-    <div>
-      <div class="page-header">
+    <div class="cluster-page">
+      <section class="hero glass">
         <div>
-          <p class="eyebrow">{t("cluster.eyebrow")}</p>
+          <p class="eyebrow">
+            <span class="status-dot" aria-hidden="true" />
+            {t("cluster.eyebrow")}
+          </p>
           <h1>{t("cluster.title")}</h1>
+          <p class="hero-copy">{t("cluster.heroCopy")}</p>
         </div>
-        <Show when={session()?.is_admin}>
-          <button class="btn btn-primary" onClick={() => setShowJoin(true)}>
-            {t("cluster.joinNode")}
-          </button>
-        </Show>
-      </div>
+      </section>
 
       {error() && <ErrorBanner message={error()!} onRetry={load} />}
 
-      {loading() ? (
-        <LoadingSpinner label={t("cluster.loading")} />
-      ) : !status() ? (
-        <EmptyState title={t("cluster.unavailable")} description={t("cluster.unavailableDesc")} />
-      ) : (
-        <>
-          <div class="stats">
-            <div class="stat glass">
-              <div class="label">{t("cluster.leader")}</div>
-              <div class="value small">{status()!.leader_id ?? "-"}</div>
-              <p class="note">
-                {t("cluster.term")} {status()!.term}
-              </p>
+      <Show when={!loading()} fallback={<LoadingSpinner label={t("cluster.loading")} />}>
+        <Show
+          when={status()}
+          fallback={
+            <EmptyState
+              title={t("cluster.unavailable")}
+              description={t("cluster.unavailableDesc")}
+            />
+          }
+        >
+          <section class="panel glass">
+            <div class="panel-head">
+              <div>
+                <p class="section-label">{t("cluster.votingMembers")}</p>
+                <h2>{t("cluster.voters")}</h2>
+              </div>
+              <Show when={session()?.is_admin}>
+                <button class="button" onClick={() => setShowJoin(true)}>
+                  {t("cluster.joinNode")}
+                </button>
+              </Show>
             </div>
-            <div class="stat glass">
-              <div class="label">{t("cluster.quorum")}</div>
-              <div class="value small">{status()!.quorum}</div>
-              <p class="note">{t("cluster.healthyVoters", { count: status()!.healthy_voters })}</p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("cluster.nodeId")}</th>
+                    <th>{t("cluster.address")}</th>
+                    <th>{t("cluster.role")}</th>
+                    <th>{t("common.status")}</th>
+                    <th>{t("common.actions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <For each={status()!.voters}>
+                    {(node) => {
+                      const isLeader = () => node.role === "leader";
+                      const nodeActionId = () => `cluster-action-${node.node_id}`;
+                      const isConfirming = () => confirmNode()?.node_id === node.node_id;
+                      return (
+                        <tr classList={{ "leader-row": isLeader() }}>
+                          <td class="node-id">{node.node_id}</td>
+                          <td class="address">{node.address}</td>
+                          <td>
+                            <span classList={{ "role-badge": true, leader: isLeader() }}>
+                              {isLeader() ? "Leader" : "Voter"}
+                            </span>
+                          </td>
+                          <td>
+                            <span
+                              classList={{
+                                state: true,
+                                catchup: node.status !== "healthy",
+                              }}
+                            >
+                              {node.status}
+                            </span>
+                          </td>
+                          <td>
+                            <Show when={session()?.is_admin}>
+                              <div class="confirm-actions">
+                                <input
+                                  class="membership-confirm"
+                                  type="checkbox"
+                                  id={nodeActionId()}
+                                  checked={isConfirming()}
+                                  onChange={(e) =>
+                                    setConfirmNode(e.currentTarget.checked ? node : null)
+                                  }
+                                />
+                                <label class="action danger" for={nodeActionId()}>
+                                  {isLeader() ? t("common.leave") : t("common.unlink")}
+                                </label>
+                                <span class="confirm-preview">
+                                  <span class="warning-copy">
+                                    {isLeader()
+                                      ? t("cluster.leaveWarning")
+                                      : t("cluster.removeWarning", {
+                                          id: node.node_id,
+                                          address: node.address,
+                                        })}
+                                  </span>
+                                  <label class="action" for={nodeActionId()}>
+                                    {t("common.cancel")}
+                                  </label>
+                                  <button
+                                    class="action confirm"
+                                    disabled={busy()}
+                                    onClick={handleRemove}
+                                  >
+                                    {isLeader()
+                                      ? t("cluster.confirmLeave")
+                                      : t("cluster.confirmRemove")}
+                                  </button>
+                                </span>
+                              </div>
+                            </Show>
+                          </td>
+                        </tr>
+                      );
+                    }}
+                  </For>
+                </tbody>
+              </table>
             </div>
-            <div class="stat glass">
-              <div class="label">{t("app.nav.cluster")}</div>
-              <div class="value small">{status()!.cluster_id}</div>
-              <p class="note">
-                {t("common.updated")} {formatAgo(status()!.updated_at)}
-              </p>
+            <div class="count-footer">
+              <span class="count">
+                {t("cluster.memberCount", {
+                  count: status()!.voters.length,
+                })}
+              </span>
             </div>
-            <div class="stat glass">
-              <div class="label">{t("cluster.members")}</div>
-              <div class="value small">{memberRows().length}</div>
-              <p class="note">{t("cluster.learnersCount", { count: status()!.learners.length })}</p>
-            </div>
-          </div>
+          </section>
 
-          <div class="card">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("cluster.node")}</th>
-                  <th>{t("cluster.address")}</th>
-                  <th>{t("cluster.role")}</th>
-                  <th>{t("common.status")}</th>
-                  <th>{t("cluster.commit")}</th>
-                  <th>{t("cluster.lag")}</th>
-                  <th>{t("common.actions")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <For each={memberRows()}>
-                  {(node) => (
-                    <tr>
-                      <td>
-                        <code>{node.node_id}</code>
-                      </td>
-                      <td>{node.address}</td>
-                      <td>
-                        <span
-                          class={`badge ${node.role === "leader" ? "badge-blue" : "badge-gray"}`}
-                        >
-                          {node.role}
-                        </span>
-                      </td>
-                      <td>
-                        <span class="badge badge-success">{node.status}</span>
-                      </td>
-                      <td>{node.commit_index ?? "-"}</td>
-                      <td>
-                        {node.replication_lag_ms === null ? "-" : `${node.replication_lag_ms}ms`}
-                      </td>
-                      <td>
-                        <Show when={session()?.is_admin}>
-                          <button
-                            class="btn btn-compact btn-danger"
-                            onClick={() => setConfirmNode(node)}
-                          >
-                            {node.role === "leader" ? t("common.leave") : t("common.unlink")}
-                          </button>
-                        </Show>
-                      </td>
-                    </tr>
-                  )}
-                </For>
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
+          <section class="panel glass">
+            <div class="panel-head">
+              <div>
+                <p class="section-label">{t("cluster.catchUpMembers")}</p>
+                <h2>{t("cluster.learners")}</h2>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("cluster.nodeId")}</th>
+                    <th>{t("cluster.address")}</th>
+                    <th>{t("cluster.role")}</th>
+                    <th>{t("common.status")}</th>
+                    <th>{t("common.actions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <Show
+                    when={status()!.learners.length > 0}
+                    fallback={
+                      <tr class="empty">
+                        <td colspan="5">
+                          <strong>{t("cluster.noLearners")}</strong>
+                          {t("cluster.noLearnersDesc")}
+                        </td>
+                      </tr>
+                    }
+                  >
+                    <For each={status()!.learners}>
+                      {(node) => {
+                        const nodeActionId = () => `cluster-action-${node.node_id}`;
+                        const isConfirming = () => confirmNode()?.node_id === node.node_id;
+                        return (
+                          <tr>
+                            <td class="node-id">{node.node_id}</td>
+                            <td class="address">{node.address}</td>
+                            <td>
+                              <span class="role-badge">Learner</span>
+                            </td>
+                            <td>
+                              <span
+                                classList={{
+                                  state: true,
+                                  catchup: node.status !== "healthy",
+                                }}
+                              >
+                                {node.status}
+                              </span>
+                            </td>
+                            <td>
+                              <Show when={session()?.is_admin}>
+                                <div class="confirm-actions">
+                                  <input
+                                    class="membership-confirm"
+                                    type="checkbox"
+                                    id={nodeActionId()}
+                                    checked={isConfirming()}
+                                    onChange={(e) =>
+                                      setConfirmNode(e.currentTarget.checked ? node : null)
+                                    }
+                                  />
+                                  <label class="action danger" for={nodeActionId()}>
+                                    {t("common.unlink")}
+                                  </label>
+                                  <span class="confirm-preview">
+                                    <span class="warning-copy">
+                                      {t("cluster.removeWarning", {
+                                        id: node.node_id,
+                                        address: node.address,
+                                      })}
+                                    </span>
+                                    <label class="action" for={nodeActionId()}>
+                                      {t("common.cancel")}
+                                    </label>
+                                    <button
+                                      class="action confirm"
+                                      disabled={busy()}
+                                      onClick={handleRemove}
+                                    >
+                                      {t("cluster.confirmRemove")}
+                                    </button>
+                                  </span>
+                                </div>
+                              </Show>
+                            </td>
+                          </tr>
+                        );
+                      }}
+                    </For>
+                  </Show>
+                </tbody>
+              </table>
+            </div>
+            <div class="count-footer">
+              <span class="count">
+                {t("cluster.learnerCount", {
+                  count: status()!.learners.length,
+                })}
+              </span>
+            </div>
+          </section>
 
-      <Show when={showJoin()}>
-        <div class="modal-overlay" onClick={() => setShowJoin(false)}>
-          <div class="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>{t("cluster.joinTitle")}</h2>
-            <div class="form-group">
-              <label>{t("cluster.nodeId")}</label>
-              <input
-                type="number"
-                value={joinForm().node_id || ""}
-                onInput={(e) =>
-                  setJoinForm({ ...joinForm(), node_id: Number(e.currentTarget.value) || 0 })
-                }
-              />
-            </div>
-            <div class="form-group">
-              <label>{t("cluster.address")}</label>
-              <input
-                value={joinForm().addr}
-                placeholder="host:port"
-                onInput={(e) => setJoinForm({ ...joinForm(), addr: e.currentTarget.value })}
-              />
-            </div>
-            <div class="modal-actions">
-              <button class="btn" disabled={busy()} onClick={() => setShowJoin(false)}>
-                {t("common.cancel")}
-              </button>
-              <button class="btn btn-primary" disabled={busy()} onClick={handleJoin}>
-                {busy() ? t("cluster.joining") : t("cluster.join")}
-              </button>
-            </div>
-          </div>
-        </div>
+          <footer class="footer">
+            <span>
+              <strong>{t("common.updated")}:</strong> {formatAgo(status()!.updated_at)}
+            </span>
+            <span>{t("app.brandName")} Container Registry</span>
+          </footer>
+        </Show>
       </Show>
 
-      <Show when={confirmNode()}>
-        {(node) => (
-          <div class="modal-overlay" onClick={() => setConfirmNode(null)}>
-            <div class="modal" onClick={(e) => e.stopPropagation()}>
-              <h2>
-                {node().role === "leader"
-                  ? t("cluster.leaveLeaderTitle")
-                  : t("cluster.removeNodeTitle", { id: node().node_id })}
-              </h2>
-              <p class="warning">
-                {node().role === "leader"
-                  ? t("cluster.leaveWarning")
-                  : t("cluster.removeWarning", { id: node().node_id, address: node().address })}
-              </p>
+      <Show when={showJoin()}>
+        <div class="modal-backdrop visible" onClick={() => setShowJoin(false)}>
+          <div
+            class="modal glass"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div class="modal-head">
+              <div>
+                <p class="section-label">{t("cluster.eyebrow")}</p>
+                <h2 class="modal-title">{t("cluster.joinTitle")}</h2>
+              </div>
+              <button class="close" aria-label="Close modal" onClick={() => setShowJoin(false)}>
+                x
+              </button>
+            </div>
+            <div class="form">
+              <div class="field">
+                <label for="join-node-id">{t("cluster.nodeId")}</label>
+                <input
+                  id="join-node-id"
+                  type="number"
+                  value={joinForm().node_id || ""}
+                  onInput={(e) =>
+                    setJoinForm({
+                      ...joinForm(),
+                      node_id: Number(e.currentTarget.value) || 0,
+                    })
+                  }
+                />
+              </div>
+              <div class="field">
+                <label for="join-node-addr">{t("cluster.address")}</label>
+                <input
+                  id="join-node-addr"
+                  value={joinForm().addr}
+                  placeholder="host:port"
+                  onInput={(e) => setJoinForm({ ...joinForm(), addr: e.currentTarget.value })}
+                />
+              </div>
               <div class="modal-actions">
-                <button class="btn" disabled={busy()} onClick={() => setConfirmNode(null)}>
+                <button
+                  class="button secondary"
+                  disabled={busy()}
+                  onClick={() => setShowJoin(false)}
+                >
                   {t("common.cancel")}
                 </button>
-                <button class="btn btn-danger" disabled={busy()} onClick={handleRemove}>
-                  {busy() ? t("common.apply") : t("common.confirm")}
+                <button class="button" disabled={busy()} onClick={handleJoin}>
+                  {busy() ? t("cluster.joining") : t("cluster.join")}
                 </button>
               </div>
             </div>
           </div>
-        )}
+        </div>
       </Show>
     </div>
   );

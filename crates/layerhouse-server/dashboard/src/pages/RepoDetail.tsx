@@ -11,6 +11,8 @@ import type { ManifestSummary, RepositorySummary } from "../lib/types";
 import { copyToClipboard, digestShort, formatAgo, formatBytes, manifestKind } from "../lib/format";
 import { t } from "../lib/i18n";
 import LoadingSpinner from "../components/LoadingSpinner";
+import EmptyState from "../components/EmptyState";
+import ErrorBanner from "../components/ErrorBanner";
 
 const ACCESS_BADGE: Record<string, string> = {
   pull: "badge-blue",
@@ -24,9 +26,6 @@ const GRANT_BADGE: Record<string, string> = {
   group_grant: "badge-teal",
   public: "badge-gray",
 };
-import EmptyState from "../components/EmptyState";
-import ErrorBanner from "../components/ErrorBanner";
-import Pagination from "../components/Pagination";
 
 function configValue(manifest: ManifestSummary, key: string): string | null {
   const value = manifest.config_summary?.[key];
@@ -35,19 +34,31 @@ function configValue(manifest: ManifestSummary, key: string): string | null {
   return null;
 }
 
-function expandedContent(repo: string, manifest: ManifestSummary) {
-  const kind = manifestKind(manifest).kind;
+function annotationValue(manifest: ManifestSummary, key: string): string | null {
+  const value = manifest.annotations?.[key];
+  return typeof value === "string" && value ? value : null;
+}
+
+function infoTitle(manifest: ManifestSummary): string {
+  return (
+    annotationValue(manifest, "org.opencontainers.image.title") ??
+    configValue(manifest, "platform") ??
+    manifestKind(manifest).label
+  );
+}
+
+function infoDetail(manifest: ManifestSummary): string {
+  if (manifest.tags.length === 0) return t("repo.untaggedDigest");
+  return manifest.artifact_type || manifest.media_type;
+}
+
+function helmCommand(repo: string, manifest: ManifestSummary): string {
   const version = manifest.tags[0] ?? "latest";
-  if (kind === "helm") {
-    return `helm install nginx oci://my-registry/${repo} --version ${version}`;
-  }
-  if (kind === "image") {
-    return t("repo.expanded.config", {
-      digest: configValue(manifest, "config_digest") ?? "-",
-      layers: configValue(manifest, "layer_count") ?? "0",
-      size: formatBytes(manifest.stored_size_bytes),
-    });
-  }
+  return `helm install nginx oci://my-registry/${repo} --version ${version}`;
+}
+
+function rawJson(manifest: ManifestSummary): string {
+  const kind = manifestKind(manifest).kind;
   if (kind === "wasm") {
     return JSON.stringify(manifest.config_summary ?? manifest.annotations ?? {}, null, 2);
   }
@@ -70,7 +81,7 @@ export default function RepoDetail() {
   const [sort, setSort] = createSignal("updated_desc");
   const [expanded, setExpanded] = createSignal<string | null>(null);
   const [confirmTag, setConfirmTag] = createSignal<string | null>(null);
-  const [pendingDelete, setPendingDelete] = createSignal<ManifestSummary | null>(null);
+  const [inlineDelete, setInlineDelete] = createSignal<string | null>(null);
   const [selectMode, setSelectMode] = createSignal(false);
   const [selected, setSelected] = createSignal<Set<string>>(new Set());
   const [batchConfirm, setBatchConfirm] = createSignal(false);
@@ -162,13 +173,11 @@ export default function RepoDetail() {
     }
   }
 
-  async function confirmDeleteDigest() {
-    const manifest = pendingDelete();
-    if (!manifest) return;
+  async function confirmDeleteDigest(manifest: ManifestSummary) {
     setBusy(true);
     try {
       await deleteManifestDigest(repo(), manifest.digest);
-      setPendingDelete(null);
+      setInlineDelete(null);
       setExpanded(null);
       await load();
     } catch (e) {
@@ -203,8 +212,14 @@ export default function RepoDetail() {
     setSelected(next);
   }
 
-  function selectAllVisible() {
-    setSelected(new Set(manifests().map((manifest) => manifest.digest)));
+  function allVisibleSelected() {
+    const rows = manifests();
+    return rows.length > 0 && rows.every((manifest) => selected().has(manifest.digest));
+  }
+
+  function toggleSelectAll() {
+    if (allVisibleSelected()) setSelected(new Set<string>());
+    else setSelected(new Set(manifests().map((manifest) => manifest.digest)));
   }
 
   function selectedTagCount() {
@@ -218,168 +233,241 @@ export default function RepoDetail() {
     return selected().size > 10 || selectedTagCount() > 20;
   }
 
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelected(new Set<string>());
+  }
+
+  type Chip = { label: string; reset: () => void };
+  const activeChips = (): Chip[] => {
+    const chips: Chip[] = [];
+    if (search()) chips.push({ label: search(), reset: () => setSearch("") });
+    if (kind() !== "all") {
+      const label = kind() === "unknown" ? t("repo.type.unknown") : t(`repo.type.${kind()}`);
+      chips.push({ label, reset: () => setKind("all") });
+    }
+    if (tagState() !== "all") {
+      chips.push({
+        label: tagState() === "tagged" ? t("repo.taggedOnly") : t("repo.untaggedOnly"),
+        reset: () => setTagState("all"),
+      });
+    }
+    if (tagPattern()) chips.push({ label: tagPattern(), reset: () => setTagPattern("") });
+    return chips;
+  };
+
   if (errorCount() >= 3) {
     return <ErrorBanner message={error() ?? t("common.unknown")} onRetry={load} fullPage />;
   }
 
   return (
-    <div>
-      <div class="page-header">
-        <div>
-          <button class="link-button breadcrumb" onClick={() => navigate("/repos")}>
-            {t("repo.back")}
-          </button>
-          <h1>{repo()}</h1>
+    <div class={`repo-detail${selectMode() ? " select-mode" : ""}`}>
+      <header class="page-head">
+        <button class="back-link" type="button" onClick={() => navigate("/repos")}>
+          {t("repo.back")}
+        </button>
+        <div class="title-row">
+          <div>
+            <h1>
+              <span class="repo-path">{repo()}</span>
+            </h1>
+            <p class="route-hash">#/repos/{repo()}</p>
+          </div>
+          <Show when={lastUpdated()}>
+            <div class="freshness">
+              {t("common.updated")} {formatAgo(lastUpdated()! / 1000)}
+            </div>
+          </Show>
         </div>
-        <span class="freshness">
-          {lastUpdated() ? `${t("common.updated")} ${formatAgo(lastUpdated()! / 1000)}` : ""}
-        </span>
-      </div>
+      </header>
 
       {error() && <ErrorBanner message={error()!} onRetry={load} />}
-      <Show when={toast()}>{(message) => <div class="toast">{message()}</div>}</Show>
 
       <Show when={repoAccess()}>
         {(access) => (
-          <div class="card repo-access-panel">
-            <div class="repo-access-summary">
-              <span class="eyebrow">{t("repo.access")}</span>
-              <div class="repo-access-badges">
-                <span class={`badge ${ACCESS_BADGE[access().access_level] ?? "badge-gray"}`}>
-                  {t(`access.action.${access().access_level}`)}
+          <section class="access-panel glass">
+            <span class="section-label">{t("repo.access")}</span>
+            <div class="access-badges">
+              <span class={`badge ${ACCESS_BADGE[access().access_level] ?? "badge-gray"}`}>
+                {t(`access.action.${access().access_level}`)}
+              </span>
+              <Show when={access().max_grantable !== access().access_level}>
+                <span class="badge badge-gray">
+                  {t("repo.canGrant", { action: t(`access.action.${access().max_grantable}`) })}
                 </span>
-                <Show when={access().max_grantable !== access().access_level}>
-                  <span class="badge badge-gray">
-                    {t("repo.canGrant", { action: t(`access.action.${access().max_grantable}`) })}
-                  </span>
-                </Show>
-                <span class={`badge ${GRANT_BADGE[access().grant_source] ?? "badge-gray"}`}>
-                  {t("repo.accessSource", {
-                    source: t(`access.grantSource.${access().grant_source}`),
-                  })}
-                </span>
-              </div>
+              </Show>
+              <span class={`badge ${GRANT_BADGE[access().grant_source] ?? "badge-gray"}`}>
+                {t("repo.accessSource", {
+                  source: t(`access.grantSource.${access().grant_source}`),
+                })}
+              </span>
             </div>
-          </div>
+          </section>
         )}
       </Show>
 
-      <div class="card">
-        <div class="toolbar">
-          <input
-            type="search"
-            placeholder={t("repo.search")}
-            value={search()}
-            onInput={(e) => setSearch(e.currentTarget.value)}
-          />
-          <select value={kind()} onChange={(e) => setKind(e.currentTarget.value)}>
-            <option value="all">{t("repo.allTypes")}</option>
-            <option value="image">{t("repo.type.image")}</option>
-            <option value="helm">{t("repo.type.helm")}</option>
-            <option value="wasm">{t("repo.type.wasm")}</option>
-            <option value="artifact">{t("repo.type.artifact")}</option>
-            <option value="unknown">{t("common.unknown")}</option>
-          </select>
-          <select value={tagState()} onChange={(e) => setTagState(e.currentTarget.value)}>
-            <option value="all">{t("repo.taggedAll")}</option>
-            <option value="tagged">{t("repo.taggedOnly")}</option>
-            <option value="untagged">{t("repo.untaggedOnly")}</option>
-          </select>
-          <input
-            type="text"
-            placeholder={t("repo.tagGlob")}
-            value={tagPattern()}
-            onInput={(e) => setTagPattern(e.currentTarget.value)}
-          />
-          <select value={sort()} onChange={(e) => setSort(e.currentTarget.value)}>
-            <option value="updated_desc">{t("repos.sort.recent")}</option>
-            <option value="updated_asc">{t("repos.sort.oldest")}</option>
-            <option value="stored_size_desc">{t("repo.sort.largest")}</option>
-            <option value="stored_size_asc">{t("repo.sort.smallest")}</option>
-            <option value="digest_asc">{t("repo.sort.digest")}</option>
-            <option value="tag_count_desc">{t("repos.sort.tags")}</option>
-          </select>
-          <button
-            class={`btn ${selectMode() ? "btn-primary" : ""}`}
-            onClick={() => setSelectMode(!selectMode())}
-          >
-            {t("repo.select")}
-          </button>
+      <section class="panel glass">
+        <div class="panel-head">
+          <div>
+            <p class="section-label">{t("repo.sectionLabel")}</p>
+            <h2>{t("repo.manifests")}</h2>
+          </div>
+          <div class="summary">{t("repo.summary")}</div>
         </div>
 
-        <Show when={selectMode()}>
-          <div class="batch-bar">
-            <span>{t("repo.selected", { count: selected().size })}</span>
-            <button class="btn btn-compact" onClick={selectAllVisible}>
-              {t("repo.selectAllVisible")}
-            </button>
-            <button class="btn btn-compact" onClick={() => setSelected(new Set<string>())}>
-              {t("common.clear")}
-            </button>
+        <div class="toolbar">
+          <div class="filter-row">
+            <input
+              class="filter-input"
+              type="search"
+              placeholder={t("repo.search")}
+              value={search()}
+              onInput={(e) => setSearch(e.currentTarget.value)}
+            />
+            <select
+              class="filter-select"
+              aria-label={t("common.type")}
+              value={kind()}
+              onChange={(e) => setKind(e.currentTarget.value)}
+            >
+              <option value="all">{t("repo.allTypes")}</option>
+              <option value="helm">{t("repo.type.helm")}</option>
+              <option value="image">{t("repo.type.image")}</option>
+              <option value="wasm">{t("repo.type.wasm")}</option>
+              <option value="artifact">{t("repo.type.artifact")}</option>
+              <option value="unknown">{t("repo.type.unknown")}</option>
+            </select>
+            <select
+              class="filter-select"
+              aria-label={t("common.tags")}
+              value={tagState()}
+              onChange={(e) => setTagState(e.currentTarget.value)}
+            >
+              <option value="all">{t("repo.taggedAll")}</option>
+              <option value="tagged">{t("repo.taggedOnly")}</option>
+              <option value="untagged">{t("repo.untaggedOnly")}</option>
+            </select>
+            <input
+              class="filter-input"
+              type="text"
+              placeholder={t("repo.tagGlob")}
+              value={tagPattern()}
+              onInput={(e) => setTagPattern(e.currentTarget.value)}
+            />
+            <select
+              class="filter-select"
+              aria-label={t("repos.sort")}
+              value={sort()}
+              onChange={(e) => setSort(e.currentTarget.value)}
+            >
+              <option value="updated_desc">{t("repos.sort.recent")}</option>
+              <option value="updated_asc">{t("repos.sort.oldest")}</option>
+              <option value="stored_size_desc">{t("repo.sort.largest")}</option>
+              <option value="stored_size_asc">{t("repo.sort.smallest")}</option>
+              <option value="digest_asc">{t("repo.sort.digest")}</option>
+              <option value="tag_count_desc">{t("repos.sort.tags")}</option>
+            </select>
             <button
-              class="btn btn-compact"
+              class={`select-toggle${selectMode() ? " active" : ""}`}
+              type="button"
+              onClick={() => (selectMode() ? exitSelectMode() : setSelectMode(true))}
+            >
+              {t("repo.select")}
+            </button>
+          </div>
+          <Show when={activeChips().length > 0}>
+            <div class="toolbar-actions">
+              <div class="filter-chips" aria-label={t("common.all")}>
+                <For each={activeChips()}>
+                  {(chip) => (
+                    <span class="filter-chip">
+                      <span>{chip.label}</span>
+                      <button type="button" aria-label={t("common.clear")} onClick={chip.reset}>
+                        ×
+                      </button>
+                    </span>
+                  )}
+                </For>
+              </div>
+            </div>
+          </Show>
+        </div>
+
+        <div class={`batch-bar${selectMode() ? " visible" : ""}`}>
+          <span class="batch-count">{t("repo.selected", { count: selected().size })}</span>
+          <div class="batch-actions">
+            <button
+              class="batch-button"
+              type="button"
               onClick={() => copyValue([...selected()].join("\n"), "selected")}
             >
               {copied() === "selected" ? t("common.copied") : t("repo.copyDigests")}
             </button>
             <button
-              class="btn btn-compact btn-danger"
+              class="batch-button danger"
+              type="button"
               disabled={selected().size === 0}
               onClick={() => setBatchConfirm(true)}
             >
               {t("repo.deleteDigests")}
             </button>
+            <button class="batch-button" type="button" onClick={exitSelectMode}>
+              {t("common.cancel")}
+            </button>
           </div>
-        </Show>
+        </div>
 
         {loading() ? (
           <LoadingSpinner label={t("repo.loading")} />
         ) : manifests().length === 0 ? (
           <EmptyState title={t("repo.empty")} description={t("repo.emptyDesc")} />
         ) : (
-          <>
-            <table class="digest-table">
+          <div class="table-wrap">
+            <table>
               <thead>
                 <tr>
-                  <Show when={selectMode()}>
-                    <th />
-                  </Show>
+                  <th class="select-col">
+                    <input
+                      class="select-all"
+                      type="checkbox"
+                      aria-label={t("repo.selectAllVisible")}
+                      checked={allVisibleSelected()}
+                      onChange={toggleSelectAll}
+                    />
+                  </th>
                   <th>{t("common.digest")}</th>
                   <th>{t("common.type")}</th>
                   <th>{t("common.tags")}</th>
                   <th>{t("common.size")}</th>
                   <th>{t("common.info")}</th>
-                  <th>{t("common.actions")}</th>
                 </tr>
               </thead>
               <tbody>
                 <For each={manifests()}>
                   {(manifest) => {
                     const type = manifestKind(manifest);
+                    const isOpen = () => expanded() === manifest.digest;
                     return (
                       <>
                         <tr
-                          class="clickable-row"
-                          onClick={() => {
-                            if (!selectMode()) {
-                              setExpanded(expanded() === manifest.digest ? null : manifest.digest);
-                            }
-                          }}
+                          class={`manifest-row${isOpen() ? " active" : ""}`}
+                          onClick={() => setExpanded(isOpen() ? null : manifest.digest)}
                         >
-                          <Show when={selectMode()}>
-                            <td onClick={(e) => e.stopPropagation()}>
-                              <input
-                                type="checkbox"
-                                checked={selected().has(manifest.digest)}
-                                onChange={() => toggleSelected(manifest.digest)}
-                              />
-                            </td>
-                          </Show>
+                          <td class="select-col" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              class="row-select"
+                              type="checkbox"
+                              aria-label={digestShort(manifest.digest)}
+                              checked={selected().has(manifest.digest)}
+                              onChange={() => toggleSelected(manifest.digest)}
+                            />
+                          </td>
                           <td>
                             <div class="digest-cell">
-                              <code>{digestShort(manifest.digest)}</code>
+                              <span class="digest">{digestShort(manifest.digest)}</span>
                               <button
-                                class="btn btn-compact"
+                                class="digest-copy"
+                                type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   copyValue(manifest.digest, manifest.digest);
@@ -389,131 +477,233 @@ export default function RepoDetail() {
                                   ? t("common.copied")
                                   : t("common.copy")}
                               </button>
+                              <button
+                                class="details-button"
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setExpanded(isOpen() ? null : manifest.digest);
+                                }}
+                              >
+                                {isOpen() ? t("common.hide") : t("common.details")}
+                              </button>
                             </div>
                           </td>
                           <td>
-                            <span class={`badge ${type.className}`}>{type.label}</span>
+                            <span class={`type-badge type-${type.kind}`}>{type.label}</span>
                           </td>
                           <td onClick={(e) => e.stopPropagation()}>
-                            <div class="chips">
+                            <div class="tags-cell">
                               <Show
                                 when={manifest.tags.length > 0}
-                                fallback={<span class="muted">—</span>}
+                                fallback={<span class="tags-empty">—</span>}
                               >
                                 <For each={manifest.tags}>
                                   {(tag) => {
                                     const key = `${manifest.digest}:${tag}`;
                                     return (
-                                      <button
-                                        class={`chip ${confirmTag() === key ? "confirming" : ""}`}
-                                        disabled={busy()}
-                                        onClick={() => removeTag(manifest, tag)}
+                                      <span
+                                        class={`tag-chip${confirmTag() === key ? " confirming" : ""}`}
                                       >
-                                        {confirmTag() === key ? t("repo.confirmChip") : `${tag} ×`}
-                                      </button>
+                                        <span>{tag}</span>
+                                        <button
+                                          class="chip-remove"
+                                          type="button"
+                                          disabled={busy()}
+                                          aria-label={tag}
+                                          onClick={() => removeTag(manifest, tag)}
+                                        >
+                                          {confirmTag() === key ? t("repo.confirmChip") : "×"}
+                                        </button>
+                                      </span>
                                     );
                                   }}
                                 </For>
                               </Show>
                             </div>
                           </td>
-                          <td>{formatBytes(manifest.stored_size_bytes)}</td>
-                          <td>{formatAgo(manifest.last_modified)}</td>
+                          <td class="size">{formatBytes(manifest.stored_size_bytes)}</td>
                           <td onClick={(e) => e.stopPropagation()}>
-                            <div class="row-actions">
-                              <button
-                                class="btn btn-compact"
-                                onClick={() =>
-                                  setExpanded(
-                                    expanded() === manifest.digest ? null : manifest.digest,
-                                  )
+                            <div class="info-cell">
+                              <span class="info-strong">{infoTitle(manifest)}</span>
+                              <span>{infoDetail(manifest)}</span>
+                              <Show
+                                when={inlineDelete() !== manifest.digest}
+                                fallback={
+                                  <div class="delete-confirm visible">
+                                    <span class="delete-warning">
+                                      {t("repo.deleteConfirmWarning", {
+                                        tags: manifest.tags.length,
+                                      })}
+                                    </span>
+                                    <span class="delete-buttons">
+                                      <button
+                                        class="cancel-delete"
+                                        type="button"
+                                        disabled={busy()}
+                                        onClick={() => setInlineDelete(null)}
+                                      >
+                                        {t("common.cancel")}
+                                      </button>
+                                      <button
+                                        class="confirm-delete"
+                                        type="button"
+                                        disabled={busy()}
+                                        onClick={() => confirmDeleteDigest(manifest)}
+                                      >
+                                        {busy() ? t("common.deleting") : t("common.confirmDelete")}
+                                      </button>
+                                    </span>
+                                  </div>
                                 }
                               >
-                                {expanded() === manifest.digest
-                                  ? t("common.hide")
-                                  : t("common.details")}
-                              </button>
-                              <button
-                                class="btn btn-compact btn-danger"
-                                onClick={() => setPendingDelete(manifest)}
-                              >
-                                {t("repo.deleteDigest")}
-                              </button>
+                                <button
+                                  class="delete-digest"
+                                  type="button"
+                                  onClick={() => setInlineDelete(manifest.digest)}
+                                >
+                                  {t("repo.deleteDigest")}
+                                </button>
+                              </Show>
                             </div>
                           </td>
                         </tr>
-                        <Show when={expanded() === manifest.digest}>
-                          <tr class="expanded-row">
-                            <td colspan={selectMode() ? 7 : 6}>
-                              <div class="detail-grid">
-                                <div>
-                                  <div class="copy-line">
+                        <Show when={isOpen()}>
+                          <tr class="detail-row">
+                            <td class="detail-cell" colspan={6}>
+                              <div class="detail-panel">
+                                <div class="detail-grid">
+                                  <div class="metric metric-wide">
                                     <span>{t("repo.manifestDigest")}</span>
-                                    <code>{manifest.digest}</code>
+                                    <span class="copy-value">
+                                      <span class="copy-value-text">{manifest.digest}</span>
+                                      <button
+                                        class="value-copy"
+                                        type="button"
+                                        onClick={() =>
+                                          copyValue(manifest.digest, `full-${manifest.digest}`)
+                                        }
+                                      >
+                                        {copied() === `full-${manifest.digest}`
+                                          ? t("common.copied")
+                                          : t("common.copy")}
+                                      </button>
+                                    </span>
+                                  </div>
+
+                                  <Show when={manifest.subject}>
+                                    <div class="metric metric-wide">
+                                      <span>{t("repo.subjectDigest")}</span>
+                                      <span class="copy-value">
+                                        <span class="copy-value-text">{manifest.subject}</span>
+                                        <button
+                                          class="value-copy"
+                                          type="button"
+                                          onClick={() =>
+                                            copyValue(
+                                              manifest.subject!,
+                                              `subject-${manifest.digest}`,
+                                            )
+                                          }
+                                        >
+                                          {copied() === `subject-${manifest.digest}`
+                                            ? t("common.copied")
+                                            : t("common.copy")}
+                                        </button>
+                                      </span>
+                                    </div>
+                                  </Show>
+
+                                  <Show when={configValue(manifest, "config_digest")}>
+                                    {(digest) => (
+                                      <div class="metric metric-wide">
+                                        <span>{t("repo.configDigest")}</span>
+                                        <span class="copy-value">
+                                          <span class="copy-value-text">{digest()}</span>
+                                          <button
+                                            class="value-copy"
+                                            type="button"
+                                            onClick={() =>
+                                              copyValue(digest(), `config-${manifest.digest}`)
+                                            }
+                                          >
+                                            {copied() === `config-${manifest.digest}`
+                                              ? t("common.copied")
+                                              : t("common.copy")}
+                                          </button>
+                                        </span>
+                                      </div>
+                                    )}
+                                  </Show>
+
+                                  <Show when={configValue(manifest, "layer_count")}>
+                                    {(layers) => (
+                                      <div class="metric">
+                                        <span>{t("repo.layerCount")}</span>
+                                        <span>{layers()}</span>
+                                      </div>
+                                    )}
+                                  </Show>
+
+                                  <Show when={type.kind === "image"}>
+                                    <div class="metric">
+                                      <span>{t("repo.totalSize")}</span>
+                                      <span>{formatBytes(manifest.stored_size_bytes)}</span>
+                                    </div>
+                                  </Show>
+
+                                  <Show when={manifest.artifact_type}>
+                                    <div class="metric">
+                                      <span>{t("repo.artifactType")}</span>
+                                      <span>{manifest.artifact_type}</span>
+                                    </div>
+                                  </Show>
+                                </div>
+
+                                <Show when={type.kind === "helm"}>
+                                  <div class="copy-code">
+                                    <code>{helmCommand(repo(), manifest)}</code>
                                     <button
-                                      class="btn btn-compact"
+                                      class="copy-button"
+                                      type="button"
                                       onClick={() =>
-                                        copyValue(manifest.digest, `full-${manifest.digest}`)
+                                        copyValue(
+                                          helmCommand(repo(), manifest),
+                                          `helm-${manifest.digest}`,
+                                        )
                                       }
                                     >
-                                      {copied() === `full-${manifest.digest}`
+                                      {copied() === `helm-${manifest.digest}`
                                         ? t("common.copied")
                                         : t("common.copy")}
                                     </button>
                                   </div>
-                                  <Show when={manifestKind(manifest).kind === "helm"}>
-                                    <div class="copy-line">
-                                      <span>{t("repo.helmInstall")}</span>
-                                      <code>{expandedContent(repo(), manifest)}</code>
-                                      <button
-                                        class="btn btn-compact"
-                                        onClick={() =>
-                                          copyValue(
-                                            expandedContent(repo(), manifest),
-                                            `helm-${manifest.digest}`,
-                                          )
-                                        }
-                                      >
-                                        {copied() === `helm-${manifest.digest}`
-                                          ? t("common.copied")
-                                          : t("common.copy")}
-                                      </button>
-                                    </div>
-                                  </Show>
-                                  <Show when={manifest.subject}>
-                                    <div class="copy-line">
-                                      <span>{t("repo.subjectDigest")}</span>
-                                      <code>{manifest.subject}</code>
-                                      <button
-                                        class="btn btn-compact"
-                                        onClick={() =>
-                                          copyValue(manifest.subject!, `subject-${manifest.digest}`)
-                                        }
-                                      >
-                                        {copied() === `subject-${manifest.digest}`
-                                          ? t("common.copied")
-                                          : t("common.copy")}
-                                      </button>
-                                    </div>
-                                  </Show>
-                                  <Show when={configValue(manifest, "config_digest")}>
-                                    {(digest) => (
-                                      <div class="copy-line">
-                                        <span>{t("repo.configDigest")}</span>
-                                        <code>{digest()}</code>
-                                        <button
-                                          class="btn btn-compact"
-                                          onClick={() =>
-                                            copyValue(digest(), `config-${manifest.digest}`)
-                                          }
-                                        >
-                                          {t("common.copy")}
-                                        </button>
-                                      </div>
-                                    )}
-                                  </Show>
-                                </div>
-                                <pre>{expandedContent(repo(), manifest)}</pre>
+                                </Show>
+
+                                <Show
+                                  when={
+                                    type.kind === "wasm" ||
+                                    type.kind === "unknown" ||
+                                    type.kind === "artifact"
+                                  }
+                                >
+                                  <div class="code-block">
+                                    <pre>
+                                      <code>{rawJson(manifest)}</code>
+                                    </pre>
+                                    <button
+                                      class="copy-button"
+                                      type="button"
+                                      onClick={() =>
+                                        copyValue(rawJson(manifest), `json-${manifest.digest}`)
+                                      }
+                                    >
+                                      {copied() === `json-${manifest.digest}`
+                                        ? t("common.copied")
+                                        : t("common.copy")}
+                                    </button>
+                                  </div>
+                                </Show>
                               </div>
                             </td>
                           </tr>
@@ -524,60 +714,70 @@ export default function RepoDetail() {
                 </For>
               </tbody>
             </table>
-            <Pagination shown={manifests().length} total={total()} />
-          </>
-        )}
-      </div>
 
-      <Show when={pendingDelete()}>
-        {(manifest) => (
-          <div class="modal-overlay" onClick={() => setPendingDelete(null)}>
-            <div class="modal" onClick={(e) => e.stopPropagation()}>
-              <h2>{t("repo.deleteDigestTitle", { digest: digestShort(manifest().digest) })}</h2>
-              <p class="warning">
-                {t("repo.deleteDigestWarning", { tags: manifest().tags.length })}
-              </p>
-              <p>
-                <code>{manifest().digest}</code>
-              </p>
-              <div class="modal-actions">
-                <button class="btn" disabled={busy()} onClick={() => setPendingDelete(null)}>
-                  {t("common.cancel")}
+            <div class="table-footer">
+              <span class="page-count">
+                {t("repos.pagination", { shown: manifests().length, total: total() })}
+              </span>
+              <div class="pager">
+                <button class="page-button" type="button" disabled>
+                  {t("common.previous")}
                 </button>
-                <button class="btn btn-danger" disabled={busy()} onClick={confirmDeleteDigest}>
-                  {busy() ? t("common.deleting") : t("common.confirmDelete")}
+                <span class="page-number">1</span>
+                <button class="page-button" type="button" disabled>
+                  {t("common.next")}
                 </button>
               </div>
             </div>
           </div>
         )}
-      </Show>
+      </section>
+
+      <footer class="footer">
+        <span>
+          <strong>{t("common.updated")}:</strong>{" "}
+          {lastUpdated() ? formatAgo(lastUpdated()! / 1000) : "—"}
+        </span>
+        <span>{t("repo.footerNote")}</span>
+      </footer>
+
+      <Show when={toast()}>{(message) => <div class="toast visible">{message()}</div>}</Show>
 
       <Show when={batchConfirm()}>
         <div
-          class="modal-overlay"
+          class="modal-backdrop visible"
           onClick={() => {
             setBatchConfirm(false);
             setBatchDeleteText("");
           }}
         >
           <div class="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>{t("repo.deleteBatchTitle", { count: selected().size })}</h2>
-            <p class="warning">
+            <h3>{t("repo.deleteBatchTitle", { count: selected().size })}</h3>
+            <p>
               {t("repo.deleteBatchWarning", { tags: selectedTagCount(), count: selected().size })}
             </p>
+            <div class="selected-list">
+              <For each={manifests().filter((m) => selected().has(m.digest))}>
+                {(manifest) => (
+                  <div>
+                    <span>{digestShort(manifest.digest)}</span>
+                    <span>{t("repo.selected", { count: manifest.tags.length })}</span>
+                  </div>
+                )}
+              </For>
+            </div>
             <Show when={requiresTypedBatchConfirm()}>
-              <div class="form-group">
-                <label>{t("repo.typeDelete")}</label>
-                <input
-                  value={batchDeleteText()}
-                  onInput={(e) => setBatchDeleteText(e.currentTarget.value)}
-                />
-              </div>
+              <input
+                class="filter-input"
+                placeholder={t("repo.typeDelete")}
+                value={batchDeleteText()}
+                onInput={(e) => setBatchDeleteText(e.currentTarget.value)}
+              />
             </Show>
             <div class="modal-actions">
               <button
-                class="btn"
+                class="batch-button"
+                type="button"
                 disabled={busy()}
                 onClick={() => {
                   setBatchConfirm(false);
@@ -587,14 +787,15 @@ export default function RepoDetail() {
                 {t("common.cancel")}
               </button>
               <button
-                class="btn btn-danger"
+                class="batch-button danger"
+                type="button"
                 disabled={
                   busy() ||
                   (requiresTypedBatchConfirm() && batchDeleteText().toLowerCase() !== "delete")
                 }
                 onClick={confirmBatchDelete}
               >
-                {busy() ? t("common.deleting") : t("common.confirmDelete")}
+                {busy() ? t("common.deleting") : t("repo.deleteDigests")}
               </button>
             </div>
           </div>
