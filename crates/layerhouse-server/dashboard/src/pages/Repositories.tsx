@@ -1,7 +1,12 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { useNavigate } from "@solidjs/router";
-import { deleteRepository, fetchRepositories } from "../lib/api";
-import type { RepositoryFilter, RepositoryRecencyFilter, RepositorySummary } from "../lib/types";
+import { ApiError, deleteRepository, fetchAccountNamespaces, fetchRepositories } from "../lib/api";
+import type {
+  NamespaceResponse,
+  RepositoryFilter,
+  RepositoryRecencyFilter,
+  RepositorySummary,
+} from "../lib/types";
 import { copyToClipboard, formatAgo, formatBytes } from "../lib/format";
 import { t } from "../lib/i18n";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -17,6 +22,7 @@ function repoInitials(name: string): string {
 }
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
+type CatalogTab = "repositories" | "namespaces";
 
 function repoQuery(): URLSearchParams {
   return new URLSearchParams(window.location.hash.split("?")[1] ?? "");
@@ -37,6 +43,10 @@ function initialRecencyFilter(params: URLSearchParams): RepositoryRecencyFilter 
   return recency === "recent" || recency === "stale" ? recency : "all";
 }
 
+function initialCatalogTab(params: URLSearchParams): CatalogTab {
+  return params.get("tab") === "namespaces" ? "namespaces" : "repositories";
+}
+
 function nextLast(nextCursor: string | null): string | null {
   if (!nextCursor) return null;
   try {
@@ -50,11 +60,16 @@ export default function Repositories() {
   const initialQuery = repoQuery();
   const navigate = useNavigate();
   const [repos, setRepos] = createSignal<RepositorySummary[]>([]);
+  const [namespaces, setNamespaces] = createSignal<NamespaceResponse[]>([]);
   const [total, setTotal] = createSignal(0);
   const [loading, setLoading] = createSignal(true);
+  const [namespaceLoading, setNamespaceLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
+  const [namespaceError, setNamespaceError] = createSignal<string | null>(null);
+  const [namespaceWorkflowAvailable, setNamespaceWorkflowAvailable] = createSignal(true);
   const [errorCount, setErrorCount] = createSignal(0);
   const [lastUpdated, setLastUpdated] = createSignal<number | null>(null);
+  const [catalogTab, setCatalogTab] = createSignal<CatalogTab>(initialCatalogTab(initialQuery));
   const [search, setSearch] = createSignal(initialQuery.get("q") ?? "");
   const [filter, setFilter] = createSignal<RepositoryFilter>(initialRepositoryFilter(initialQuery));
   const [recency, setRecency] = createSignal<RepositoryRecencyFilter>(
@@ -73,12 +88,15 @@ export default function Repositories() {
 
   function updateHashQuery() {
     const params = new URLSearchParams();
+    if (catalogTab() === "namespaces") params.set("tab", "namespaces");
     if (search().trim()) params.set("q", search().trim());
-    if (filter() !== "all") params.set("filter", filter());
-    if (recency() !== "all") params.set("recency", recency());
-    if (sort() !== "updated_desc") params.set("sort", sort());
-    if (pageSize() !== 50) params.set("n", String(pageSize()));
-    if (currentLast()) params.set("last", currentLast()!);
+    if (catalogTab() === "repositories") {
+      if (filter() !== "all") params.set("filter", filter());
+      if (recency() !== "all") params.set("recency", recency());
+      if (sort() !== "updated_desc") params.set("sort", sort());
+      if (pageSize() !== 50) params.set("n", String(pageSize()));
+      if (currentLast()) params.set("last", currentLast()!);
+    }
     const query = params.toString();
     window.history.replaceState(
       null,
@@ -112,7 +130,40 @@ export default function Repositories() {
     }
   }
 
+  async function loadNamespaces() {
+    setNamespaceLoading(true);
+    try {
+      const response = await fetchAccountNamespaces();
+      setNamespaces(response.namespaces);
+      setNamespaceError(null);
+      setNamespaceWorkflowAvailable(true);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        setNamespaces([]);
+        setNamespaceError(null);
+      } else if (
+        e instanceof ApiError &&
+        e.status >= 500 &&
+        e.message.toLowerCase().includes("auth is not configured")
+      ) {
+        setNamespaces([]);
+        setNamespaceError(null);
+        setNamespaceWorkflowAvailable(false);
+      } else {
+        setNamespaceError(e instanceof Error ? e.message : t("access.namespaceLoadError"));
+      }
+    } finally {
+      setNamespaceLoading(false);
+    }
+  }
+
   createEffect(() => {
+    if (catalogTab() !== "repositories") {
+      updateHashQuery();
+      setLoading(false);
+      return;
+    }
+
     search();
     filter();
     recency();
@@ -125,6 +176,25 @@ export default function Repositories() {
     onCleanup(() => {
       clearTimeout(loadId);
       clearInterval(refreshId);
+    });
+  });
+
+  createEffect(() => {
+    const tab = catalogTab();
+    if (!namespaceWorkflowAvailable()) {
+      if (tab === "namespaces") setCatalogTab("repositories");
+      return;
+    }
+
+    if (tab === "namespaces") search();
+    updateHashQuery();
+
+    const loadId = window.setTimeout(() => void loadNamespaces(), tab === "namespaces" ? 220 : 0);
+    const refreshId =
+      tab === "namespaces" ? window.setInterval(() => void loadNamespaces(), 10_000) : null;
+    onCleanup(() => {
+      clearTimeout(loadId);
+      if (refreshId) clearInterval(refreshId);
     });
   });
 
@@ -163,6 +233,16 @@ export default function Repositories() {
     setTimeout(() => setCopied(null), 1600);
   }
 
+  async function copyNamespace(handle: string) {
+    const ok = await copyToClipboard(handle);
+    if (!ok) {
+      showToast(t("common.copyError"));
+      return;
+    }
+    setCopied(`namespace-${handle}`);
+    setTimeout(() => setCopied(null), 1600);
+  }
+
   async function confirmDelete() {
     const repo = pendingDelete();
     if (!repo) return;
@@ -190,7 +270,17 @@ export default function Repositories() {
     { value: "public", label: t("repos.filter.public") },
   ];
 
-  if (errorCount() >= 3) {
+  const filteredNamespaces = () => {
+    const query = search().trim().toLowerCase();
+    if (!query) return namespaces();
+    return namespaces().filter(
+      (namespace) =>
+        namespace.handle.toLowerCase().includes(query) ||
+        namespace.owner_label.toLowerCase().includes(query),
+    );
+  };
+
+  if (catalogTab() === "repositories" && errorCount() >= 3) {
     return <ErrorBanner message={error() ?? t("common.unknown")} onRetry={load} fullPage />;
   }
 
@@ -215,13 +305,35 @@ export default function Repositories() {
           <div class="toolbar-title">
             <p class="section-label">{t("repos.catalog")}</p>
             <h2>{t("repos.eyebrow")}</h2>
+            <div class="tabs catalog-tabs" role="tablist">
+              <button
+                class={catalogTab() === "repositories" ? "active" : ""}
+                type="button"
+                onClick={() => setCatalogTab("repositories")}
+              >
+                {t("repos.tab.repositories")}
+              </button>
+              <Show when={namespaceWorkflowAvailable()}>
+                <button
+                  class={catalogTab() === "namespaces" ? "active" : ""}
+                  type="button"
+                  onClick={() => setCatalogTab("namespaces")}
+                >
+                  {t("repos.tab.namespaces")}
+                </button>
+              </Show>
+            </div>
           </div>
           <div class="list-controls">
             <div class="search" role="search">
               <input
                 type="search"
-                aria-label={t("repos.search")}
-                placeholder={t("repos.search")}
+                aria-label={
+                  catalogTab() === "namespaces" ? t("repos.searchNamespaces") : t("repos.search")
+                }
+                placeholder={
+                  catalogTab() === "namespaces" ? t("repos.searchNamespaces") : t("repos.search")
+                }
                 value={search()}
                 onInput={(e) => {
                   resetPaging();
@@ -229,161 +341,264 @@ export default function Repositories() {
                 }}
               />
             </div>
-            <div class="filter-group">
-              <For each={RECENCY_FILTERS}>
-                {(item) => (
-                  <button
-                    type="button"
-                    class={`filter${recency() === item.value ? " active" : ""}`}
-                    onClick={() => {
-                      resetPaging();
-                      setRecency(item.value);
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                )}
-              </For>
-            </div>
-            <div class="filter-group access-filter-group" aria-label={t("repos.accessFilters")}>
-              <button
-                type="button"
-                class={`filter${filter() === "all" ? " active" : ""}`}
-                onClick={() => {
-                  resetPaging();
-                  setFilter("all");
-                }}
-              >
-                {t("repos.filter.all")}
-              </button>
-              <For each={ACCESS_FILTERS}>
-                {(item) => (
-                  <button
-                    type="button"
-                    class={`filter${filter() === item.value ? " active" : ""}`}
-                    onClick={() => {
-                      resetPaging();
-                      setFilter(item.value);
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                )}
-              </For>
-            </div>
-            <div class="sort-control">
-              <label for="repo-sort">{t("repos.sort")}</label>
-              <select
-                id="repo-sort"
-                value={sort()}
-                onChange={(e) => {
-                  resetPaging();
-                  setSort(e.currentTarget.value);
-                }}
-              >
-                <option value="updated_desc">{t("repos.sort.recent")}</option>
-                <option value="updated_asc">{t("repos.sort.oldest")}</option>
-                <option value="name_asc">{t("repos.sort.name")}</option>
-                <option value="tag_count_desc">{t("repos.sort.tags")}</option>
-              </select>
-            </div>
+            <Show when={catalogTab() === "repositories"}>
+              <div class="filter-group">
+                <For each={RECENCY_FILTERS}>
+                  {(item) => (
+                    <button
+                      type="button"
+                      class={`filter${recency() === item.value ? " active" : ""}`}
+                      onClick={() => {
+                        resetPaging();
+                        setRecency(item.value);
+                      }}
+                    >
+                      {item.label}
+                    </button>
+                  )}
+                </For>
+              </div>
+              <div class="filter-group access-filter-group" aria-label={t("repos.accessFilters")}>
+                <button
+                  type="button"
+                  class={`filter${filter() === "all" ? " active" : ""}`}
+                  onClick={() => {
+                    resetPaging();
+                    setFilter("all");
+                  }}
+                >
+                  {t("repos.filter.all")}
+                </button>
+                <For each={ACCESS_FILTERS}>
+                  {(item) => (
+                    <button
+                      type="button"
+                      class={`filter${filter() === item.value ? " active" : ""}`}
+                      onClick={() => {
+                        resetPaging();
+                        setFilter(item.value);
+                      }}
+                    >
+                      {item.label}
+                    </button>
+                  )}
+                </For>
+              </div>
+              <div class="sort-control">
+                <label for="repo-sort">{t("repos.sort")}</label>
+                <select
+                  id="repo-sort"
+                  value={sort()}
+                  onChange={(e) => {
+                    resetPaging();
+                    setSort(e.currentTarget.value);
+                  }}
+                >
+                  <option value="updated_desc">{t("repos.sort.recent")}</option>
+                  <option value="updated_asc">{t("repos.sort.oldest")}</option>
+                  <option value="name_asc">{t("repos.sort.name")}</option>
+                  <option value="tag_count_desc">{t("repos.sort.tags")}</option>
+                </select>
+              </div>
+            </Show>
             <button class="action" type="button" onClick={() => setShowTokens(true)}>
               {t("repos.manageTokens")}
             </button>
           </div>
         </div>
 
-        {loading() ? (
-          <LoadingSpinner label={t("repos.loading")} />
-        ) : repos().length === 0 ? (
-          <div class="repos-empty-state">
-            <EmptyState
-              title={search() ? t("repos.empty.filtered") : t("repos.empty")}
-              description={search() ? t("repos.empty.filteredDesc") : t("repos.emptyDesc")}
-            />
-            <button class="action" type="button" onClick={() => setShowTokens(true)}>
-              {t("repos.claimNamespace")}
-            </button>
-          </div>
-        ) : (
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("common.repository")}</th>
-                  <th>{t("common.tags")}</th>
-                  <th>{t("common.updated")}</th>
-                  <th>{t("common.actions")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <For each={repos()}>
-                  {(repo) => (
-                    <tr>
-                      <td>
-                        <button class="repo-name" onClick={() => navigate(`/repos/${repo.name}`)}>
-                          <span class="repo-icon" aria-hidden="true">
-                            {repoInitials(repo.name)}
-                          </span>
-                          <span>{repo.name}</span>
-                        </button>
-                      </td>
-                      <td class="value">{repo.tag_count}</td>
-                      <td class="muted">
-                        <span class="mono">{formatAgo(repo.last_modified)}</span>
-                      </td>
-                      <td>
-                        <div class="row-actions">
-                          <button
-                            class="action copy"
-                            type="button"
-                            onClick={() => copyRepo(repo.name)}
-                          >
-                            {copied() === repo.name ? t("common.copied") : t("common.copy")}
-                          </button>
-                          <button
-                            class="action"
-                            type="button"
-                            onClick={() => navigate(`/repos/${repo.name}`)}
-                          >
-                            {t("common.details")}
-                          </button>
-                          <Show when={repo.access_level === "delete"}>
-                            <button
-                              class="action danger"
-                              type="button"
-                              onClick={() => setPendingDelete(repo)}
-                            >
-                              {t("common.delete")}
-                            </button>
-                          </Show>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </For>
-              </tbody>
-            </table>
-            <div class="table-footer">
-              <Pagination
-                start={previousLasts().length * pageSize() + 1}
-                shown={repos().length}
-                total={total()}
-                page={previousLasts().length + 1}
-                pageSize={pageSize()}
-                pageSizeOptions={PAGE_SIZE_OPTIONS}
-                hasPrevious={previousLasts().length > 0}
-                hasNext={nextPageLast() !== null}
-                onPrevious={goPrevious}
-                onNext={goNext}
-                onPageSizeChange={(size) => {
-                  resetPaging();
-                  setPageSize(size);
-                }}
+        <Show when={catalogTab() === "repositories"}>
+          {loading() ? (
+            <LoadingSpinner label={t("repos.loading")} />
+          ) : repos().length === 0 ? (
+            <div class="repos-empty-state">
+              <EmptyState
+                title={
+                  search()
+                    ? t("repos.empty.filtered")
+                    : namespaces().length > 0
+                      ? t("repos.empty.withNamespaces")
+                      : t("repos.empty")
+                }
+                description={
+                  search()
+                    ? t("repos.empty.filteredDesc")
+                    : namespaces().length > 0
+                      ? t("repos.empty.withNamespacesDesc")
+                      : t("repos.emptyDesc")
+                }
               />
+              <div class="row-actions">
+                <Show when={namespaces().length > 0}>
+                  <button type="button" class="action" onClick={() => setCatalogTab("namespaces")}>
+                    {t("repos.viewNamespaces")}
+                  </button>
+                </Show>
+                <button class="action" type="button" onClick={() => setShowTokens(true)}>
+                  {t("repos.claimNamespace")}
+                </button>
+              </div>
             </div>
-          </div>
-        )}
+          ) : (
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("common.repository")}</th>
+                    <th>{t("common.tags")}</th>
+                    <th>{t("common.updated")}</th>
+                    <th>{t("common.actions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <For each={repos()}>
+                    {(repo) => (
+                      <tr>
+                        <td>
+                          <button class="repo-name" onClick={() => navigate(`/repos/${repo.name}`)}>
+                            <span class="repo-icon" aria-hidden="true">
+                              {repoInitials(repo.name)}
+                            </span>
+                            <span>{repo.name}</span>
+                          </button>
+                        </td>
+                        <td class="value">{repo.tag_count}</td>
+                        <td class="muted">
+                          <span class="mono">{formatAgo(repo.last_modified)}</span>
+                        </td>
+                        <td>
+                          <div class="row-actions">
+                            <button
+                              class="action copy"
+                              type="button"
+                              onClick={() => copyRepo(repo.name)}
+                            >
+                              {copied() === repo.name ? t("common.copied") : t("common.copy")}
+                            </button>
+                            <button
+                              class="action"
+                              type="button"
+                              onClick={() => navigate(`/repos/${repo.name}`)}
+                            >
+                              {t("common.details")}
+                            </button>
+                            <Show when={repo.access_level === "delete"}>
+                              <button
+                                class="action danger"
+                                type="button"
+                                onClick={() => setPendingDelete(repo)}
+                              >
+                                {t("common.delete")}
+                              </button>
+                            </Show>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </For>
+                </tbody>
+              </table>
+              <div class="table-footer">
+                <Pagination
+                  start={previousLasts().length * pageSize() + 1}
+                  shown={repos().length}
+                  total={total()}
+                  page={previousLasts().length + 1}
+                  pageSize={pageSize()}
+                  pageSizeOptions={PAGE_SIZE_OPTIONS}
+                  hasPrevious={previousLasts().length > 0}
+                  hasNext={nextPageLast() !== null}
+                  onPrevious={goPrevious}
+                  onNext={goNext}
+                  onPageSizeChange={(size) => {
+                    resetPaging();
+                    setPageSize(size);
+                  }}
+                />
+              </div>
+            </div>
+          )}
+        </Show>
+
+        <Show when={catalogTab() === "namespaces"}>
+          {namespaceError() ? (
+            <ErrorBanner message={namespaceError()!} onRetry={loadNamespaces} />
+          ) : namespaceLoading() ? (
+            <LoadingSpinner label={t("repos.loadingNamespaces")} />
+          ) : filteredNamespaces().length === 0 ? (
+            <div class="repos-empty-state">
+              <EmptyState
+                title={
+                  search() ? t("repos.namespaces.empty.filtered") : t("repos.namespaces.empty")
+                }
+                description={
+                  search()
+                    ? t("repos.namespaces.empty.filteredDesc")
+                    : t("repos.namespaces.emptyDesc")
+                }
+              />
+              <button class="action" type="button" onClick={() => setShowTokens(true)}>
+                {t("repos.claimNamespace")}
+              </button>
+            </div>
+          ) : (
+            <div class="table-wrap namespace-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("access.namespaceHandle")}</th>
+                    <th>{t("access.owner")}</th>
+                    <th>{t("access.created")}</th>
+                    <th>{t("common.actions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <For each={filteredNamespaces()}>
+                    {(namespace) => (
+                      <tr>
+                        <td>
+                          <div class="namespace-cell">
+                            <span class="repo-icon" aria-hidden="true">
+                              {repoInitials(namespace.handle)}
+                            </span>
+                            <div>
+                              <code>{namespace.handle}</code>
+                              <span>
+                                {t("repos.namespacePushHint", { handle: namespace.handle })}
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="access-owner-cell">
+                            <strong>{namespace.owner_label}</strong>
+                            <span>{t(`access.ownerKind.${namespace.owner_kind}`)}</span>
+                          </div>
+                        </td>
+                        <td class="muted">
+                          <span class="mono">{formatAgo(namespace.created_at)}</span>
+                        </td>
+                        <td>
+                          <div class="row-actions">
+                            <button
+                              class="action copy"
+                              type="button"
+                              onClick={() => copyNamespace(namespace.handle)}
+                            >
+                              {copied() === `namespace-${namespace.handle}`
+                                ? t("common.copied")
+                                : t("common.copy")}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </For>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Show>
       </section>
 
       <footer class="footer">
