@@ -107,7 +107,7 @@ the Secret and mount `ca.crt` for both trust paths.
 | Raft mTLS | enabled |
 | Authentication | disabled |
 | External S3 | required |
-| Image | `ghcr.io/adamcavendish/layerhouse-server:<version>` |
+| Image | `ghcr.io/layerhouse-oci/layerhouse-server:<version>` |
 
 ## Sidecars
 

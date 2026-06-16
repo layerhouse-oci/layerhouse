@@ -60,7 +60,7 @@ services:
     restart: "no"
 
   layerhouse:
-    image: ghcr.io/adamcavendish/layerhouse-server:latest
+    image: ghcr.io/layerhouse-oci/layerhouse-server:latest
     hostname: layerhouse-0
     volumes:
       - ./config/standalone.toml:/etc/layerhouse/config.toml:ro
