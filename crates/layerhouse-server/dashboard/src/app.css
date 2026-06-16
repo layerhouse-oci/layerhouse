@@ -57,9 +57,9 @@
   --topbar-border: rgba(255, 255, 255, 0.055);
   --brand-mark-shadow: 0 9px 24px rgba(0, 0, 0, 0.28);
   --radius-lg: 20px;
-  --radius: 18px;
-  --radius-sm: 16px;
-  --button-radius: 12px;
+  --radius: 8px;
+  --radius-sm: 8px;
+  --button-radius: 8px;
   --max: 1220px;
   --page-x: clamp(24px, 4vw, 40px);
 
@@ -326,6 +326,7 @@ a {
 
 .account-control {
   position: relative;
+  min-width: 0;
 }
 
 .account-chip {
@@ -406,7 +407,7 @@ a {
   align-items: center;
   padding: 8px 10px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--button-radius);
   background: transparent;
   color: var(--muted);
   font: inherit;
@@ -490,7 +491,7 @@ a {
   min-width: 38px;
   padding: 0 7px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--button-radius);
   background: transparent;
   color: var(--muted);
   font: inherit;
@@ -777,7 +778,7 @@ h1 {
   display: grid;
   place-items: center;
   border: 1px solid var(--icon-border);
-  border-radius: 12px;
+  border-radius: var(--button-radius);
   color: var(--icon-text);
   background: var(--control);
   box-shadow: var(--control-shadow);
@@ -1728,12 +1729,20 @@ code {
   min-height: 30px;
   display: inline-flex;
   align-items: center;
-  padding: 0 10px;
+  padding: 0 8px;
   border: 1px solid var(--border);
   border-radius: var(--button-radius);
   background: var(--control);
   color: var(--text);
   font-size: 12px;
+}
+
+.pagination-size select {
+  min-height: 30px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
 }
 
 .pagination-controls {
@@ -1895,6 +1904,55 @@ label {
   text-align: left;
 }
 
+:root[dir="rtl"] .account-menu {
+  right: auto;
+  left: 0;
+}
+
+:root[dir="rtl"] .account-menu-row {
+  text-align: right;
+}
+
+:root[dir="rtl"] .repos-page .table-wrap,
+:root[dir="rtl"] .repo-detail .table-wrap,
+:root[dir="rtl"] .mirror-page .table-wrap,
+:root[dir="rtl"] .proxy-page .table-wrap,
+:root[dir="rtl"] .cluster-page .table-wrap,
+:root[dir="rtl"] .access-namespace-list {
+  direction: ltr;
+}
+
+:root[dir="rtl"] .repos-page th,
+:root[dir="rtl"] .repos-page td,
+:root[dir="rtl"] .repo-detail th,
+:root[dir="rtl"] .repo-detail td,
+:root[dir="rtl"] .mirror-page th,
+:root[dir="rtl"] .mirror-page td,
+:root[dir="rtl"] .proxy-page th,
+:root[dir="rtl"] .proxy-page td,
+:root[dir="rtl"] .cluster-page th,
+:root[dir="rtl"] .cluster-page td,
+:root[dir="rtl"] .access-namespace-list th,
+:root[dir="rtl"] .access-namespace-list td {
+  direction: rtl;
+}
+
+:root[dir="rtl"] .repo-name,
+:root[dir="rtl"] .repo-path,
+:root[dir="rtl"] .digest,
+:root[dir="rtl"] code,
+:root[dir="rtl"] pre,
+:root[dir="rtl"] .mono {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+:root[dir="rtl"] .row-actions,
+:root[dir="rtl"] .filter-group,
+:root[dir="rtl"] .pagination-controls {
+  flex-direction: row-reverse;
+}
+
 .full {
   grid-column: 1 / -1;
 }
@@ -1939,17 +1997,64 @@ label {
 }
 
 .access-scope-results,
-.access-selected-scopes {
+.access-selected-scopes,
+.access-namespace-list {
   display: grid;
   gap: 10px;
 }
 
 .access-scope-option,
-.access-selected-scope {
+.access-selected-scope,
+.access-claim-box {
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface-solid);
+}
+
+.access-section-head,
+.access-claim-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.access-section-head h2,
+.access-namespace-list h3 {
+  margin: 0 0 6px;
+  color: var(--strong);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.access-claim-actions {
+  align-items: center;
+  margin: 12px 0 0;
+}
+
+.access-success {
+  color: var(--green);
+}
+
+.access-namespace-list {
+  margin-top: 16px;
+  overflow-x: auto;
+}
+
+.access-namespace-list table {
+  min-width: 620px;
+}
+
+.access-owner-cell {
+  display: grid;
+  gap: 3px;
+}
+
+.access-owner-cell span {
+  color: var(--faint);
+  font-size: 12px;
 }
 
 .access-scope-option {
@@ -2397,13 +2502,25 @@ pre {
 
   .topbar-controls {
     justify-content: flex-start;
-    overflow-x: auto;
+    flex-wrap: wrap;
+    overflow: visible;
     width: 100%;
   }
 
   .account-control,
   .account-chip {
+    min-width: 0;
     max-width: 100%;
+  }
+
+  .account-chip {
+    width: auto;
+    max-width: min(100%, 220px);
+  }
+
+  .access-section-head,
+  .access-claim-actions {
+    display: grid;
   }
 
   .locale-control {
@@ -2510,20 +2627,18 @@ pre {
 }
 
 .repos-page .toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(240px, max-content) minmax(0, 1fr);
+  align-items: end;
   gap: 18px;
   margin: 0;
   padding: 18px 20px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.065);
   background: rgba(255, 255, 255, 0.026);
-  grid-template-columns: none;
 }
 
 .repos-page .toolbar-title {
-  flex: 0 0 auto;
-  min-width: 190px;
+  min-width: 0;
 }
 
 .repos-page .toolbar-title h2 {
@@ -2536,10 +2651,10 @@ pre {
 }
 
 .repos-page .list-controls {
-  flex: 1;
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 12px;
   min-width: 0;
 }
@@ -2604,7 +2719,7 @@ pre {
   justify-content: center;
   padding: 0 12px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--button-radius);
   color: var(--muted);
   background: transparent;
   font-size: 13px;
@@ -2656,6 +2771,7 @@ pre {
 
 .repos-page .table-wrap {
   overflow-x: auto;
+  max-width: 100%;
   padding: 0 20px 18px;
 }
 
@@ -2663,6 +2779,13 @@ pre {
   width: 100%;
   border-collapse: collapse;
   min-width: 760px;
+}
+
+.repos-empty-state {
+  display: grid;
+  place-items: center;
+  gap: 14px;
+  padding: 28px 20px 34px;
 }
 
 .repos-page th,
@@ -2716,7 +2839,7 @@ pre {
   display: grid;
   place-items: center;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
+  border-radius: var(--button-radius);
   color: rgba(255, 255, 255, 0.78);
   background: rgba(255, 255, 255, 0.045);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
@@ -2755,7 +2878,7 @@ pre {
   justify-content: center;
   padding: 0 11px;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--button-radius);
   color: var(--muted);
   background: rgba(255, 255, 255, 0.04);
   font-size: 12px;
@@ -2977,7 +3100,7 @@ pre {
   margin: 0 0 16px;
   padding: 12px 14px;
   border: 1px solid rgba(255, 69, 58, 0.24);
-  border-radius: 12px;
+  border-radius: var(--button-radius);
   color: rgba(255, 210, 207, 0.94);
   background: rgba(255, 69, 58, 0.11);
   font-size: 14px;
@@ -2993,7 +3116,7 @@ pre {
 .repos-page .delete-fact {
   padding: 12px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--button-radius);
   background: rgba(255, 255, 255, 0.04);
 }
 
@@ -3069,6 +3192,20 @@ pre {
   }
   .repos-page .filter {
     flex: 1;
+  }
+  .repos-page table {
+    min-width: 680px;
+  }
+  .repos-page .table-wrap {
+    padding-inline: 12px;
+  }
+  .repos-page .table-footer .pagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .repos-page .table-footer .pagination-controls {
+    margin-inline-start: 0;
+    justify-content: space-between;
   }
   .repos-page .sort-control {
     width: 100%;
@@ -3541,7 +3678,7 @@ pre {
   justify-content: center;
   padding: 0 8px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--button-radius);
   color: var(--muted);
   background: rgba(255, 255, 255, 0.04);
   font-size: 12px;
@@ -3773,7 +3910,7 @@ pre {
   min-height: 30px;
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--button-radius);
   color: var(--muted);
   background: rgba(255, 255, 255, 0.04);
   font-size: 12px;
@@ -3784,7 +3921,7 @@ pre {
   min-height: 26px;
   padding: 0 8px;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--button-radius);
   color: var(--muted);
   background: rgba(255, 255, 255, 0.04);
   font-size: 11px;
@@ -3914,7 +4051,7 @@ pre {
   align-items: center;
   justify-content: center;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--button-radius);
   background: rgba(255, 255, 255, 0.04);
   color: var(--muted);
   font-size: 12px;
@@ -4651,7 +4788,7 @@ pre {
 .mirror-page .page-size select {
   height: 30px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--button-radius);
   padding: 0 28px 0 10px;
   color: var(--text);
   background: rgba(255, 255, 255, 0.045);
@@ -4667,7 +4804,7 @@ pre {
   align-items: center;
   justify-content: center;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--button-radius);
   background: rgba(255, 255, 255, 0.04);
   color: var(--muted);
   font-size: 12px;
@@ -4998,33 +5135,109 @@ pre {
 }
 
 .mirror-page .run-summary {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 20px;
-  padding-bottom: 20px;
+  gap: clamp(20px, 4vw, 54px);
+  padding: 26px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .mirror-page .run-ring {
-  width: 80px;
-  height: 80px;
+  position: relative;
+  width: 74px;
+  height: 74px;
   flex-shrink: 0;
   border-radius: 50%;
-  background: conic-gradient(var(--blue) var(--run-progress, 0deg), rgba(255, 255, 255, 0.08) 0deg);
   display: grid;
   place-items: center;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0) 62%),
+    rgba(255, 255, 255, 0.035);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.055),
+    0 10px 28px rgba(0, 0, 0, 0.22);
 }
 
-.mirror-page .run-ring span {
+.mirror-page .run-ring::before {
+  content: none;
+}
+
+.mirror-page .run-ring svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.mirror-page .run-ring circle {
+  fill: none;
+  stroke-width: 4.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.mirror-page .run-ring-track {
+  stroke: rgba(255, 255, 255, 0.09);
+}
+
+.mirror-page .run-ring-value {
+  stroke: var(--blue);
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  transition: stroke-dashoffset 220ms ease;
+  filter: drop-shadow(0 0 6px rgba(0, 122, 255, 0.34));
+}
+
+.mirror-page .run-ring-succeeded .run-ring-value {
+  stroke: var(--green);
+  filter: drop-shadow(0 0 6px rgba(48, 209, 88, 0.34));
+}
+
+.mirror-page .run-ring-failed .run-ring-value {
+  stroke: var(--red);
+  filter: drop-shadow(0 0 6px rgba(255, 69, 58, 0.3));
+}
+
+.mirror-page .run-ring-partialfailure .run-ring-value {
+  stroke: var(--yellow);
+  filter: drop-shadow(0 0 6px rgba(255, 159, 10, 0.3));
+}
+
+.mirror-page .run-ring strong {
+  position: relative;
+  z-index: 1;
   display: grid;
   place-items: center;
-  width: 58px;
-  height: 58px;
+  width: 52px;
+  height: 52px;
   border-radius: 50%;
-  background: rgba(22, 22, 26, 0.9);
+  background: rgba(22, 22, 26, 0.92);
   color: var(--strong);
-  font-size: 15px;
-  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.045);
+}
+
+.mirror-page .run-summary-current {
+  min-width: 0;
+}
+
+.mirror-page .run-summary-current h3,
+.mirror-page .run-summary-current p {
+  max-width: 640px;
+}
+
+.mirror-page .run-summary-current h3,
+.mirror-page .run-summary-progress h3 {
+  overflow-wrap: anywhere;
+}
+
+.mirror-page .run-summary-progress {
+  min-width: 142px;
+  text-align: left;
 }
 
 .mirror-page .run-current {
@@ -5123,6 +5336,18 @@ pre {
   color: var(--faint);
   font-size: 13px;
   padding: 16px 0;
+}
+
+@media (max-width: 760px) {
+  .mirror-page .run-summary {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .mirror-page .run-summary-progress {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
 }
 
 /* -- footer -- */
@@ -5531,7 +5756,7 @@ pre {
 .proxy-page .page-size select {
   height: 30px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--button-radius);
   padding: 0 28px 0 10px;
   color: var(--text);
   background: rgba(255, 255, 255, 0.045);
@@ -5547,7 +5772,7 @@ pre {
   align-items: center;
   justify-content: center;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--button-radius);
   background: rgba(255, 255, 255, 0.04);
   color: var(--muted);
   font-size: 12px;

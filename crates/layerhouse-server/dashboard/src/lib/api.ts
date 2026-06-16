@@ -1,5 +1,6 @@
 import type {
   CatalogResponse,
+  ClaimNamespaceRequest,
   ClusterStatus,
   CreateTokenRequest,
   CreateTokenResponse,
@@ -14,9 +15,12 @@ import type {
   ManifestResponse,
   MirrorRule,
   MirrorRuleCreate,
+  NamespaceListResponse,
+  NamespaceResponse,
   PersonalAccessToken,
   ProxyCache,
   ProxyCacheCreate,
+  ReleaseNamespaceRequest,
   RepositoryFilter,
   RepositoryListResponse,
   SyncJob,
@@ -179,9 +183,10 @@ export function fetchRepositories(
   params: {
     q?: string;
     filter?: RepositoryFilter;
+    recency?: string;
     sort?: string;
-    page_size?: number;
-    cursor?: string;
+    n?: number;
+    last?: string;
   } = {},
 ): Promise<RepositoryListResponse> {
   return fetchJson(`/api/v1/repositories${qs(params)}`);
@@ -267,6 +272,42 @@ export function fetchGrantableScopes(
   } = {},
 ): Promise<GrantableScopeListResponse> {
   return fetchJson(`/api/v1/tokens/grantable-scopes${qs(params)}`);
+}
+
+export function fetchNamespaces(): Promise<NamespaceListResponse> {
+  return fetchJson("/api/v1/admin/namespaces");
+}
+
+export function fetchNamespace(handle: string): Promise<NamespaceResponse> {
+  return fetchJson(`/api/v1/admin/namespaces/${encodeURIComponent(handle)}`);
+}
+
+export function claimNamespace(
+  handle: string,
+  request: ClaimNamespaceRequest = {},
+): Promise<NamespaceResponse> {
+  return fetchJson(`/api/v1/admin/namespaces/${encodeURIComponent(handle)}/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function releaseNamespace(
+  handle: string,
+  request: ReleaseNamespaceRequest = {},
+): Promise<void> {
+  await fetchNoBody(`/api/v1/admin/namespaces/${encodeURIComponent(handle)}/release`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function revokeNamespace(handle: string): Promise<void> {
+  await fetchNoBody(`/api/v1/admin/namespaces/${encodeURIComponent(handle)}/revoke`, {
+    method: "POST",
+  });
 }
 
 export function createPersonalAccessToken(token: CreateTokenRequest): Promise<CreateTokenResponse> {

@@ -673,7 +673,7 @@ export default function Mirror() {
                               <td class="time">
                                 {job.status === "Running"
                                   ? "—"
-                                  : job.schedule
+                                  : job.interval_secs > 0
                                     ? t("mirror.scheduled")
                                     : t("common.manual")}
                               </td>
@@ -769,15 +769,37 @@ export default function Mirror() {
                 {(run) => (
                   <div class="run-inspector-body">
                     <div class="run-summary">
-                      <div
-                        class="run-ring"
-                        style={{
-                          "--run-progress": `${progressPercent(run()) * 3.6}deg`,
-                        }}
-                      >
-                        <span>{progressPercent(run())}%</span>
+                      <div class={`run-ring run-ring-${run().status.toLowerCase()}`}>
+                        <svg viewBox="0 0 44 44" aria-hidden="true">
+                          <circle class="run-ring-track" cx="22" cy="22" r="18" pathLength="100" />
+                          <circle
+                            class="run-ring-value"
+                            cx="22"
+                            cy="22"
+                            r="18"
+                            pathLength="100"
+                            style={{
+                              "stroke-dashoffset": `${100 - progressPercent(run())}`,
+                            }}
+                          />
+                        </svg>
+                        <strong>{progressPercent(run())}%</strong>
                       </div>
-                      <div>
+                      <div class="run-summary-current">
+                        <p class="label">{t("mirror.current")}</p>
+                        <h3>{run().phase ?? run().status}</h3>
+                        <p>
+                          {run().current_tag
+                            ? t("mirror.currentTag", { tag: run().current_tag ?? "" })
+                            : t("mirror.updated", {
+                                time: formatAgo(
+                                  run().updated_at ?? run().finished_at ?? run().started_at,
+                                ),
+                              })}
+                        </p>
+                        <p>{t("mirror.failures", { count: (run().tags_failed ?? []).length })}</p>
+                      </div>
+                      <div class="run-summary-progress">
                         <p class="label">{t("mirror.progress")}</p>
                         <h3>{progressSummary(run())}</h3>
                         <p>
@@ -786,21 +808,6 @@ export default function Mirror() {
                           })}
                         </p>
                       </div>
-                    </div>
-
-                    <div class="run-current">
-                      <p class="label">{t("mirror.current")}</p>
-                      <h3>{run().phase ?? run().status}</h3>
-                      <p>
-                        {run().current_tag
-                          ? t("mirror.currentTag", { tag: run().current_tag ?? "" })
-                          : t("mirror.updated", {
-                              time: formatAgo(
-                                run().updated_at ?? run().finished_at ?? run().started_at,
-                              ),
-                            })}
-                      </p>
-                      <p>{t("mirror.failures", { count: (run().tags_failed ?? []).length })}</p>
                     </div>
 
                     <div class="run-events">
