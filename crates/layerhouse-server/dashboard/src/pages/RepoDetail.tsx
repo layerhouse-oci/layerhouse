@@ -95,7 +95,7 @@ export default function RepoDetail() {
 
   createEffect(() => {
     const name = repo();
-    fetchRepositories({ q: name, page_size: 1 })
+    fetchRepositories({ q: name, n: 1 })
       .then((res) => {
         const match = res.repositories.find((r) => r.name === name);
         setRepoAccess(match ?? null);

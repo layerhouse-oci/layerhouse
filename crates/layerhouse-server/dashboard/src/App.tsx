@@ -12,7 +12,7 @@ import {
   type Locale,
 } from "./lib/i18n";
 import { resolvedTheme, setTheme, theme, THEMES, type ThemePreference } from "./lib/theme";
-import { fetchSession, logoutSession } from "./lib/api";
+import { fetchSession, logoutSession, redirectToSignIn } from "./lib/api";
 import type { DashboardSession } from "./lib/types";
 
 const Overview = lazy(() => import("./pages/Overview"));
@@ -153,9 +153,9 @@ const AppShell: Component<RouteSectionProps> = (props) => {
               ))}
             </div>
             <Show when={session()?.auth_enabled && !session()?.subject}>
-              <a class="btn" href="/oauth2/start">
+              <button type="button" class="btn" onClick={redirectToSignIn}>
                 {t("access.signInWithOidc")}
-              </a>
+              </button>
             </Show>
             <Show when={session()?.auth_enabled && session()?.subject}>
               <div class="account-control">
@@ -207,9 +207,9 @@ const AppShell: Component<RouteSectionProps> = (props) => {
                 <p>{t("access.signInDesc")}</p>
                 <p class="hint">{t("access.dockerClientsUsePat")}</p>
               </div>
-              <a class="btn btn-primary" href="/oauth2/start">
+              <button type="button" class="btn btn-primary" onClick={redirectToSignIn}>
                 {t("access.signInWithOidc")}
-              </a>
+              </button>
             </section>
           </Show>
         </div>

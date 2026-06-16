@@ -1,3 +1,4 @@
+import { redirectToSignIn } from "../lib/api";
 import { t } from "../lib/i18n";
 
 export default function OAuth2Error() {
@@ -7,9 +8,9 @@ export default function OAuth2Error() {
         <p class="eyebrow">{t("oauth2.errorEyebrow")}</p>
         <h1>{t("oauth2.stateErrorTitle")}</h1>
         <p>{t("oauth2.stateErrorDesc")}</p>
-        <a class="btn btn-primary" href="/oauth2/start">
+        <button type="button" class="btn btn-primary" onClick={redirectToSignIn}>
           {t("oauth2.restartLogin")}
-        </a>
+        </button>
       </div>
     </div>
   );
