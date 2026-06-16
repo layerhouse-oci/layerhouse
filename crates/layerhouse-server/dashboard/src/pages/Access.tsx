@@ -5,16 +5,26 @@ import LoadingSpinner from "../components/LoadingSpinner";
 import {
   ApiError,
   claimNamespace,
+  createAccountNamespaceGrant,
+  createAdminNamespaceGrant,
   createPersonalAccessToken,
+  deleteAccountNamespaceGrant,
+  deleteAdminNamespaceGrant,
   deletePersonalAccessToken,
   fetchAccountNamespaces,
+  fetchAccountNamespaceGrants,
+  fetchAdminNamespaceGrantAudit,
+  fetchAdminNamespaceGrants,
   fetchGrantableScopes,
   fetchNamespaces,
+  fetchObservedUsers,
   fetchPersonalAccessTokens,
   fetchSession,
   releaseNamespace,
   redirectToSignIn,
   revokeNamespace,
+  updateAccountNamespaceGrant,
+  updateAdminNamespaceGrant,
 } from "../lib/api";
 import { copyToClipboard, formatAgo, formatTime } from "../lib/format";
 import { t } from "../lib/i18n";
@@ -23,14 +33,20 @@ import type {
   DashboardSession,
   GrantSource,
   GrantableScope,
+  NamespaceGrant,
+  NamespaceGrantAuditEvent,
+  NamespaceGrantGrantee,
   NamespaceResponse,
   NamespacePatternScope,
+  ObservedIdentity,
   OciAction,
   PersonalAccessToken,
 } from "../lib/types";
 
 type AccessTab = "tokens" | "namespaces" | "session" | "permissions" | "admin";
 type ScopeKind = "repository" | "namespace_pattern";
+type GrantScope = "account" | "admin";
+type GrantGranteeKind = NamespaceGrantGrantee["kind"];
 
 interface TokenForm {
   name: string;
@@ -47,9 +63,35 @@ interface SelectedScope {
   actions: OciAction[];
 }
 
+interface GrantModalState {
+  scope: GrantScope;
+  namespace: NamespaceResponse;
+  grant?: NamespaceGrant;
+}
+
+interface GrantForm {
+  granteeKind: GrantGranteeKind;
+  groupName: string;
+  userQuery: string;
+  selectedUser: ObservedIdentity | null;
+  publicLabel: string;
+  action: OciAction;
+  reason: string;
+}
+
 const EMPTY_FORM: TokenForm = {
   name: "",
   expiresInDays: "30",
+};
+
+const EMPTY_GRANT_FORM: GrantForm = {
+  granteeKind: "group",
+  groupName: "",
+  userQuery: "",
+  selectedUser: null,
+  publicLabel: "Public",
+  action: "pull",
+  reason: "",
 };
 
 const ACTIONS: OciAction[] = ["pull", "create", "update", "delete"];
@@ -98,8 +140,33 @@ function actionLabel(action: OciAction): string {
   return t(`access.action.${action}`);
 }
 
+function actionSummary(action: OciAction): string {
+  return t("access.grantAllows", { action: actionLabel(action) });
+}
+
 function formatScopeActions(actions: OciAction[]): string {
   return actions.map(actionLabel).join(", ");
+}
+
+function observedUserLabel(user: ObservedIdentity): string {
+  return user.display_name || user.username || user.email || user.subject;
+}
+
+function granteeKindLabel(kind: GrantGranteeKind): string {
+  return t(`access.grantee.${kind}`);
+}
+
+function grantLabel(grant: NamespaceGrant): string {
+  if (grant.label) return grant.label;
+  if (grant.grantee.kind === "group") return grant.grantee.name;
+  if (grant.grantee.kind === "user") return grant.grantee.subject;
+  return t("access.grantee.public");
+}
+
+function granteeDetail(grant: NamespaceGrant): string {
+  if (grant.grantee.kind === "group") return grant.grantee.name;
+  if (grant.grantee.kind === "user") return grant.grantee.subject;
+  return t("access.publicPullOnly");
 }
 
 function scopeFromRepository(scope: GrantableScope): SelectedScope {
@@ -148,6 +215,64 @@ function normalizeNamespaceHandle(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function GrantTable(props: {
+  grants: NamespaceGrant[];
+  scope: GrantScope;
+  namespace: NamespaceResponse;
+  onEdit: (grant: NamespaceGrant) => void;
+  onDelete: (grant: NamespaceGrant) => void;
+}) {
+  return (
+    <Show when={props.grants.length > 0} fallback={<p class="hint">{t("access.noGrants")}</p>}>
+      <div class="access-grants-table">
+        <table>
+          <thead>
+            <tr>
+              <th>{t("access.grantee")}</th>
+              <th>{t("access.permission")}</th>
+              <th>{t("access.updated")}</th>
+              <th>{t("common.actions")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <For each={props.grants}>
+              {(grant) => (
+                <tr>
+                  <td>
+                    <div class="access-owner-cell">
+                      <strong>{grantLabel(grant)}</strong>
+                      <span>
+                        {granteeKindLabel(grant.grantee.kind)} · {granteeDetail(grant)}
+                      </span>
+                    </div>
+                  </td>
+                  <td>
+                    <span class="badge badge-blue">{actionSummary(grant.action)}</span>
+                  </td>
+                  <td>{formatTime(grant.updated_at)}</td>
+                  <td>
+                    <div class="row-actions">
+                      <button class="btn btn-compact" onClick={() => props.onEdit(grant)}>
+                        {t("common.edit")}
+                      </button>
+                      <button
+                        class="btn btn-compact btn-danger"
+                        onClick={() => props.onDelete(grant)}
+                      >
+                        {t("common.delete")}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </For>
+          </tbody>
+        </table>
+      </div>
+    </Show>
+  );
+}
+
 export default function Access(props: { onClose?: () => void }) {
   const isModal = () => props.onClose !== undefined;
   const [tab, setTab] = createSignal<AccessTab>("tokens");
@@ -155,6 +280,19 @@ export default function Access(props: { onClose?: () => void }) {
   const [tokens, setTokens] = createSignal<PersonalAccessToken[]>([]);
   const [accountNamespaces, setAccountNamespaces] = createSignal<NamespaceResponse[]>([]);
   const [adminNamespaces, setAdminNamespaces] = createSignal<NamespaceResponse[]>([]);
+  const [accountNamespaceGrants, setAccountNamespaceGrants] = createSignal<
+    Record<string, NamespaceGrant[]>
+  >({});
+  const [adminNamespaceGrants, setAdminNamespaceGrants] = createSignal<
+    Record<string, NamespaceGrant[]>
+  >({});
+  const [adminNamespaceAudit, setAdminNamespaceAudit] = createSignal<
+    Record<string, NamespaceGrantAuditEvent[]>
+  >({});
+  const [selectedAccountNamespace, setSelectedAccountNamespace] =
+    createSignal<NamespaceResponse | null>(null);
+  const [selectedAdminNamespace, setSelectedAdminNamespace] =
+    createSignal<NamespaceResponse | null>(null);
   const [adminNamespaceSearch, setAdminNamespaceSearch] = createSignal("");
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
@@ -178,6 +316,19 @@ export default function Access(props: { onClose?: () => void }) {
   const [claiming, setClaiming] = createSignal(false);
   const [namespaceMessage, setNamespaceMessage] = createSignal<string | null>(null);
   const [namespaceError, setNamespaceError] = createSignal<string | null>(null);
+  const [grantModal, setGrantModal] = createSignal<GrantModalState | null>(null);
+  const [grantForm, setGrantForm] = createSignal<GrantForm>({ ...EMPTY_GRANT_FORM });
+  const [grantSaving, setGrantSaving] = createSignal(false);
+  const [grantError, setGrantError] = createSignal<string | null>(null);
+  const [observedUsers, setObservedUsers] = createSignal<ObservedIdentity[]>([]);
+  const [observedUserLoading, setObservedUserLoading] = createSignal(false);
+  const [grantDeleteTarget, setGrantDeleteTarget] = createSignal<{
+    scope: GrantScope;
+    namespace: NamespaceResponse;
+    grant: NamespaceGrant;
+  } | null>(null);
+  const [grantDeleteReason, setGrantDeleteReason] = createSignal("");
+  const [grantDeleting, setGrantDeleting] = createSignal(false);
   const [releaseTarget, setReleaseTarget] = createSignal<NamespaceResponse | null>(null);
   const [releaseReason, setReleaseReason] = createSignal("");
   const [releasing, setReleasing] = createSignal(false);
@@ -195,16 +346,24 @@ export default function Access(props: { onClose?: () => void }) {
         setTokens(await fetchPersonalAccessTokens());
         const accountResponse = await fetchAccountNamespaces();
         setAccountNamespaces(accountResponse.namespaces);
+        if (!selectedAccountNamespace() && accountResponse.namespaces.length > 0) {
+          setSelectedAccountNamespace(accountResponse.namespaces[0]);
+        }
+        await refreshAccountGrantMap(accountResponse.namespaces);
         if (nextSession.is_admin) {
           const response = await fetchNamespaces();
           setAdminNamespaces(response.namespaces);
         } else {
           setAdminNamespaces([]);
+          setSelectedAdminNamespace(null);
         }
       } else {
         setTokens([]);
         setAccountNamespaces([]);
         setAdminNamespaces([]);
+        setAccountNamespaceGrants({});
+        setAdminNamespaceGrants({});
+        setAdminNamespaceAudit({});
       }
       setError(null);
     } catch (e) {
@@ -220,6 +379,39 @@ export default function Access(props: { onClose?: () => void }) {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function refreshAccountGrantMap(namespaces = accountNamespaces()) {
+    const entries = await Promise.all(
+      namespaces.map(async (namespace) => {
+        const response = await fetchAccountNamespaceGrants(namespace.handle);
+        return [namespace.handle, response.grants] as const;
+      }),
+    );
+    setAccountNamespaceGrants(Object.fromEntries(entries));
+  }
+
+  async function refreshAccountNamespaceGrants(handle: string) {
+    const response = await fetchAccountNamespaceGrants(handle);
+    setAccountNamespaceGrants({
+      ...accountNamespaceGrants(),
+      [handle]: response.grants,
+    });
+  }
+
+  async function refreshAdminNamespaceDetails(handle: string) {
+    const [grants, audit] = await Promise.all([
+      fetchAdminNamespaceGrants(handle),
+      fetchAdminNamespaceGrantAudit(handle),
+    ]);
+    setAdminNamespaceGrants({
+      ...adminNamespaceGrants(),
+      [handle]: grants.grants,
+    });
+    setAdminNamespaceAudit({
+      ...adminNamespaceAudit(),
+      [handle]: audit.audit,
+    });
   }
 
   createEffect(() => {
@@ -385,6 +577,18 @@ export default function Access(props: { onClose?: () => void }) {
     try {
       const response = await fetchAccountNamespaces();
       setAccountNamespaces(response.namespaces);
+      await refreshAccountGrantMap(response.namespaces);
+      if (!selectedAccountNamespace() && response.namespaces.length > 0) {
+        setSelectedAccountNamespace(response.namespaces[0]);
+      }
+      if (
+        selectedAccountNamespace() &&
+        !response.namespaces.some(
+          (namespace) => namespace.handle === selectedAccountNamespace()?.handle,
+        )
+      ) {
+        setSelectedAccountNamespace(response.namespaces[0] ?? null);
+      }
       return response.namespaces;
     } catch (e) {
       setNamespaceError(e instanceof Error ? e.message : t("access.namespaceLoadError"));
@@ -397,6 +601,14 @@ export default function Access(props: { onClose?: () => void }) {
     try {
       const response = await fetchNamespaces();
       setAdminNamespaces(response.namespaces);
+      if (
+        selectedAdminNamespace() &&
+        !response.namespaces.some(
+          (namespace) => namespace.handle === selectedAdminNamespace()?.handle,
+        )
+      ) {
+        setSelectedAdminNamespace(null);
+      }
     } catch (e) {
       setNamespaceError(e instanceof Error ? e.message : t("access.namespaceLoadError"));
     }
@@ -474,6 +686,182 @@ export default function Access(props: { onClose?: () => void }) {
       setNamespaceError(e instanceof Error ? e.message : t("access.namespaceRevokeError"));
     } finally {
       setRevokingNamespace(false);
+    }
+  }
+
+  function openGrantModal(scope: GrantScope, namespace: NamespaceResponse, grant?: NamespaceGrant) {
+    setGrantError(null);
+    setObservedUsers([]);
+    setGrantModal({ scope, namespace, grant });
+    if (grant) {
+      setGrantForm({
+        granteeKind: grant.grantee.kind,
+        groupName: grant.grantee.kind === "group" ? grant.grantee.name : "",
+        userQuery: grant.grantee.kind === "user" ? grant.label : "",
+        selectedUser: null,
+        publicLabel: grant.grantee.kind === "public" ? grant.label : "Public",
+        action: grant.action,
+        reason: "",
+      });
+    } else {
+      setGrantForm({ ...EMPTY_GRANT_FORM });
+    }
+  }
+
+  function closeGrantModal() {
+    if (grantSaving()) return;
+    setGrantModal(null);
+    setGrantError(null);
+    setObservedUsers([]);
+    setGrantForm({ ...EMPTY_GRANT_FORM });
+  }
+
+  async function searchUsers(query = grantForm().userQuery) {
+    setObservedUserLoading(true);
+    setGrantError(null);
+    try {
+      const response = await fetchObservedUsers(query.trim());
+      setObservedUsers(response.users);
+    } catch (e) {
+      setGrantError(e instanceof Error ? e.message : t("access.observedUserSearchError"));
+    } finally {
+      setObservedUserLoading(false);
+    }
+  }
+
+  function selectObservedUser(user: ObservedIdentity) {
+    setGrantForm({
+      ...grantForm(),
+      selectedUser: user,
+      userQuery: observedUserLabel(user),
+    });
+  }
+
+  function setGrantGranteeKind(kind: GrantGranteeKind) {
+    setGrantForm({
+      ...grantForm(),
+      granteeKind: kind,
+      action: kind === "public" ? "pull" : grantForm().action,
+    });
+    setGrantError(null);
+  }
+
+  function buildGrantRequest(): {
+    grantee: NamespaceGrantGrantee;
+    label: string | null;
+    action: OciAction;
+    reason: string | null;
+  } | null {
+    const form = grantForm();
+    const action = form.granteeKind === "public" ? "pull" : form.action;
+    if (form.granteeKind === "group") {
+      const group = form.groupName.trim();
+      if (!group) {
+        setGrantError(t("access.groupRequired"));
+        return null;
+      }
+      return {
+        grantee: { kind: "group", name: group },
+        label: group,
+        action,
+        reason: form.reason.trim() || null,
+      };
+    }
+    if (form.granteeKind === "user") {
+      const subject = form.selectedUser?.subject || form.userQuery.trim();
+      if (!subject) {
+        setGrantError(t("access.userRequired"));
+        return null;
+      }
+      return {
+        grantee: { kind: "user", subject },
+        label: form.selectedUser ? observedUserLabel(form.selectedUser) : form.userQuery.trim(),
+        action,
+        reason: form.reason.trim() || null,
+      };
+    }
+    return {
+      grantee: { kind: "public" },
+      label: form.publicLabel.trim() || t("access.grantee.public"),
+      action: "pull",
+      reason: form.reason.trim() || null,
+    };
+  }
+
+  async function saveNamespaceGrant() {
+    const modal = grantModal();
+    if (!modal) return;
+    const request = buildGrantRequest();
+    if (!request) return;
+    if (modal.scope === "admin" && !request.reason) {
+      setGrantError(t("access.adminReasonRequired"));
+      return;
+    }
+    setGrantSaving(true);
+    setGrantError(null);
+    try {
+      if (modal.scope === "account") {
+        if (modal.grant) {
+          await updateAccountNamespaceGrant(modal.namespace.handle, modal.grant.id, {
+            action: request.action,
+            label: request.label,
+          });
+        } else {
+          await createAccountNamespaceGrant(modal.namespace.handle, request);
+        }
+        await refreshAccountNamespaceGrants(modal.namespace.handle);
+      } else {
+        if (modal.grant) {
+          await updateAdminNamespaceGrant(modal.namespace.handle, modal.grant.id, {
+            action: request.action,
+            label: request.label,
+            reason: request.reason,
+          });
+        } else {
+          await createAdminNamespaceGrant(modal.namespace.handle, request);
+        }
+        await refreshAdminNamespaceDetails(modal.namespace.handle);
+      }
+      setNamespaceMessage(t("access.grantSaved"));
+      setGrantModal(null);
+      setGrantError(null);
+      setObservedUsers([]);
+      setGrantForm({ ...EMPTY_GRANT_FORM });
+    } catch (e) {
+      setGrantError(e instanceof Error ? e.message : t("access.grantSaveError"));
+    } finally {
+      setGrantSaving(false);
+    }
+  }
+
+  async function confirmDeleteGrant() {
+    const target = grantDeleteTarget();
+    if (!target) return;
+    if (target.scope === "admin" && !grantDeleteReason().trim()) {
+      setGrantError(t("access.adminReasonRequired"));
+      return;
+    }
+    setGrantDeleting(true);
+    setGrantError(null);
+    try {
+      if (target.scope === "account") {
+        await deleteAccountNamespaceGrant(target.namespace.handle, target.grant.id);
+        await refreshAccountNamespaceGrants(target.namespace.handle);
+      } else {
+        await deleteAdminNamespaceGrant(
+          target.namespace.handle,
+          target.grant.id,
+          grantDeleteReason().trim(),
+        );
+        await refreshAdminNamespaceDetails(target.namespace.handle);
+      }
+      setGrantDeleteTarget(null);
+      setGrantDeleteReason("");
+      setNamespaceMessage(t("access.grantDeleted"));
+    } catch (e) {
+      setGrantError(e instanceof Error ? e.message : t("access.grantDeleteError"));
+    } finally {
+      setGrantDeleting(false);
     }
   }
 
@@ -774,6 +1162,12 @@ export default function Access(props: { onClose?: () => void }) {
                                   >
                                     {t("access.releaseNamespace")}
                                   </button>
+                                  <button
+                                    class="btn btn-compact"
+                                    onClick={() => setSelectedAccountNamespace(namespace)}
+                                  >
+                                    {t("access.manageGrants")}
+                                  </button>
                                 </div>
                               </td>
                             </tr>
@@ -783,6 +1177,41 @@ export default function Access(props: { onClose?: () => void }) {
                     </table>
                   </Show>
                 </div>
+
+                <Show when={selectedAccountNamespace()}>
+                  {(namespace) => (
+                    <div class="access-grants-panel">
+                      <div class="access-section-head">
+                        <div>
+                          <h3>{t("access.namespaceGrants")}</h3>
+                          <p class="hint">
+                            {t("access.namespaceGrantDesc", { handle: namespace().handle })}
+                          </p>
+                        </div>
+                        <button
+                          class="btn btn-primary"
+                          onClick={() => openGrantModal("account", namespace())}
+                        >
+                          {t("access.addGrant")}
+                        </button>
+                      </div>
+                      <p class="hint">{t("access.grantHelper")}</p>
+                      <GrantTable
+                        grants={accountNamespaceGrants()[namespace().handle] ?? []}
+                        scope="account"
+                        namespace={namespace()}
+                        onEdit={(grant) => openGrantModal("account", namespace(), grant)}
+                        onDelete={(grant) =>
+                          setGrantDeleteTarget({
+                            scope: "account",
+                            namespace: namespace(),
+                            grant,
+                          })
+                        }
+                      />
+                    </div>
+                  )}
+                </Show>
               </div>
             </Show>
 
@@ -872,6 +1301,15 @@ export default function Access(props: { onClose?: () => void }) {
                               <td>
                                 <div class="row-actions">
                                   <button
+                                    class="btn btn-compact"
+                                    onClick={() => {
+                                      setSelectedAdminNamespace(namespace);
+                                      void refreshAdminNamespaceDetails(namespace.handle);
+                                    }}
+                                  >
+                                    {t("access.manageGrants")}
+                                  </button>
+                                  <button
                                     class="btn btn-compact btn-danger"
                                     onClick={() => setRevokeNamespaceTarget(namespace)}
                                   >
@@ -886,6 +1324,61 @@ export default function Access(props: { onClose?: () => void }) {
                     </table>
                   </Show>
                 </div>
+
+                <Show when={selectedAdminNamespace()}>
+                  {(namespace) => (
+                    <div class="access-grants-panel">
+                      <div class="access-section-head">
+                        <div>
+                          <h3>{t("access.adminNamespaceGrants")}</h3>
+                          <p class="hint">
+                            {t("access.adminNamespaceGrantDesc", { handle: namespace().handle })}
+                          </p>
+                        </div>
+                        <button
+                          class="btn btn-primary"
+                          onClick={() => openGrantModal("admin", namespace())}
+                        >
+                          {t("access.addGrant")}
+                        </button>
+                      </div>
+                      <GrantTable
+                        grants={adminNamespaceGrants()[namespace().handle] ?? []}
+                        scope="admin"
+                        namespace={namespace()}
+                        onEdit={(grant) => openGrantModal("admin", namespace(), grant)}
+                        onDelete={(grant) =>
+                          setGrantDeleteTarget({
+                            scope: "admin",
+                            namespace: namespace(),
+                            grant,
+                          })
+                        }
+                      />
+                      <div class="access-audit-log">
+                        <h3>{t("access.auditHistory")}</h3>
+                        <Show
+                          when={(adminNamespaceAudit()[namespace().handle] ?? []).length > 0}
+                          fallback={<p class="hint">{t("access.noAudit")}</p>}
+                        >
+                          <For each={adminNamespaceAudit()[namespace().handle] ?? []}>
+                            {(event) => (
+                              <div class="access-audit-event">
+                                <div>
+                                  <strong>{t(`access.audit.${event.operation}`)}</strong>
+                                  <span>
+                                    {event.actor_label} · {formatTime(event.created_at)}
+                                  </span>
+                                </div>
+                                <p>{event.reason}</p>
+                              </div>
+                            )}
+                          </For>
+                        </Show>
+                      </div>
+                    </div>
+                  )}
+                </Show>
               </div>
             </Show>
           </Show>
@@ -1156,6 +1649,189 @@ export default function Access(props: { onClose?: () => void }) {
             </Show>
           </div>
         </div>
+      </Show>
+
+      <Show when={grantModal()}>
+        {(modal) => (
+          <div class="modal-overlay" onClick={closeGrantModal}>
+            <div class="modal modal-wide" onClick={(event) => event.stopPropagation()}>
+              <h2>
+                {modal().grant
+                  ? t("access.editGrantTitle", { handle: modal().namespace.handle })
+                  : t("access.addGrantTitle", { handle: modal().namespace.handle })}
+              </h2>
+              <p class="hint modal-copy">{t("access.grantHelper")}</p>
+              {grantError() && <p class="warning modal-copy">{grantError()}</p>}
+
+              <div class="access-grant-form">
+                <div class="segmented" role="tablist">
+                  <For each={["group", "user", "public"] as GrantGranteeKind[]}>
+                    {(kind) => (
+                      <button
+                        type="button"
+                        class={grantForm().granteeKind === kind ? "active" : ""}
+                        disabled={Boolean(modal().grant)}
+                        onClick={() => setGrantGranteeKind(kind)}
+                      >
+                        {granteeKindLabel(kind)}
+                      </button>
+                    )}
+                  </For>
+                </div>
+
+                <Show when={grantForm().granteeKind === "group"}>
+                  <div class="form-group">
+                    <label>{t("access.groupName")}</label>
+                    <input
+                      value={grantForm().groupName}
+                      disabled={Boolean(modal().grant)}
+                      placeholder={t("access.groupNamePlaceholder")}
+                      onInput={(event) =>
+                        setGrantForm({ ...grantForm(), groupName: event.currentTarget.value })
+                      }
+                    />
+                  </div>
+                </Show>
+
+                <Show when={grantForm().granteeKind === "user"}>
+                  <div class="form-group">
+                    <label>{t("access.user")}</label>
+                    <div class="access-scope-search">
+                      <input
+                        value={grantForm().userQuery}
+                        disabled={Boolean(modal().grant)}
+                        placeholder={t("access.userSearchPlaceholder")}
+                        onInput={(event) =>
+                          setGrantForm({
+                            ...grantForm(),
+                            selectedUser: null,
+                            userQuery: event.currentTarget.value,
+                          })
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") void searchUsers();
+                        }}
+                      />
+                      <button
+                        class="btn"
+                        disabled={observedUserLoading() || Boolean(modal().grant)}
+                        onClick={() => void searchUsers()}
+                      >
+                        {observedUserLoading() ? t("common.loading") : t("access.searchUsers")}
+                      </button>
+                    </div>
+                    <div class="access-user-results">
+                      <For each={observedUsers()}>
+                        {(user) => (
+                          <button
+                            type="button"
+                            class={
+                              grantForm().selectedUser?.subject === user.subject ? "active" : ""
+                            }
+                            onClick={() => selectObservedUser(user)}
+                          >
+                            <strong>{observedUserLabel(user)}</strong>
+                            <span>{user.email || user.subject}</span>
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  </div>
+                </Show>
+
+                <Show when={grantForm().granteeKind === "public"}>
+                  <div class="access-public-grant">
+                    <strong>{t("access.publicPullOnly")}</strong>
+                    <span>{t("access.publicPullOnlyDesc")}</span>
+                  </div>
+                </Show>
+
+                <div class="form-group">
+                  <label>{t("access.permission")}</label>
+                  <div class="access-action-ladder">
+                    <For each={ACTIONS}>
+                      {(action) => (
+                        <button
+                          type="button"
+                          class={grantForm().action === action ? "active" : ""}
+                          disabled={grantForm().granteeKind === "public" && action !== "pull"}
+                          onClick={() => setGrantForm({ ...grantForm(), action })}
+                        >
+                          {actionLabel(action)}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  <p class="hint">
+                    {grantForm().granteeKind === "public"
+                      ? t("access.publicPullOnlyDesc")
+                      : actionSummary(grantForm().action)}
+                  </p>
+                </div>
+
+                <Show when={modal().scope === "admin"}>
+                  <div class="form-group">
+                    <label>{t("access.auditReason")}</label>
+                    <input
+                      value={grantForm().reason}
+                      placeholder={t("access.auditReasonPlaceholder")}
+                      onInput={(event) =>
+                        setGrantForm({ ...grantForm(), reason: event.currentTarget.value })
+                      }
+                    />
+                  </div>
+                </Show>
+              </div>
+
+              <div class="modal-actions">
+                <button class="btn" onClick={closeGrantModal}>
+                  {t("common.cancel")}
+                </button>
+                <button
+                  class="btn btn-primary"
+                  disabled={grantSaving()}
+                  onClick={saveNamespaceGrant}
+                >
+                  {grantSaving() ? t("common.saving") : t("common.save")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={grantDeleteTarget()}>
+        {(target) => (
+          <div class="modal-overlay" onClick={() => setGrantDeleteTarget(null)}>
+            <div class="modal" onClick={(event) => event.stopPropagation()}>
+              <h2>{t("access.deleteGrantTitle", { label: grantLabel(target().grant) })}</h2>
+              <p class="warning">{t("access.deleteGrantWarning")}</p>
+              {grantError() && <p class="warning">{grantError()}</p>}
+              <Show when={target().scope === "admin"}>
+                <div class="form-group">
+                  <label>{t("access.auditReason")}</label>
+                  <input
+                    value={grantDeleteReason()}
+                    placeholder={t("access.auditReasonPlaceholder")}
+                    onInput={(event) => setGrantDeleteReason(event.currentTarget.value)}
+                  />
+                </div>
+              </Show>
+              <div class="modal-actions">
+                <button class="btn" onClick={() => setGrantDeleteTarget(null)}>
+                  {t("common.cancel")}
+                </button>
+                <button
+                  class="btn btn-danger"
+                  disabled={grantDeleting()}
+                  onClick={confirmDeleteGrant}
+                >
+                  {grantDeleting() ? t("common.deleting") : t("common.delete")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </Show>
 
       <Show when={releaseTarget()}>

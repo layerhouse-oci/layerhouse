@@ -300,6 +300,98 @@ pub struct Namespace {
     pub created_at: u64,
 }
 
+/// Principal that receives a namespace-scoped grant. Groups are matched against
+/// the configured OIDC group claim at request time; users are keyed by immutable
+/// subject; public grants are anonymous and pull-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NamespaceGrantGrantee {
+    Group { name: String },
+    User { subject: Subject },
+    Public,
+}
+
+impl NamespaceGrantGrantee {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Group { name } => name.clone(),
+            Self::User { subject } => subject.as_str().to_string(),
+            Self::Public => "Public".to_string(),
+        }
+    }
+
+    pub fn stable_key(&self) -> String {
+        match self {
+            Self::Group { name } => format!("group:{name}"),
+            Self::User { subject } => format!("user:{}", subject.as_str()),
+            Self::Public => "public".to_string(),
+        }
+    }
+}
+
+/// Namespace-scoped permission grant. These grants are owner/admin-managed and
+/// separate from global config/Raft `PermissionRule` RBAC mappings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceGrant {
+    pub id: String,
+    pub namespace: String,
+    pub grantee: NamespaceGrantGrantee,
+    /// Uses the same ladder as OCI auth: Pull < Create < Update < Delete.
+    pub action: crate::auth::permissions::OciAction,
+    #[serde(default)]
+    pub label: String,
+    pub created_by: Subject,
+    pub created_at: u64,
+    pub updated_by: Subject,
+    pub updated_at: u64,
+}
+
+/// User identity observed during successful login/token validation. This is not
+/// an IdP directory; it gives the UI a searchable cache for one-off user grants
+/// while authorization still keys on immutable subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedIdentity {
+    pub subject: Subject,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    pub last_seen_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceGrantAuditOperation {
+    Create,
+    Update,
+    Delete,
+}
+
+/// Durable audit trail for grant changes. Admin edits require a reason, and
+/// owner edits also record enough state to diagnose accidental exposure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceGrantAuditEvent {
+    pub id: String,
+    pub namespace: String,
+    #[serde(default)]
+    pub grant_id: Option<String>,
+    pub operation: NamespaceGrantAuditOperation,
+    pub actor: Subject,
+    #[serde(default)]
+    pub actor_label: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub before: Option<NamespaceGrant>,
+    #[serde(default)]
+    pub after: Option<NamespaceGrant>,
+    pub created_at: u64,
+}
+
 /// Tombstone for a previously claimed handle. Recorded when a namespace is
 /// released so reclaim is admin-gated and the prior-owner UX context (frozen
 /// label, release reason, timestamp) survives the deletion.

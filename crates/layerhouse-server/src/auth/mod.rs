@@ -16,7 +16,9 @@ use axum::http::HeaderMap;
 use crate::config::{AuthConfig, CookieSecureMode, S3Config};
 use crate::error::LayerhouseError;
 use crate::store::metadata::handle::{handle_of, is_handle_reserved};
-use crate::store::metadata::{NamespaceStore, Owner, TokenStore};
+use crate::store::metadata::{
+    NamespaceGrant, NamespaceGrantGrantee, NamespaceStore, Owner, TokenStore,
+};
 
 use self::discovery::OidcDiscovery;
 use self::identity::Subject;
@@ -35,6 +37,35 @@ fn owner_grants(owner: &Owner, identity: &AuthIdentity) -> bool {
         Owner::User(subject) => *subject == identity.subject,
         Owner::Org(_) => false,
     }
+}
+
+fn namespace_grant_matches(
+    grant: &NamespaceGrant,
+    identity: &AuthIdentity,
+    action: permissions::OciAction,
+) -> bool {
+    if !permissions::action_matches(grant.action, action) {
+        return false;
+    }
+    match &grant.grantee {
+        NamespaceGrantGrantee::Group { name } => identity
+            .groups
+            .iter()
+            .any(|group| permissions::group_matches(name, group)),
+        NamespaceGrantGrantee::User { subject } => *subject == identity.subject,
+        NamespaceGrantGrantee::Public => action == permissions::OciAction::Pull,
+    }
+}
+
+fn max_namespace_grant_action(
+    grants: &[NamespaceGrant],
+    identity: &AuthIdentity,
+) -> Option<permissions::OciAction> {
+    grants
+        .iter()
+        .filter(|grant| namespace_grant_matches(grant, identity, permissions::OciAction::Pull))
+        .map(|grant| grant.action)
+        .max_by_key(|action| action_rank(*action))
 }
 
 pub struct AuthService {
@@ -577,25 +608,26 @@ impl AuthService {
         // repos) skip the gate and fall through to RBAC. `handle_of` erroring is
         // treated as "no handle to gate on", not a hard failure, so the admin
         // path and cross-namespace pulls keep working.
-        if action != permissions::OciAction::Pull
-            && let Ok(handle) = handle_of(repository)
+        if let Ok(handle) = handle_of(repository)
             && !is_handle_reserved(handle)
         {
             match namespaces.get_namespace(handle).await? {
-                // Unclaimed handle: deny up front instead of letting the write
-                // reach Raft and fail at apply. Keeps the auth answer (and any
-                // minted OCI bearer token) honest about what will succeed.
-                None => {
+                None if action != permissions::OciAction::Pull => {
                     return Err(LayerhouseError::Denied(format!(
                         "namespace {handle:?} is not claimed"
                     )));
                 }
-                // The claim owner has the full action ladder in their namespace.
+                None => {}
                 Some(ns) if owner_grants(&ns.owner, identity) => return Ok(()),
-                // Otherwise fall through to RBAC: this covers admins (their `*`
-                // grant matches the real repo) and admin-configured delegated
-                // grants (e.g. a CI group granted `team-a/*`).
-                Some(_) => {}
+                Some(_) => {
+                    let grants = namespaces.list_namespace_grants(handle).await?;
+                    if grants
+                        .iter()
+                        .any(|grant| namespace_grant_matches(grant, identity, action))
+                    {
+                        return Ok(());
+                    }
+                }
             }
         }
 
@@ -643,9 +675,14 @@ impl AuthService {
         if let Ok(handle) = handle_of(repository)
             && !is_handle_reserved(handle)
             && let Some(ns) = namespaces.get_namespace(handle).await?
-            && owner_grants(&ns.owner, identity)
         {
-            return Ok((Delete, permissions::GrantSource::Personal));
+            if owner_grants(&ns.owner, identity) {
+                return Ok((Delete, permissions::GrantSource::Personal));
+            }
+            let grants = namespaces.list_namespace_grants(handle).await?;
+            if let Some(action) = max_namespace_grant_action(&grants, identity) {
+                return Ok((action, permissions::GrantSource::GroupGrant));
+            }
         }
 
         // Check scopes (PAT or OCI bearer).
@@ -673,6 +710,30 @@ impl AuthService {
                 "access denied for repository {}",
                 repository
             ))),
+        }
+    }
+
+    pub async fn check_public_pull(
+        &self,
+        repository: &str,
+        namespaces: &dyn NamespaceStore,
+    ) -> Result<(), LayerhouseError> {
+        let handle = handle_of(repository)?;
+        if is_handle_reserved(handle) {
+            return Err(LayerhouseError::Denied(format!(
+                "repository {repository:?} is not public"
+            )));
+        }
+        let grants = namespaces.list_namespace_grants(handle).await?;
+        if grants.iter().any(|grant| {
+            matches!(grant.grantee, NamespaceGrantGrantee::Public)
+                && permissions::action_matches(grant.action, permissions::OciAction::Pull)
+        }) {
+            Ok(())
+        } else {
+            Err(LayerhouseError::Denied(format!(
+                "repository {repository:?} is not public"
+            )))
         }
     }
 
@@ -850,7 +911,10 @@ mod tests {
     use crate::auth::token::{AuthIdentity, TokenType};
     use crate::config::{AuthConfig, PermissionMapping};
     use crate::store::metadata::typed_id::OrgId;
-    use crate::store::metadata::{InMemoryMetadataStore, NamespaceStore, Owner, ReleaseReason};
+    use crate::store::metadata::{
+        InMemoryMetadataStore, NamespaceGrant, NamespaceGrantGrantee, NamespaceStore, Owner,
+        ReleaseReason,
+    };
 
     pub(super) fn auth_config() -> AuthConfig {
         AuthConfig {
@@ -973,6 +1037,33 @@ mod tests {
             .expect("claim should succeed");
     }
 
+    async fn grant(
+        store: &InMemoryMetadataStore,
+        namespace: &str,
+        id: &str,
+        grantee: NamespaceGrantGrantee,
+        action: OciAction,
+    ) {
+        store
+            .put_namespace_grant(
+                NamespaceGrant {
+                    id: id.to_string(),
+                    namespace: namespace.to_string(),
+                    label: grantee.label(),
+                    grantee,
+                    action,
+                    created_by: Subject::new("grant-owner"),
+                    created_at: 200,
+                    updated_by: Subject::new("grant-owner"),
+                    updated_at: 200,
+                },
+                "grant-owner",
+                "test",
+            )
+            .await
+            .expect("grant should persist");
+    }
+
     #[tokio::test]
     async fn write_owner_implicit_grant_and_non_owner_denied() {
         let auth = AuthService::for_test(vec![]);
@@ -1021,6 +1112,86 @@ mod tests {
         auth.check_permission(&ci, "acme/app", OciAction::Create, &store)
             .await
             .expect("delegated group grant authorizes the write");
+    }
+
+    #[tokio::test]
+    async fn namespace_group_grant_authorizes_ladder_up_to_action() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
+        grant(
+            &store,
+            "acme",
+            "grant-1",
+            NamespaceGrantGrantee::Group {
+                name: "builders".to_string(),
+            },
+            OciAction::Create,
+        )
+        .await;
+
+        let builder = identity("subject-builder", TokenType::OidcAccess, &["builders"], &[]);
+        auth.check_permission(&builder, "acme/app", OciAction::Pull, &store)
+            .await
+            .expect("create grant includes pull");
+        auth.check_permission(&builder, "acme/app", OciAction::Create, &store)
+            .await
+            .expect("create grant includes create");
+        auth.check_permission(&builder, "acme/app", OciAction::Update, &store)
+            .await
+            .expect_err("create grant does not include update");
+    }
+
+    #[tokio::test]
+    async fn namespace_user_grant_survives_label_changes_by_subject() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
+        grant(
+            &store,
+            "acme",
+            "grant-1",
+            NamespaceGrantGrantee::User {
+                subject: Subject::new("subject-alice"),
+            },
+            OciAction::Pull,
+        )
+        .await;
+
+        let mut alice = identity("subject-alice", TokenType::OidcAccess, &[], &[]);
+        alice.username = Some("renamed-alice".to_string());
+        auth.check_permission(&alice, "acme/app", OciAction::Pull, &store)
+            .await
+            .expect("user grant keys on subject, not username");
+        auth.check_permission(&alice, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("pull-only user grant cannot create");
+    }
+
+    #[tokio::test]
+    async fn namespace_public_grant_allows_pull_only() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
+        grant(
+            &store,
+            "acme",
+            "grant-public",
+            NamespaceGrantGrantee::Public,
+            OciAction::Pull,
+        )
+        .await;
+
+        auth.check_public_pull("acme/app", &store)
+            .await
+            .expect("public grant allows anonymous pull");
+        let bob = identity("subject-bob", TokenType::OidcAccess, &[], &[]);
+        auth.check_permission(&bob, "acme/app", OciAction::Pull, &store)
+            .await
+            .expect("public grant also lets authenticated users pull");
+        auth.check_permission(&bob, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("public grant cannot write");
     }
 
     #[tokio::test]

@@ -240,6 +240,50 @@ pub trait NamespaceStore: Send + Sync + 'static {
         actor: Subject,
         now: u64,
     ) -> Result<(), LayerhouseError>;
+
+    async fn list_namespace_grants(
+        &self,
+        handle: &str,
+    ) -> Result<Vec<NamespaceGrant>, LayerhouseError>;
+
+    async fn get_namespace_grant(
+        &self,
+        handle: &str,
+        grant_id: &str,
+    ) -> Result<Option<NamespaceGrant>, LayerhouseError>;
+
+    async fn put_namespace_grant(
+        &self,
+        grant: NamespaceGrant,
+        actor_label: &str,
+        reason: &str,
+    ) -> Result<NamespaceGrant, LayerhouseError>;
+
+    async fn delete_namespace_grant(
+        &self,
+        handle: &str,
+        grant_id: &str,
+        actor: Subject,
+        actor_label: &str,
+        reason: &str,
+        now: u64,
+    ) -> Result<bool, LayerhouseError>;
+
+    async fn list_namespace_grant_audit(
+        &self,
+        handle: &str,
+    ) -> Result<Vec<NamespaceGrantAuditEvent>, LayerhouseError>;
+
+    async fn put_observed_identity(
+        &self,
+        identity: ObservedIdentity,
+    ) -> Result<(), LayerhouseError>;
+
+    async fn search_observed_identities(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ObservedIdentity>, LayerhouseError>;
 }
 
 /// OCI registry core: manifest CRUD + mirror config + blob lifecycle.

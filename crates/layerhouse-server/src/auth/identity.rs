@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// The immutable IdP-issued subject (`sub` claim) that identifies an
 /// authenticated principal across username renames and profile changes.
 /// Format is opaque per OIDC — Layerhouse never generates or parses internals.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Subject(String);
 

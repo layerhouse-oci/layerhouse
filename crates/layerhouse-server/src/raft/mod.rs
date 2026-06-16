@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::identity::Subject;
 use crate::store::metadata::{
-    BlobDeleteStatus, DeleteCounts, MirrorRule, Owner, PersonalAccessToken, ProxyCache,
-    ProxyCacheTagValidation, ReleaseReason, Repository, SyncJob, SyncJobRun, WarmImage,
+    BlobDeleteStatus, DeleteCounts, MirrorRule, NamespaceGrant, ObservedIdentity, Owner,
+    PersonalAccessToken, ProxyCache, ProxyCacheTagValidation, ReleaseReason, Repository, SyncJob,
+    SyncJobRun, WarmImage,
 };
 
 openraft::declare_raft_types!(
@@ -184,11 +185,31 @@ pub enum NamespaceRequest {
         actor: Subject,
         now: u64,
     },
+    PutGrant {
+        grant: NamespaceGrant,
+        actor_label: String,
+        reason: String,
+        audit_id: String,
+    },
+    DeleteGrant {
+        handle: String,
+        grant_id: String,
+        actor: Subject,
+        actor_label: String,
+        reason: String,
+        now: u64,
+        audit_id: String,
+    },
+    PutObservedIdentity {
+        identity: ObservedIdentity,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NamespaceResponse {
     Ok,
+    Grant(NamespaceGrant),
+    Bool(bool),
 }
 
 // ── Outer wrappers (for OpenRaft TypeConfig) ─────────────────────────
