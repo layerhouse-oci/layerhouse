@@ -31,6 +31,9 @@ struct InMemoryState {
     repositories: BTreeMap<String, Repository>,
     namespaces: BTreeMap<String, Namespace>,
     released_handles: BTreeMap<String, ReleasedHandle>,
+    namespace_grants: BTreeMap<String, BTreeMap<String, NamespaceGrant>>,
+    observed_identities: BTreeMap<Subject, ObservedIdentity>,
+    namespace_grant_audit: BTreeMap<String, Vec<NamespaceGrantAuditEvent>>,
 }
 
 #[cfg(test)]
@@ -61,6 +64,9 @@ impl InMemoryState {
         let Self {
             namespaces,
             released_handles,
+            namespace_grants,
+            observed_identities,
+            namespace_grant_audit,
             manifests,
             tags,
             repositories,
@@ -69,6 +75,9 @@ impl InMemoryState {
         crate::raft::state_machine::apply_namespace_core(
             namespaces,
             released_handles,
+            namespace_grants,
+            namespace_grant_audit,
+            observed_identities,
             req,
             |handle| {
                 let prefix = format!("{handle}/");
@@ -892,6 +901,135 @@ impl NamespaceStore for InMemoryMetadataStore {
             now,
         })?;
         Ok(())
+    }
+
+    async fn list_namespace_grants(
+        &self,
+        handle: &str,
+    ) -> Result<Vec<NamespaceGrant>, LayerhouseError> {
+        let state = self.inner.read().await;
+        Ok(state
+            .namespace_grants
+            .get(handle)
+            .map(|grants| grants.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    async fn get_namespace_grant(
+        &self,
+        handle: &str,
+        grant_id: &str,
+    ) -> Result<Option<NamespaceGrant>, LayerhouseError> {
+        let state = self.inner.read().await;
+        Ok(state
+            .namespace_grants
+            .get(handle)
+            .and_then(|grants| grants.get(grant_id))
+            .cloned())
+    }
+
+    async fn put_namespace_grant(
+        &self,
+        grant: NamespaceGrant,
+        actor_label: &str,
+        reason: &str,
+    ) -> Result<NamespaceGrant, LayerhouseError> {
+        let mut state = self.inner.write().await;
+        match state.apply_namespace(NamespaceRequest::PutGrant {
+            grant,
+            actor_label: actor_label.to_string(),
+            reason: reason.to_string(),
+            audit_id: uuid::Uuid::now_v7().to_string(),
+        })? {
+            NamespaceResponse::Grant(grant) => Ok(grant),
+            NamespaceResponse::Ok | NamespaceResponse::Bool(_) => Err(LayerhouseError::Internal(
+                "unexpected namespace grant response".to_string(),
+            )),
+        }
+    }
+
+    async fn delete_namespace_grant(
+        &self,
+        handle: &str,
+        grant_id: &str,
+        actor: Subject,
+        actor_label: &str,
+        reason: &str,
+        now: u64,
+    ) -> Result<bool, LayerhouseError> {
+        let mut state = self.inner.write().await;
+        match state.apply_namespace(NamespaceRequest::DeleteGrant {
+            handle: handle.to_string(),
+            grant_id: grant_id.to_string(),
+            actor,
+            actor_label: actor_label.to_string(),
+            reason: reason.to_string(),
+            now,
+            audit_id: uuid::Uuid::now_v7().to_string(),
+        })? {
+            NamespaceResponse::Bool(deleted) => Ok(deleted),
+            NamespaceResponse::Ok | NamespaceResponse::Grant(_) => Err(LayerhouseError::Internal(
+                "unexpected namespace grant delete response".to_string(),
+            )),
+        }
+    }
+
+    async fn list_namespace_grant_audit(
+        &self,
+        handle: &str,
+    ) -> Result<Vec<NamespaceGrantAuditEvent>, LayerhouseError> {
+        let state = self.inner.read().await;
+        Ok(state
+            .namespace_grant_audit
+            .get(handle)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn put_observed_identity(
+        &self,
+        identity: ObservedIdentity,
+    ) -> Result<(), LayerhouseError> {
+        let mut state = self.inner.write().await;
+        state.apply_namespace(NamespaceRequest::PutObservedIdentity { identity })?;
+        Ok(())
+    }
+
+    async fn search_observed_identities(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ObservedIdentity>, LayerhouseError> {
+        let state = self.inner.read().await;
+        let query = query.trim().to_lowercase();
+        let mut identities: Vec<_> = state
+            .observed_identities
+            .values()
+            .filter(|identity| {
+                query.is_empty()
+                    || identity.subject.as_str().to_lowercase().contains(&query)
+                    || identity
+                        .username
+                        .as_deref()
+                        .is_some_and(|value| value.to_lowercase().contains(&query))
+                    || identity
+                        .display_name
+                        .as_deref()
+                        .is_some_and(|value| value.to_lowercase().contains(&query))
+                    || identity
+                        .email
+                        .as_deref()
+                        .is_some_and(|value| value.to_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect();
+        identities.sort_by(|a, b| {
+            b.last_seen_at
+                .cmp(&a.last_seen_at)
+                .then_with(|| a.subject.cmp(&b.subject))
+        });
+        identities.truncate(limit);
+        Ok(identities)
     }
 }
 

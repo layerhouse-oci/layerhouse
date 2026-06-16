@@ -19,9 +19,10 @@ use crate::raft::network;
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion, HelmStore,
     JobStore, ManifestEntry, ManifestStore, ManifestSummary, MirrorConfigStore, MirrorRule,
-    Namespace, NamespaceStore, Owner, PersonalAccessToken, ProxyCache, ProxyCacheTagValidation,
-    ReferrerEntry, ReleaseReason, ReleasedHandle, Repository, RepositoryStore, RepositorySummary,
-    SyncJob, SyncJobRun, TokenStore, WarmImage,
+    Namespace, NamespaceGrant, NamespaceGrantAuditEvent, NamespaceStore, ObservedIdentity, Owner,
+    PersonalAccessToken, ProxyCache, ProxyCacheTagValidation, ReferrerEntry, ReleaseReason,
+    ReleasedHandle, Repository, RepositoryStore, RepositorySummary, SyncJob, SyncJobRun,
+    TokenStore, WarmImage,
 };
 
 const FOLLOWER_READ_LAG_THRESHOLD: u64 = 100;
@@ -770,5 +771,102 @@ impl NamespaceStore for RaftMetadataStore {
         })
         .await?;
         Ok(())
+    }
+
+    async fn list_namespace_grants(
+        &self,
+        handle: &str,
+    ) -> Result<Vec<NamespaceGrant>, LayerhouseError> {
+        self.emit_read_metrics("list_namespace_grants");
+        let state = self.state.read().await;
+        Ok(state.list_namespace_grants(handle))
+    }
+
+    async fn get_namespace_grant(
+        &self,
+        handle: &str,
+        grant_id: &str,
+    ) -> Result<Option<NamespaceGrant>, LayerhouseError> {
+        self.emit_read_metrics("get_namespace_grant");
+        let state = self.state.read().await;
+        Ok(state.get_namespace_grant(handle, grant_id))
+    }
+
+    async fn put_namespace_grant(
+        &self,
+        grant: NamespaceGrant,
+        actor_label: &str,
+        reason: &str,
+    ) -> Result<NamespaceGrant, LayerhouseError> {
+        let resp = self
+            .write_namespace(NamespaceRequest::PutGrant {
+                grant,
+                actor_label: actor_label.to_string(),
+                reason: reason.to_string(),
+                audit_id: uuid::Uuid::now_v7().to_string(),
+            })
+            .await?;
+        match resp {
+            NamespaceResponse::Grant(grant) => Ok(grant),
+            NamespaceResponse::Ok | NamespaceResponse::Bool(_) => Err(LayerhouseError::Internal(
+                "unexpected namespace grant response".to_string(),
+            )),
+        }
+    }
+
+    async fn delete_namespace_grant(
+        &self,
+        handle: &str,
+        grant_id: &str,
+        actor: Subject,
+        actor_label: &str,
+        reason: &str,
+        now: u64,
+    ) -> Result<bool, LayerhouseError> {
+        let resp = self
+            .write_namespace(NamespaceRequest::DeleteGrant {
+                handle: handle.to_string(),
+                grant_id: grant_id.to_string(),
+                actor,
+                actor_label: actor_label.to_string(),
+                reason: reason.to_string(),
+                now,
+                audit_id: uuid::Uuid::now_v7().to_string(),
+            })
+            .await?;
+        match resp {
+            NamespaceResponse::Bool(deleted) => Ok(deleted),
+            NamespaceResponse::Ok | NamespaceResponse::Grant(_) => Err(LayerhouseError::Internal(
+                "unexpected namespace grant delete response".to_string(),
+            )),
+        }
+    }
+
+    async fn list_namespace_grant_audit(
+        &self,
+        handle: &str,
+    ) -> Result<Vec<NamespaceGrantAuditEvent>, LayerhouseError> {
+        self.emit_read_metrics("list_namespace_grant_audit");
+        let state = self.state.read().await;
+        Ok(state.list_namespace_grant_audit(handle))
+    }
+
+    async fn put_observed_identity(
+        &self,
+        identity: ObservedIdentity,
+    ) -> Result<(), LayerhouseError> {
+        self.write_namespace(NamespaceRequest::PutObservedIdentity { identity })
+            .await?;
+        Ok(())
+    }
+
+    async fn search_observed_identities(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ObservedIdentity>, LayerhouseError> {
+        self.emit_read_metrics("search_observed_identities");
+        let state = self.state.read().await;
+        Ok(state.search_observed_identities(query, limit))
     }
 }

@@ -16,8 +16,36 @@ pub fn routes<M: NamespaceStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> 
             axum::routing::get(handlers::list_account_namespaces::<M, B>),
         )
         .route(
+            "/api/v1/account/observed-users",
+            axum::routing::get(handlers::search_observed_users::<M, B>),
+        )
+        .route(
+            "/api/v1/account/namespaces/{handle}/grants",
+            axum::routing::get(handlers::list_account_namespace_grants::<M, B>)
+                .post(handlers::create_account_namespace_grant::<M, B>),
+        )
+        .route(
+            "/api/v1/account/namespaces/{handle}/grants/{grant_id}",
+            axum::routing::patch(handlers::update_account_namespace_grant::<M, B>)
+                .delete(handlers::delete_account_namespace_grant::<M, B>),
+        )
+        .route(
             "/api/v1/admin/namespaces",
             axum::routing::get(handlers::list_namespaces::<M, B>),
+        )
+        .route(
+            "/api/v1/admin/namespaces/{handle}/grants",
+            axum::routing::get(handlers::list_admin_namespace_grants::<M, B>)
+                .post(handlers::create_admin_namespace_grant::<M, B>),
+        )
+        .route(
+            "/api/v1/admin/namespaces/{handle}/grants/{grant_id}",
+            axum::routing::patch(handlers::update_admin_namespace_grant::<M, B>)
+                .delete(handlers::delete_admin_namespace_grant::<M, B>),
+        )
+        .route(
+            "/api/v1/admin/namespaces/{handle}/grant-audit",
+            axum::routing::get(handlers::list_admin_namespace_grant_audit::<M, B>),
         )
         .route(
             "/api/v1/admin/namespaces/{handle}",
@@ -92,6 +120,36 @@ mod tests {
     ) -> axum::http::Request<Body> {
         let mut req = axum::http::Request::builder()
             .method(axum::http::Method::POST)
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(body).unwrap_or_default()))
+            .unwrap();
+        req.extensions_mut().insert(identity.clone());
+        req
+    }
+
+    fn patch_json(
+        uri: &str,
+        body: &impl Serialize,
+        identity: &AuthIdentity,
+    ) -> axum::http::Request<Body> {
+        let mut req = axum::http::Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(body).unwrap_or_default()))
+            .unwrap();
+        req.extensions_mut().insert(identity.clone());
+        req
+    }
+
+    fn delete_json(
+        uri: &str,
+        body: &impl Serialize,
+        identity: &AuthIdentity,
+    ) -> axum::http::Request<Body> {
+        let mut req = axum::http::Request::builder()
+            .method(axum::http::Method::DELETE)
             .uri(uri)
             .header("Content-Type", "application/json")
             .body(Body::from(serde_json::to_string(body).unwrap_or_default()))
@@ -227,6 +285,158 @@ mod tests {
         assert_eq!(data["namespaces"].as_array().unwrap().len(), 1);
         assert_eq!(data["namespaces"][0]["handle"], "acme");
         assert_eq!(data["namespaces"][0]["owner_kind"], "user");
+    }
+
+    #[tokio::test]
+    async fn owner_can_manage_namespace_grants() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/admin/namespaces/acme/claim",
+                &serde_json::json!({}),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/account/namespaces/acme/grants",
+                &serde_json::json!({
+                    "grantee": {"kind": "group", "name": "builders"},
+                    "action": "create"
+                }),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let grant_id = data["id"].as_str().unwrap().to_string();
+        assert_eq!(data["action"], "create");
+
+        let resp = app
+            .clone()
+            .oneshot(patch_json(
+                &format!("/api/v1/account/namespaces/acme/grants/{grant_id}"),
+                &serde_json::json!({"action": "update"}),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(get(
+                "/api/v1/account/namespaces/acme/grants",
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data["grants"][0]["action"], "update");
+
+        let resp = app
+            .oneshot(delete_json(
+                &format!("/api/v1/account/namespaces/acme/grants/{grant_id}"),
+                &serde_json::json!({}),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn non_owner_cannot_manage_account_namespace_grants() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        app.clone()
+            .oneshot(post_json(
+                "/api/v1/admin/namespaces/acme/claim",
+                &serde_json::json!({}),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(post_json(
+                "/api/v1/account/namespaces/acme/grants",
+                &serde_json::json!({
+                    "grantee": {"kind": "group", "name": "builders"},
+                    "action": "pull"
+                }),
+                &other_user_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_grant_mutations_require_reason_and_write_audit() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        app.clone()
+            .oneshot(post_json(
+                "/api/v1/admin/namespaces/acme/claim",
+                &serde_json::json!({}),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/admin/namespaces/acme/grants",
+                &serde_json::json!({
+                    "grantee": {"kind": "user", "subject": "user-2"},
+                    "action": "pull"
+                }),
+                &admin_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/admin/namespaces/acme/grants",
+                &serde_json::json!({
+                    "grantee": {"kind": "user", "subject": "user-2"},
+                    "action": "pull",
+                    "reason": "support request"
+                }),
+                &admin_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let resp = app
+            .oneshot(get(
+                "/api/v1/admin/namespaces/acme/grant-audit",
+                &admin_identity(),
+            ))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data["audit"].as_array().unwrap().len(), 1);
+        assert_eq!(data["audit"][0]["reason"], "support request");
     }
 
     #[tokio::test]

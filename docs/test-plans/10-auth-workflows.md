@@ -56,6 +56,9 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 | Auth middleware public path skip | AUTH15 | P2 |
 | Kanidm OAuth2 redirect_uri / landing mapping | AUTH16 | P0 |
 | Host Docker push with Kanidm token and PAT over trusted HTTPS | AUTH17 | P1 |
+| Namespace grant owner CRUD and enforcement | AUTH18 | P0 |
+| Admin namespace grant audit controls | AUTH19 | P1 |
+| Namespace public pull for anonymous clients | AUTH20 | P0 |
 
 ## Coverage Status
 
@@ -69,6 +72,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 | Kanidm OAuth2 client redirect/landing mapping | Automated | `AUTH16` via `just compose-auth-up` setup assertion | P0 | Implemented — `kanidm-setup.sh` fails if `oauth2_rs_origin` != the callback URL | compose `kanidm-setup` logs |
 | Browser OIDC login, session cookie, and dashboard API access | Agent-executable manual | `AUTH-MANUAL-OIDC-01` | P1 | Manual plan only; not automated because it requires an interactive browser identity flow | `/tmp/orb-auth-oidc-<run_id>` |
 | JWKS last-good cache trust window | Automated | `cargo test -p layerhouse-server auth::` | P1 | Implemented at unit level | command log |
+| Namespace owner grants, user/group/public enforcement, admin audit, snapshot roundtrip | Automated | `cargo test -p layerhouse-server namespace_`; focused audit and snapshot tests | P0 | Implemented at unit/API/state-machine level | command log |
 | Live JWKS restart resilience with IdP outage | Agent-executable manual | `AUTH-MANUAL-JWKS-RESUME-01` | P1 | Manual plan only; not automated because it intentionally stops Kanidm during pod restart | `/tmp/orb-auth-jwks-resume-<run_id>` |
 | Cross-region ordered issuer/JWKS failover | Agent-executable manual | `AUTH-MANUAL-JWKS-XREGION-01` | P2 | Manual plan only; not automated because it needs multiple reachable IdP/JWKS origins | `/tmp/orb-auth-jwks-xregion-<run_id>` |
 | JWKS rotation and token expiry | Agent-executable manual | `AUTH-MANUAL-JWKS-01` | P2 | Manual plan only; not automated because it needs Kanidm key rotation and long token lifetime waits | `/tmp/orb-auth-jwks-<run_id>` |
@@ -348,7 +352,8 @@ Kanidm fixture, and the public registry endpoint is `https://localhost:32050`.
 | Priority | Tests | Rationale |
 |----------|-------|-----------|
 | P0 | AUTH1-AUTH7, AUTH16 | Core auth on/off, PAT login, push/pull, denial, OAuth2 client mapping |
-| P1 | AUTH8-AUTH12, AUTH17 | Dashboard OIDC, CI tokens, revocation, wildcards, host Docker auth over trusted HTTPS |
+| P0 | AUTH18, AUTH20 | Namespace grant enforcement and anonymous public pull |
+| P1 | AUTH8-AUTH12, AUTH17, AUTH19 | Dashboard OIDC, CI tokens, revocation, wildcards, host Docker auth over trusted HTTPS, admin audit |
 | P2 | AUTH13-AUTH15 | Multi-replica consistency, edge cases |
 
 ## Traceability Matrix
@@ -366,6 +371,9 @@ Kanidm fixture, and the public registry endpoint is `https://localhost:32050`.
 | AUTH13-AUTH14 | Multi-replica Raft | Auth state replication |
 | AUTH16 | redirect_uri must be in `oauth2_rs_origin` | Kanidm client origin/landing mapping |
 | AUTH17 | Host Docker token fetch requires daemon TLS trust | End-to-end Docker auth with Kanidm token and PAT over HTTPS |
+| AUTH18 | Namespace grants are Raft metadata | Owner CRUD, user/group matching, action ladder |
+| AUTH19 | Admin grant changes are audited | Required reason and audit event visibility |
+| AUTH20 | Namespace-level Public Pull | Anonymous manifest/blob pull without write access |
 
 ## Prerequisites
 

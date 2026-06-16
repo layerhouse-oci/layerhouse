@@ -15,11 +15,17 @@ import type {
   ManifestResponse,
   MirrorRule,
   MirrorRuleCreate,
+  NamespaceGrant,
+  NamespaceGrantAuditListResponse,
+  NamespaceGrantListResponse,
   NamespaceListResponse,
   NamespaceResponse,
+  ObservedIdentityListResponse,
+  PatchNamespaceGrantRequest,
   PersonalAccessToken,
   ProxyCache,
   ProxyCacheCreate,
+  PutNamespaceGrantRequest,
   ReleaseNamespaceRequest,
   RepositoryFilter,
   RepositoryListResponse,
@@ -312,6 +318,98 @@ export async function revokeNamespace(handle: string): Promise<void> {
   await fetchNoBody(`/api/v1/admin/namespaces/${encodeURIComponent(handle)}/revoke`, {
     method: "POST",
   });
+}
+
+export function fetchAccountNamespaceGrants(handle: string): Promise<NamespaceGrantListResponse> {
+  return fetchJson(`/api/v1/account/namespaces/${encodeURIComponent(handle)}/grants`);
+}
+
+export function createAccountNamespaceGrant(
+  handle: string,
+  request: PutNamespaceGrantRequest,
+): Promise<NamespaceGrant> {
+  return fetchJson(`/api/v1/account/namespaces/${encodeURIComponent(handle)}/grants`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export function updateAccountNamespaceGrant(
+  handle: string,
+  grantId: string,
+  request: PatchNamespaceGrantRequest,
+): Promise<NamespaceGrant> {
+  return fetchJson(
+    `/api/v1/account/namespaces/${encodeURIComponent(handle)}/grants/${encodeURIComponent(grantId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+export async function deleteAccountNamespaceGrant(handle: string, grantId: string): Promise<void> {
+  await fetchNoBody(
+    `/api/v1/account/namespaces/${encodeURIComponent(handle)}/grants/${encodeURIComponent(grantId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function fetchObservedUsers(q: string): Promise<ObservedIdentityListResponse> {
+  return fetchJson(`/api/v1/account/observed-users${qs({ q, limit: 20 })}`);
+}
+
+export function fetchAdminNamespaceGrants(handle: string): Promise<NamespaceGrantListResponse> {
+  return fetchJson(`/api/v1/admin/namespaces/${encodeURIComponent(handle)}/grants`);
+}
+
+export function createAdminNamespaceGrant(
+  handle: string,
+  request: PutNamespaceGrantRequest,
+): Promise<NamespaceGrant> {
+  return fetchJson(`/api/v1/admin/namespaces/${encodeURIComponent(handle)}/grants`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export function updateAdminNamespaceGrant(
+  handle: string,
+  grantId: string,
+  request: PatchNamespaceGrantRequest,
+): Promise<NamespaceGrant> {
+  return fetchJson(
+    `/api/v1/admin/namespaces/${encodeURIComponent(handle)}/grants/${encodeURIComponent(grantId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+export async function deleteAdminNamespaceGrant(
+  handle: string,
+  grantId: string,
+  reason: string,
+): Promise<void> {
+  await fetchNoBody(
+    `/api/v1/admin/namespaces/${encodeURIComponent(handle)}/grants/${encodeURIComponent(grantId)}`,
+    {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+  );
+}
+
+export function fetchAdminNamespaceGrantAudit(
+  handle: string,
+): Promise<NamespaceGrantAuditListResponse> {
+  return fetchJson(`/api/v1/admin/namespaces/${encodeURIComponent(handle)}/grant-audit`);
 }
 
 export function createPersonalAccessToken(token: CreateTokenRequest): Promise<CreateTokenResponse> {
