@@ -31,6 +31,25 @@ pub(crate) async fn list_namespaces<M: NamespaceStore, B: BlobStore>(
         .into_response())
 }
 
+pub(crate) async fn list_account_namespaces<M: NamespaceStore, B: BlobStore>(
+    State(state): State<Arc<AppState<M, B>>>,
+    identity: Option<Extension<AuthIdentity>>,
+) -> Result<Response, LayerhouseError> {
+    let identity = require_auth(&state, identity.as_ref())?;
+
+    let namespaces = state.core.metadata.list_namespaces().await?;
+    let items: Vec<_> = namespaces
+        .iter()
+        .filter(|ns| matches!(&ns.owner, Owner::User(subject) if subject == &identity.subject))
+        .map(namespace_response)
+        .collect();
+    Ok((
+        StatusCode::OK,
+        Json(NamespaceListResponse { namespaces: items }),
+    )
+        .into_response())
+}
+
 pub(crate) async fn get_namespace<M: NamespaceStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,

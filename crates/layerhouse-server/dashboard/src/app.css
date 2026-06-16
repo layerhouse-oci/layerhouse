@@ -2038,6 +2038,20 @@ label {
   color: var(--green);
 }
 
+.access-admin-search {
+  margin: 0 0 14px;
+}
+
+.access-admin-search input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: var(--button-radius);
+  padding: 0 12px;
+  color: var(--strong);
+  background: var(--surface-solid);
+}
+
 .access-namespace-list {
   margin-top: 16px;
   overflow-x: auto;
@@ -2650,6 +2664,10 @@ pre {
   line-height: 1.15;
 }
 
+.repos-page .catalog-tabs {
+  margin: 14px 0 0;
+}
+
 .repos-page .list-controls {
   display: flex;
   align-items: center;
@@ -2775,6 +2793,10 @@ pre {
   padding: 0 20px 18px;
 }
 
+.repos-page .namespace-table-wrap table {
+  min-width: 700px;
+}
+
 .repos-page table {
   width: 100%;
   border-collapse: collapse;
@@ -2831,6 +2853,24 @@ pre {
   font-size: 15px;
   font-weight: 500;
   cursor: pointer;
+}
+
+.repos-page .namespace-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.repos-page .namespace-cell div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.repos-page .namespace-cell span:not(.repo-icon) {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .repos-page .repo-icon {
