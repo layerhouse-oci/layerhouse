@@ -198,7 +198,21 @@ const AppShell: Component<RouteSectionProps> = (props) => {
         </div>
       </header>
       <main class="main">
-        <div class="shell">{props.children}</div>
+        <div class="shell">
+          <Show when={session()?.auth_enabled && !session()?.subject} fallback={props.children}>
+            <section class="access-signin card">
+              <div>
+                <p class="eyebrow">{t("access.signIn")}</p>
+                <h2>{t("access.signInTitle")}</h2>
+                <p>{t("access.signInDesc")}</p>
+                <p class="hint">{t("access.dockerClientsUsePat")}</p>
+              </div>
+              <a class="btn btn-primary" href="/oauth2/start">
+                {t("access.signInWithOidc")}
+              </a>
+            </section>
+          </Show>
+        </div>
       </main>
 
       <Show when={showTokens()}>
