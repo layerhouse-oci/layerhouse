@@ -389,7 +389,7 @@ curl -fsS -X DELETE \
 - GitHub Actions release workflow is enabled on the target repository.
 - Operator has permission to push tags and read GitHub Releases.
 - GHCR package visibility and permissions are configured for
-  `ghcr.io/adamcavendish/layerhouse-server`.
+  `ghcr.io/layerhouse-oci/layerhouse-server`.
 - Local dry run has passed:
 
 ```bash
@@ -418,9 +418,9 @@ gh run watch --exit-status
 gh release view "$TAG" --json tagName,name,assets,url \
   | tee "$WORK/release.json"
 
-docker pull "ghcr.io/adamcavendish/layerhouse-server:$VERSION" \
+docker pull "ghcr.io/layerhouse-oci/layerhouse-server:$VERSION" \
   | tee "$WORK/docker-pull-version-tag.txt"
-docker pull "ghcr.io/adamcavendish/layerhouse-server:latest" \
+docker pull "ghcr.io/layerhouse-oci/layerhouse-server:latest" \
   | tee "$WORK/docker-pull-latest-tag.txt"
 
 gh release download "$TAG" --dir "$WORK/assets"

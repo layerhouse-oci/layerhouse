@@ -15,7 +15,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: adamcavendish/layerhouse-server
+  IMAGE_NAME: layerhouse-oci/layerhouse-server
   CARGO_ZIGBUILD_VERSION: "0.19.7"
   VP_NODE_VERSION: "24.15.0"
   ZIG_VERSION: "0.14.0"

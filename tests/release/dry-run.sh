@@ -55,13 +55,13 @@ record helm template layerhouse "$CHART" \
     --namespace layerhouse \
     -f deploy/kubernetes/helm/test-values/minimal.yaml \
     > "$WORK/render-default.yaml"
-grep -q "image: \"ghcr.io/adamcavendish/layerhouse-server:$VERSION\"" "$WORK/render-default.yaml"
+grep -q "image: \"ghcr.io/layerhouse-oci/layerhouse-server:$VERSION\"" "$WORK/render-default.yaml"
 
 record helm template layerhouse "$CHART" \
     --namespace layerhouse \
     -f deploy/kubernetes/helm/test-values/minimal.yaml \
     --set image.tag=tilt \
     > "$WORK/render-override.yaml"
-grep -q 'image: "ghcr.io/adamcavendish/layerhouse-server:tilt"' "$WORK/render-override.yaml"
+grep -q 'image: "ghcr.io/layerhouse-oci/layerhouse-server:tilt"' "$WORK/render-override.yaml"
 
 echo "PASS release dry run. Evidence: $WORK"

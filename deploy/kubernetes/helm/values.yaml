@@ -3,7 +3,7 @@ replicaCount: 3
 namespaceOverride: ""
 
 image:
-  repository: ghcr.io/adamcavendish/layerhouse-server
+  repository: ghcr.io/layerhouse-oci/layerhouse-server
   tag: ""
   pullPolicy: IfNotPresent
   pullSecrets: []

@@ -4,7 +4,7 @@
 #   docker compose -f deploy/compose/standalone.yml up -d
 #
 # This file uses :latest tags. Pin to a specific version for production:
-#   ghcr.io/adamcavendish/layerhouse-server:0.0.3
+#   ghcr.io/layerhouse-oci/layerhouse-server:0.0.3
 
 name: layerhouse-standalone
 
@@ -46,7 +46,7 @@ services:
       "
 
   layerhouse-0:
-    image: ghcr.io/adamcavendish/layerhouse-server:latest
+    image: ghcr.io/layerhouse-oci/layerhouse-server:latest
     hostname: layerhouse-0
     ports:
       - "5050:5050"

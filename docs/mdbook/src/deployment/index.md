@@ -14,7 +14,7 @@ metadata replication identically in all three modes.
 
 ## What you need for any deployment
 
-1. **layerhouse binary** — from [releases](https://github.com/adamcavendish/layerhouse/releases) or built from source
+1. **layerhouse binary** — from [releases](https://github.com/layerhouse-oci/layerhouse/releases) or built from source
 2. **S3-compatible storage** — RustFS, MinIO, AWS S3, or any S3 API-compatible store
 3. **Configuration** — a TOML file with server, storage, and raft sections
 
