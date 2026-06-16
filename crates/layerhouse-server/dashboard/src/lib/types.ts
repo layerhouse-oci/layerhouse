@@ -64,6 +64,7 @@ export type OciAction = "pull" | "create" | "update" | "delete";
 export type GrantSource = "personal" | "group_grant" | "public";
 export type RepoKind = "image" | "helm" | "wasm" | "artifact" | "unknown";
 export type RepositoryFilter = "all" | "mine" | "shared" | "public";
+export type RepositoryRecencyFilter = "all" | "recent" | "stale";
 
 export interface RepositorySummary {
   name: string;
@@ -181,6 +182,28 @@ export interface GrantableScopeListResponse {
   namespace_patterns: NamespacePatternScope[];
   total_matches: number;
   next_cursor: string | null;
+}
+
+export type NamespaceOwnerKind = "user" | "org";
+
+export interface NamespaceResponse {
+  handle: string;
+  owner_kind: NamespaceOwnerKind;
+  owner_label: string;
+  created_at: number;
+}
+
+export interface NamespaceListResponse {
+  namespaces: NamespaceResponse[];
+}
+
+export interface ClaimNamespaceRequest {
+  owner_label?: string | null;
+  admin_override?: boolean;
+}
+
+export interface ReleaseNamespaceRequest {
+  reason?: string | null;
 }
 
 // ---- Mirror Rules ----

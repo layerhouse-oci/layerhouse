@@ -1,7 +1,7 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { deleteRepository, fetchRepositories } from "../lib/api";
-import type { RepositoryFilter, RepositorySummary } from "../lib/types";
+import type { RepositoryFilter, RepositoryRecencyFilter, RepositorySummary } from "../lib/types";
 import { copyToClipboard, formatAgo, formatBytes } from "../lib/format";
 import { t } from "../lib/i18n";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -16,7 +16,38 @@ function repoInitials(name: string): string {
   return (letters.slice(0, 2) || "OC").toUpperCase();
 }
 
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
+
+function repoQuery(): URLSearchParams {
+  return new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+}
+
+function initialPageSize(params: URLSearchParams): number {
+  const n = Number(params.get("n"));
+  return PAGE_SIZE_OPTIONS.includes(n) ? n : 50;
+}
+
+function initialRepositoryFilter(params: URLSearchParams): RepositoryFilter {
+  const filter = params.get("filter");
+  return filter === "mine" || filter === "shared" || filter === "public" ? filter : "all";
+}
+
+function initialRecencyFilter(params: URLSearchParams): RepositoryRecencyFilter {
+  const recency = params.get("recency");
+  return recency === "recent" || recency === "stale" ? recency : "all";
+}
+
+function nextLast(nextCursor: string | null): string | null {
+  if (!nextCursor) return null;
+  try {
+    return new URL(nextCursor, window.location.origin).searchParams.get("last");
+  } catch {
+    return null;
+  }
+}
+
 export default function Repositories() {
+  const initialQuery = repoQuery();
   const navigate = useNavigate();
   const [repos, setRepos] = createSignal<RepositorySummary[]>([]);
   const [total, setTotal] = createSignal(0);
@@ -24,25 +55,52 @@ export default function Repositories() {
   const [error, setError] = createSignal<string | null>(null);
   const [errorCount, setErrorCount] = createSignal(0);
   const [lastUpdated, setLastUpdated] = createSignal<number | null>(null);
-  const [search, setSearch] = createSignal("");
-  const [filter, setFilter] = createSignal<RepositoryFilter>("all");
-  const [sort, setSort] = createSignal("updated_desc");
+  const [search, setSearch] = createSignal(initialQuery.get("q") ?? "");
+  const [filter, setFilter] = createSignal<RepositoryFilter>(initialRepositoryFilter(initialQuery));
+  const [recency, setRecency] = createSignal<RepositoryRecencyFilter>(
+    initialRecencyFilter(initialQuery),
+  );
+  const [sort, setSort] = createSignal(initialQuery.get("sort") ?? "updated_desc");
+  const [pageSize, setPageSize] = createSignal(initialPageSize(initialQuery));
+  const [currentLast, setCurrentLast] = createSignal<string | null>(initialQuery.get("last"));
+  const [previousLasts, setPreviousLasts] = createSignal<(string | null)[]>([]);
+  const [nextPageLast, setNextPageLast] = createSignal<string | null>(null);
   const [copied, setCopied] = createSignal<string | null>(null);
   const [toast, setToast] = createSignal<string | null>(null);
   const [pendingDelete, setPendingDelete] = createSignal<RepositorySummary | null>(null);
   const [deleting, setDeleting] = createSignal(false);
   const [showTokens, setShowTokens] = createSignal(false);
 
+  function updateHashQuery() {
+    const params = new URLSearchParams();
+    if (search().trim()) params.set("q", search().trim());
+    if (filter() !== "all") params.set("filter", filter());
+    if (recency() !== "all") params.set("recency", recency());
+    if (sort() !== "updated_desc") params.set("sort", sort());
+    if (pageSize() !== 50) params.set("n", String(pageSize()));
+    if (currentLast()) params.set("last", currentLast()!);
+    const query = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}#/repos${query ? `?${query}` : ""}`,
+    );
+  }
+
   async function load() {
+    updateHashQuery();
     try {
       const response = await fetchRepositories({
-        page_size: 50,
-        q: search(),
+        n: pageSize(),
+        last: currentLast() ?? undefined,
+        q: search().trim(),
         filter: filter(),
+        recency: recency() === "all" ? undefined : recency(),
         sort: sort(),
       });
       setRepos(response.repositories);
       setTotal(response.total_reachable);
+      setNextPageLast(nextLast(response.next_cursor));
       setError(null);
       setErrorCount(0);
       setLastUpdated(Date.now());
@@ -57,12 +115,38 @@ export default function Repositories() {
   createEffect(() => {
     search();
     filter();
+    recency();
     sort();
+    pageSize();
+    currentLast();
     setLoading(true);
-    load();
-    const id = setInterval(load, 10_000);
-    onCleanup(() => clearInterval(id));
+    const loadId = window.setTimeout(() => void load(), 220);
+    const refreshId = window.setInterval(() => void load(), 10_000);
+    onCleanup(() => {
+      clearTimeout(loadId);
+      clearInterval(refreshId);
+    });
   });
+
+  function resetPaging() {
+    setCurrentLast(null);
+    setPreviousLasts([]);
+    setNextPageLast(null);
+  }
+
+  function goNext() {
+    const next = nextPageLast();
+    if (!next) return;
+    setPreviousLasts([...previousLasts(), currentLast()]);
+    setCurrentLast(next);
+  }
+
+  function goPrevious() {
+    const stack = previousLasts();
+    if (stack.length === 0) return;
+    setPreviousLasts(stack.slice(0, -1));
+    setCurrentLast(stack[stack.length - 1] ?? null);
+  }
 
   function showToast(message: string) {
     setToast(message);
@@ -94,8 +178,13 @@ export default function Repositories() {
     }
   }
 
-  const FILTERS: { value: RepositoryFilter; label: string }[] = [
-    { value: "all", label: t("repos.filter.all") },
+  const RECENCY_FILTERS: { value: RepositoryRecencyFilter; label: string }[] = [
+    { value: "all", label: t("common.all") },
+    { value: "recent", label: t("common.recent") },
+    { value: "stale", label: t("common.stale") },
+  ];
+
+  const ACCESS_FILTERS: { value: RepositoryFilter; label: string }[] = [
     { value: "mine", label: t("repos.filter.mine") },
     { value: "shared", label: t("repos.filter.shared") },
     { value: "public", label: t("repos.filter.public") },
@@ -134,16 +223,48 @@ export default function Repositories() {
                 aria-label={t("repos.search")}
                 placeholder={t("repos.search")}
                 value={search()}
-                onInput={(e) => setSearch(e.currentTarget.value)}
+                onInput={(e) => {
+                  resetPaging();
+                  setSearch(e.currentTarget.value);
+                }}
               />
             </div>
             <div class="filter-group">
-              <For each={FILTERS}>
+              <For each={RECENCY_FILTERS}>
+                {(item) => (
+                  <button
+                    type="button"
+                    class={`filter${recency() === item.value ? " active" : ""}`}
+                    onClick={() => {
+                      resetPaging();
+                      setRecency(item.value);
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                )}
+              </For>
+            </div>
+            <div class="filter-group access-filter-group" aria-label={t("repos.accessFilters")}>
+              <button
+                type="button"
+                class={`filter${filter() === "all" ? " active" : ""}`}
+                onClick={() => {
+                  resetPaging();
+                  setFilter("all");
+                }}
+              >
+                {t("repos.filter.all")}
+              </button>
+              <For each={ACCESS_FILTERS}>
                 {(item) => (
                   <button
                     type="button"
                     class={`filter${filter() === item.value ? " active" : ""}`}
-                    onClick={() => setFilter(item.value)}
+                    onClick={() => {
+                      resetPaging();
+                      setFilter(item.value);
+                    }}
                   >
                     {item.label}
                   </button>
@@ -155,7 +276,10 @@ export default function Repositories() {
               <select
                 id="repo-sort"
                 value={sort()}
-                onChange={(e) => setSort(e.currentTarget.value)}
+                onChange={(e) => {
+                  resetPaging();
+                  setSort(e.currentTarget.value);
+                }}
               >
                 <option value="updated_desc">{t("repos.sort.recent")}</option>
                 <option value="updated_asc">{t("repos.sort.oldest")}</option>
@@ -172,10 +296,15 @@ export default function Repositories() {
         {loading() ? (
           <LoadingSpinner label={t("repos.loading")} />
         ) : repos().length === 0 ? (
-          <EmptyState
-            title={search() ? t("repos.empty.filtered") : t("repos.empty")}
-            description={search() ? t("repos.empty.filteredDesc") : t("repos.emptyDesc")}
-          />
+          <div class="repos-empty-state">
+            <EmptyState
+              title={search() ? t("repos.empty.filtered") : t("repos.empty")}
+              description={search() ? t("repos.empty.filteredDesc") : t("repos.emptyDesc")}
+            />
+            <button class="action" type="button" onClick={() => setShowTokens(true)}>
+              {t("repos.claimNamespace")}
+            </button>
+          </div>
         ) : (
           <div class="table-wrap">
             <table>
@@ -236,7 +365,22 @@ export default function Repositories() {
               </tbody>
             </table>
             <div class="table-footer">
-              <Pagination shown={repos().length} total={total()} />
+              <Pagination
+                start={previousLasts().length * pageSize() + 1}
+                shown={repos().length}
+                total={total()}
+                page={previousLasts().length + 1}
+                pageSize={pageSize()}
+                pageSizeOptions={PAGE_SIZE_OPTIONS}
+                hasPrevious={previousLasts().length > 0}
+                hasNext={nextPageLast() !== null}
+                onPrevious={goPrevious}
+                onNext={goNext}
+                onPageSizeChange={(size) => {
+                  resetPaging();
+                  setPageSize(size);
+                }}
+              />
             </div>
           </div>
         )}

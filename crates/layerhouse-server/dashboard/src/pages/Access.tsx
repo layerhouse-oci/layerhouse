@@ -4,11 +4,16 @@ import ErrorBanner from "../components/ErrorBanner";
 import LoadingSpinner from "../components/LoadingSpinner";
 import {
   ApiError,
+  claimNamespace,
   createPersonalAccessToken,
   deletePersonalAccessToken,
   fetchGrantableScopes,
+  fetchNamespaces,
   fetchPersonalAccessTokens,
   fetchSession,
+  releaseNamespace,
+  redirectToSignIn,
+  revokeNamespace,
 } from "../lib/api";
 import { copyToClipboard, formatAgo, formatTime } from "../lib/format";
 import { t } from "../lib/i18n";
@@ -17,12 +22,13 @@ import type {
   DashboardSession,
   GrantSource,
   GrantableScope,
+  NamespaceResponse,
   NamespacePatternScope,
   OciAction,
   PersonalAccessToken,
 } from "../lib/types";
 
-type AccessTab = "tokens" | "session" | "permissions";
+type AccessTab = "tokens" | "namespaces" | "session" | "permissions";
 type ScopeKind = "repository" | "namespace_pattern";
 
 interface TokenForm {
@@ -137,11 +143,17 @@ function envVarCommand(token: string): string {
   return `REGISTRY_TOKEN=${token}`;
 }
 
+function normalizeNamespaceHandle(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 export default function Access(props: { onClose?: () => void }) {
   const isModal = () => props.onClose !== undefined;
   const [tab, setTab] = createSignal<AccessTab>("tokens");
   const [session, setSession] = createSignal<DashboardSession | null>(null);
   const [tokens, setTokens] = createSignal<PersonalAccessToken[]>([]);
+  const [namespaces, setNamespaces] = createSignal<NamespaceResponse[]>([]);
+  const [sessionNamespaces, setSessionNamespaces] = createSignal<NamespaceResponse[]>([]);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
   const [showCreate, setShowCreate] = createSignal(false);
@@ -159,6 +171,17 @@ export default function Access(props: { onClose?: () => void }) {
   const [revoking, setRevoking] = createSignal(false);
   const [_revokeError, setRevokeError] = createSignal<string | null>(null);
   const [copied, setCopied] = createSignal<string | null>(null);
+  const [claimHandle, setClaimHandle] = createSignal("");
+  const [claimOwnerLabel, setClaimOwnerLabel] = createSignal("");
+  const [claiming, setClaiming] = createSignal(false);
+  const [namespaceMessage, setNamespaceMessage] = createSignal<string | null>(null);
+  const [namespaceError, setNamespaceError] = createSignal<string | null>(null);
+  const [releaseTarget, setReleaseTarget] = createSignal<NamespaceResponse | null>(null);
+  const [releaseReason, setReleaseReason] = createSignal("");
+  const [releasing, setReleasing] = createSignal(false);
+  const [revokeNamespaceTarget, setRevokeNamespaceTarget] =
+    createSignal<NamespaceResponse | null>(null);
+  const [revokingNamespace, setRevokingNamespace] = createSignal(false);
 
   async function load() {
     setLoading(true);
@@ -167,8 +190,15 @@ export default function Access(props: { onClose?: () => void }) {
       setSession(nextSession);
       if (nextSession.auth_enabled) {
         setTokens(await fetchPersonalAccessTokens());
+        if (nextSession.is_admin) {
+          const response = await fetchNamespaces();
+          setNamespaces(response.namespaces);
+        } else {
+          setNamespaces([]);
+        }
       } else {
         setTokens([]);
+        setNamespaces([]);
       }
       setError(null);
     } catch (e) {
@@ -343,6 +373,82 @@ export default function Access(props: { onClose?: () => void }) {
     }
   }
 
+  async function refreshNamespaces() {
+    if (!session()?.is_admin) return;
+    try {
+      const response = await fetchNamespaces();
+      setNamespaces(response.namespaces);
+    } catch (e) {
+      setNamespaceError(e instanceof Error ? e.message : t("access.namespaceLoadError"));
+    }
+  }
+
+  async function claimNamespaceHandle() {
+    const handle = normalizeNamespaceHandle(claimHandle());
+    if (!handle) {
+      setNamespaceError(t("access.namespaceHandleRequired"));
+      return;
+    }
+    setClaiming(true);
+    setNamespaceError(null);
+    setNamespaceMessage(null);
+    try {
+      const namespace = await claimNamespace(handle, {
+        owner_label: claimOwnerLabel().trim() || userLabel(session()),
+      });
+      setSessionNamespaces([
+        namespace,
+        ...sessionNamespaces().filter((item) => item.handle !== namespace.handle),
+      ]);
+      if (session()?.is_admin) await refreshNamespaces();
+      setClaimHandle("");
+      setClaimOwnerLabel("");
+      setNamespaceMessage(t("access.namespaceClaimed", { handle: namespace.handle }));
+    } catch (e) {
+      setNamespaceError(e instanceof Error ? e.message : t("access.namespaceClaimError"));
+    } finally {
+      setClaiming(false);
+    }
+  }
+
+  async function confirmReleaseNamespace() {
+    const target = releaseTarget();
+    if (!target) return;
+    setReleasing(true);
+    setNamespaceError(null);
+    setNamespaceMessage(null);
+    try {
+      await releaseNamespace(target.handle, { reason: releaseReason().trim() || null });
+      setSessionNamespaces(sessionNamespaces().filter((item) => item.handle !== target.handle));
+      if (session()?.is_admin) await refreshNamespaces();
+      setNamespaceMessage(t("access.namespaceReleased", { handle: target.handle }));
+      setReleaseTarget(null);
+      setReleaseReason("");
+    } catch (e) {
+      setNamespaceError(e instanceof Error ? e.message : t("access.namespaceReleaseError"));
+    } finally {
+      setReleasing(false);
+    }
+  }
+
+  async function confirmRevokeNamespace() {
+    const target = revokeNamespaceTarget();
+    if (!target) return;
+    setRevokingNamespace(true);
+    setNamespaceError(null);
+    setNamespaceMessage(null);
+    try {
+      await revokeNamespace(target.handle);
+      await refreshNamespaces();
+      setNamespaceMessage(t("access.namespaceRevoked", { handle: target.handle }));
+      setRevokeNamespaceTarget(null);
+    } catch (e) {
+      setNamespaceError(e instanceof Error ? e.message : t("access.namespaceRevokeError"));
+    } finally {
+      setRevokingNamespace(false);
+    }
+  }
+
   async function copyValue(key: string, value: string) {
     if (await copyToClipboard(value)) {
       setCopied(key);
@@ -354,6 +460,7 @@ export default function Access(props: { onClose?: () => void }) {
 
   const activeTokens = () => tokens().length;
   const expiringSoonCount = () => tokens().filter(expiresSoon).length;
+  const visibleNamespaces = () => (session()?.is_admin ? namespaces() : sessionNamespaces());
 
   const content = (
     <div>
@@ -411,9 +518,9 @@ export default function Access(props: { onClose?: () => void }) {
                   <p>{t("access.signInDesc")}</p>
                   <p class="hint">{t("access.dockerClientsUsePat")}</p>
                 </div>
-                <a class="btn btn-primary" href="/oauth2/start">
+                <button type="button" class="btn btn-primary" onClick={redirectToSignIn}>
                   {t("access.signInWithOidc")}
-                </a>
+                </button>
               </div>
             }
           >
@@ -441,6 +548,13 @@ export default function Access(props: { onClose?: () => void }) {
                 onClick={() => setTab("tokens")}
               >
                 {t("access.personalTokens")}
+              </button>
+              <button
+                class={tab() === "namespaces" ? "active" : ""}
+                type="button"
+                onClick={() => setTab("namespaces")}
+              >
+                {t("access.namespaces")}
               </button>
               <button
                 class={tab() === "session" ? "active" : ""}
@@ -515,6 +629,121 @@ export default function Access(props: { onClose?: () => void }) {
                     </tbody>
                   </table>
                 )}
+              </div>
+            </Show>
+
+            <Show when={tab() === "namespaces"}>
+              <div class="card access-namespace-card">
+                <div class="access-section-head">
+                  <div>
+                    <h2 class="card-header">{t("access.namespaceTitle")}</h2>
+                    <p class="hint">{t("access.namespaceDesc")}</p>
+                  </div>
+                  <Show when={session()?.is_admin}>
+                    <span class="badge badge-blue">{t("access.adminInventory")}</span>
+                  </Show>
+                </div>
+
+                {namespaceError() && <p class="warning">{namespaceError()}</p>}
+                {namespaceMessage() && <p class="hint access-success">{namespaceMessage()}</p>}
+
+                <div class="access-claim-box">
+                  <div class="form-grid">
+                    <div class="form-group">
+                      <label>{t("access.namespaceHandle")}</label>
+                      <input
+                        value={claimHandle()}
+                        placeholder={t("access.namespaceHandlePlaceholder")}
+                        onInput={(event) => setClaimHandle(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") void claimNamespaceHandle();
+                        }}
+                      />
+                    </div>
+                    <div class="form-group">
+                      <label>{t("access.ownerLabel")}</label>
+                      <input
+                        value={claimOwnerLabel()}
+                        placeholder={userLabel(session())}
+                        onInput={(event) => setClaimOwnerLabel(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") void claimNamespaceHandle();
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div class="access-claim-actions">
+                    <p class="hint">{t("access.namespaceClaimHint")}</p>
+                    <button
+                      class="btn btn-primary"
+                      disabled={claiming()}
+                      onClick={() => void claimNamespaceHandle()}
+                    >
+                      {claiming() ? t("common.creating") : t("access.claimNamespace")}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="access-namespace-list">
+                  <h3>{session()?.is_admin ? t("access.allNamespaces") : t("access.claimedThisSession")}</h3>
+                  <Show
+                    when={visibleNamespaces().length > 0}
+                    fallback={<p class="hint">{t("access.noNamespaces")}</p>}
+                  >
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>{t("access.namespaceHandle")}</th>
+                          <th>{t("access.owner")}</th>
+                          <th>{t("access.created")}</th>
+                          <th>{t("common.actions")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <For each={visibleNamespaces()}>
+                          {(namespace) => (
+                            <tr>
+                              <td>
+                                <code>{namespace.handle}</code>
+                              </td>
+                              <td>
+                                <div class="access-owner-cell">
+                                  <strong>{namespace.owner_label}</strong>
+                                  <span>{t(`access.ownerKind.${namespace.owner_kind}`)}</span>
+                                </div>
+                              </td>
+                              <td>{formatTime(namespace.created_at)}</td>
+                              <td>
+                                <div class="row-actions">
+                                  <Show
+                                    when={sessionNamespaces().some(
+                                      (item) => item.handle === namespace.handle,
+                                    )}
+                                  >
+                                    <button
+                                      class="btn btn-compact"
+                                      onClick={() => setReleaseTarget(namespace)}
+                                    >
+                                      {t("access.releaseNamespace")}
+                                    </button>
+                                  </Show>
+                                  <Show when={session()?.is_admin}>
+                                    <button
+                                      class="btn btn-compact btn-danger"
+                                      onClick={() => setRevokeNamespaceTarget(namespace)}
+                                    >
+                                      {t("access.revokeNamespace")}
+                                    </button>
+                                  </Show>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </For>
+                      </tbody>
+                    </table>
+                  </Show>
+                </div>
               </div>
             </Show>
 
@@ -818,6 +1047,58 @@ export default function Access(props: { onClose?: () => void }) {
             </Show>
           </div>
         </div>
+      </Show>
+
+      <Show when={releaseTarget()}>
+        {(target) => (
+          <div class="modal-overlay" onClick={() => setReleaseTarget(null)}>
+            <div class="modal" onClick={(event) => event.stopPropagation()}>
+              <h2>{t("access.releaseNamespaceTitle", { handle: target().handle })}</h2>
+              <p class="hint">{t("access.releaseNamespaceDesc")}</p>
+              <div class="form-group">
+                <label>{t("access.releaseReason")}</label>
+                <input
+                  value={releaseReason()}
+                  placeholder={t("access.releaseReasonPlaceholder")}
+                  onInput={(event) => setReleaseReason(event.currentTarget.value)}
+                />
+              </div>
+              <div class="modal-actions">
+                <button class="btn" onClick={() => setReleaseTarget(null)}>
+                  {t("common.cancel")}
+                </button>
+                <button class="btn btn-danger" disabled={releasing()} onClick={confirmReleaseNamespace}>
+                  {releasing() ? t("common.deleting") : t("access.releaseNamespace")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={revokeNamespaceTarget()}>
+        {(target) => (
+          <div class="modal-overlay" onClick={() => setRevokeNamespaceTarget(null)}>
+            <div class="modal" onClick={(event) => event.stopPropagation()}>
+              <h2>{t("access.revokeNamespaceTitle", { handle: target().handle })}</h2>
+              <p class="warning">
+                {t("access.revokeNamespaceWarning", { owner: target().owner_label })}
+              </p>
+              <div class="modal-actions">
+                <button class="btn" onClick={() => setRevokeNamespaceTarget(null)}>
+                  {t("common.cancel")}
+                </button>
+                <button
+                  class="btn btn-danger"
+                  disabled={revokingNamespace()}
+                  onClick={confirmRevokeNamespace}
+                >
+                  {revokingNamespace() ? t("common.deleting") : t("access.revokeNamespace")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </Show>
 
       <Show when={revokeTarget()}>
