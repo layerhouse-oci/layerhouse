@@ -1,16 +1,64 @@
 use serde::{Deserialize, Serialize};
 
 use crate::auth::identity::Subject;
+use crate::auth::principal::{Actor, ProviderQualifiedId};
+#[cfg(test)]
+use crate::auth::principal::{PrincipalKind, stable_group_ids};
 
 #[derive(Debug, Clone)]
 pub struct AuthIdentity {
     pub subject: Subject,
+    pub principal: ProviderQualifiedId,
     pub username: Option<String>,
     pub display_name: Option<String>,
     pub email: Option<String>,
+    /// Display/source groups from the token. Authorization must use `group_ids`.
     pub groups: Vec<String>,
+    pub group_ids: Vec<ProviderQualifiedId>,
     pub scopes: Vec<String>,
     pub token_type: TokenType,
+}
+
+impl AuthIdentity {
+    pub fn actor(&self) -> Actor {
+        Actor {
+            principal: self.principal.clone(),
+            username: self.username.clone(),
+            display_name: self.display_name.clone(),
+            email: self.email.clone(),
+            group_ids: self.group_ids.clone(),
+            display_groups: self.groups.clone(),
+            scopes: self.scopes.clone(),
+            token_type: self.token_type.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn for_test(
+        subject: &str,
+        token_type: TokenType,
+        groups: &[&str],
+        scopes: &[&str],
+    ) -> Self {
+        let principal = ProviderQualifiedId::new("test", PrincipalKind::User, subject)
+            .expect("test subject should be principal-safe");
+        let groups = groups
+            .iter()
+            .map(|group| group.to_string())
+            .collect::<Vec<_>>();
+        let group_ids = stable_group_ids("test", &groups);
+        Self {
+            subject: Subject::new(subject),
+            principal,
+            username: None,
+            display_name: None,
+            email: None,
+            groups,
+            group_ids,
+            scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            token_type,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

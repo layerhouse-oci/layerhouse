@@ -181,13 +181,7 @@ impl PermissionResolver {
 }
 
 pub(crate) fn group_matches(configured: &str, user_group: &str) -> bool {
-    if configured == user_group {
-        return true;
-    }
-    !configured.contains('@')
-        && user_group
-            .split_once('@')
-            .is_some_and(|(local_name, _domain)| local_name == configured)
+    configured == user_group
 }
 
 pub(crate) fn parse_scope(scope: &str) -> Option<(String, OciAction)> {
@@ -437,13 +431,22 @@ mod tests {
     }
 
     #[test]
-    fn matches_group_spn_by_local_name() {
+    fn group_matching_is_exact_only() {
         let resolver = PermissionResolver::new(&[PermissionMapping {
             name: "admins".to_string(),
-            groups: vec!["registry_admins".to_string()],
+            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440010".to_string()],
             scopes: vec!["repository:*:*".to_string()],
         }]);
 
+        assert!(
+            resolver
+                .check(
+                    &["test:group:550e8400-e29b-41d4-a716-446655440010".to_string()],
+                    "qa/test",
+                    OciAction::Create
+                )
+                .is_ok()
+        );
         assert!(
             resolver
                 .check(
@@ -451,7 +454,7 @@ mod tests {
                     "qa/test",
                     OciAction::Create
                 )
-                .is_ok()
+                .is_err()
         );
     }
 

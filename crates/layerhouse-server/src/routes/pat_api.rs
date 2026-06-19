@@ -430,27 +430,17 @@ mod tests {
     use tower::ServiceExt;
 
     fn identity_with(scopes: Vec<&str>) -> AuthIdentity {
-        AuthIdentity {
-            subject: crate::auth::identity::Subject::new("user-1"),
-            username: Some("alice".to_string()),
-            display_name: None,
-            email: None,
-            groups: Vec::new(),
-            scopes: scopes.into_iter().map(|s| s.to_string()).collect(),
-            token_type: TokenType::PersonalAccess,
-        }
+        let mut identity =
+            AuthIdentity::for_test("user-1", TokenType::PersonalAccess, &[], &scopes);
+        identity.username = Some("alice".to_string());
+        identity
     }
 
     fn identity_with_groups(scopes: Vec<&str>, groups: Vec<&str>) -> AuthIdentity {
-        AuthIdentity {
-            subject: crate::auth::identity::Subject::new("user-1"),
-            username: Some("alice".to_string()),
-            display_name: None,
-            email: None,
-            groups: groups.into_iter().map(|s| s.to_string()).collect(),
-            scopes: scopes.into_iter().map(|s| s.to_string()).collect(),
-            token_type: TokenType::OidcAccess,
-        }
+        let mut identity =
+            AuthIdentity::for_test("user-1", TokenType::OidcAccess, &groups, &scopes);
+        identity.username = Some("alice".to_string());
+        identity
     }
 
     fn post_tokens(body: serde_json::Value, identity: Option<AuthIdentity>) -> Request<Body> {
