@@ -120,6 +120,11 @@ function actionAllowed(action: OciAction, maxGrantable: OciAction): boolean {
   return ACTION_RANK[action] <= ACTION_RANK[maxGrantable];
 }
 
+function isProviderQualifiedId(value: string, kind: "user" | "group"): boolean {
+  const parts = value.trim().split(":");
+  return parts.length === 3 && parts[0] !== "" && parts[1] === kind && parts[2] !== "";
+}
+
 function defaultActions(maxGrantable: OciAction): OciAction[] {
   return ACTIONS.filter((action) => actionAllowed(action, maxGrantable) && action !== "delete");
 }
@@ -158,14 +163,14 @@ function granteeKindLabel(kind: GrantGranteeKind): string {
 
 function grantLabel(grant: NamespaceGrant): string {
   if (grant.label) return grant.label;
-  if (grant.grantee.kind === "group") return grant.grantee.name;
-  if (grant.grantee.kind === "user") return grant.grantee.subject;
+  if (grant.grantee.kind === "group") return grant.grantee.id;
+  if (grant.grantee.kind === "user") return grant.grantee.id;
   return t("access.grantee.public");
 }
 
 function granteeDetail(grant: NamespaceGrant): string {
-  if (grant.grantee.kind === "group") return grant.grantee.name;
-  if (grant.grantee.kind === "user") return grant.grantee.subject;
+  if (grant.grantee.kind === "group") return grant.grantee.id;
+  if (grant.grantee.kind === "user") return grant.grantee.id;
   return t("access.publicPullOnly");
 }
 
@@ -696,7 +701,7 @@ export default function Access(props: { onClose?: () => void }) {
     if (grant) {
       setGrantForm({
         granteeKind: grant.grantee.kind,
-        groupName: grant.grantee.kind === "group" ? grant.grantee.name : "",
+        groupName: grant.grantee.kind === "group" ? grant.grantee.id : "",
         userQuery: grant.grantee.kind === "user" ? grant.label : "",
         selectedUser: null,
         publicLabel: grant.grantee.kind === "public" ? grant.label : "Public",
@@ -760,21 +765,29 @@ export default function Access(props: { onClose?: () => void }) {
         setGrantError(t("access.groupRequired"));
         return null;
       }
+      if (!isProviderQualifiedId(group, "group")) {
+        setGrantError(t("access.groupIdInvalid"));
+        return null;
+      }
       return {
-        grantee: { kind: "group", name: group },
+        grantee: { kind: "group", id: group },
         label: group,
         action,
         reason: form.reason.trim() || null,
       };
     }
     if (form.granteeKind === "user") {
-      const subject = form.selectedUser?.subject || form.userQuery.trim();
-      if (!subject) {
+      const id = form.selectedUser?.principal || form.userQuery.trim();
+      if (!id) {
         setGrantError(t("access.userRequired"));
         return null;
       }
+      if (!isProviderQualifiedId(id, "user")) {
+        setGrantError(t("access.userIdInvalid"));
+        return null;
+      }
       return {
-        grantee: { kind: "user", subject },
+        grantee: { kind: "user", id },
         label: form.selectedUser ? observedUserLabel(form.selectedUser) : form.userQuery.trim(),
         action,
         reason: form.reason.trim() || null,
@@ -1681,15 +1694,16 @@ export default function Access(props: { onClose?: () => void }) {
 
                 <Show when={grantForm().granteeKind === "group"}>
                   <div class="form-group">
-                    <label>{t("access.groupName")}</label>
+                    <label>{t("access.groupId")}</label>
                     <input
                       value={grantForm().groupName}
                       disabled={Boolean(modal().grant)}
-                      placeholder={t("access.groupNamePlaceholder")}
+                      placeholder={t("access.groupIdPlaceholder")}
                       onInput={(event) =>
                         setGrantForm({ ...grantForm(), groupName: event.currentTarget.value })
                       }
                     />
+                    <p class="hint">{t("access.groupIdHint")}</p>
                   </div>
                 </Show>
 
@@ -1736,6 +1750,7 @@ export default function Access(props: { onClose?: () => void }) {
                         )}
                       </For>
                     </div>
+                    <p class="hint">{t("access.userIdHint")}</p>
                   </div>
                 </Show>
 

@@ -1857,10 +1857,24 @@ mod tests {
             Subject::new("subject-ci"),
             ObservedIdentity {
                 subject: Subject::new("subject-ci"),
+                principal: crate::auth::principal::ProviderQualifiedId::new(
+                    "test",
+                    crate::auth::principal::PrincipalKind::User,
+                    "subject-ci",
+                )
+                .unwrap(),
                 username: Some("ci".to_string()),
                 display_name: Some("CI User".to_string()),
                 email: Some("ci@example.test".to_string()),
                 groups: vec!["team-a".to_string()],
+                group_ids: vec![
+                    crate::auth::principal::ProviderQualifiedId::new(
+                        "test",
+                        crate::auth::principal::PrincipalKind::Group,
+                        "550e8400-e29b-41d4-a716-446655440001",
+                    )
+                    .unwrap(),
+                ],
                 last_seen_at: 104,
             },
         );
