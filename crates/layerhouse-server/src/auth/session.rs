@@ -8,10 +8,13 @@ use crate::error::LayerhouseError;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DashboardSession {
     pub subject: String,
+    pub principal: String,
     pub username: Option<String>,
     pub display_name: Option<String>,
     pub email: Option<String>,
     pub groups: Vec<String>,
+    #[serde(default)]
+    pub group_ids: Vec<String>,
     pub expires_at: u64,
 }
 
@@ -70,10 +73,12 @@ mod tests {
         let key = [42u8; 32];
         let session = DashboardSession {
             subject: "user-1".into(),
+            principal: "kanidm:user:user-1".into(),
             username: Some("admin".into()),
             display_name: Some("Admin".into()),
             email: Some("admin@test.local".into()),
             groups: vec!["registry_admins".into()],
+            group_ids: vec![],
             expires_at: 1717200000,
         };
 
@@ -91,10 +96,12 @@ mod tests {
     fn decrypt_wrong_key_fails() {
         let session = DashboardSession {
             subject: "user-1".into(),
+            principal: "kanidm:user:user-1".into(),
             username: None,
             display_name: None,
             email: None,
             groups: vec![],
+            group_ids: vec![],
             expires_at: 1,
         };
 
@@ -109,6 +116,7 @@ mod tests {
         // Representative claims: long-ish subject/email, multiple groups.
         let session = DashboardSession {
             subject: "a1b2c3d4-e5f6-7890-abcd-ef1234567890".into(),
+            principal: "kanidm:user:a1b2c3d4-e5f6-7890-abcd-ef1234567890".into(),
             username: Some("adamcavendish".into()),
             display_name: Some("Adam Cavendish".into()),
             email: Some("adam.cavendish@modest-destiny.com".into()),
@@ -117,6 +125,7 @@ mod tests {
                 "layerhouse_developers".into(),
                 "qa/auth-test/developers".into(),
             ],
+            group_ids: vec![],
             expires_at: 1717200000,
         };
 

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::auth::identity::Subject;
+use crate::auth::principal::{PrincipalRef, ProviderQualifiedId};
 use crate::oci::digest::Digest;
 use crate::oci::manifest::{
     SizedDescriptor, extract_sized_referenced_descriptors, stored_size_bytes,
@@ -300,30 +301,33 @@ pub struct Namespace {
     pub created_at: u64,
 }
 
-/// Principal that receives a namespace-scoped grant. Groups are matched against
-/// the configured OIDC group claim at request time; users are keyed by immutable
-/// subject; public grants are anonymous and pull-only.
+/// Principal that receives a namespace-scoped grant. User and group grants are
+/// keyed by provider-qualified stable IDs; public grants are anonymous and
+/// pull-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NamespaceGrantGrantee {
-    Group { name: String },
-    User { subject: Subject },
+    Group { id: ProviderQualifiedId },
+    User { id: ProviderQualifiedId },
     Public,
 }
 
 impl NamespaceGrantGrantee {
     pub fn label(&self) -> String {
         match self {
-            Self::Group { name } => name.clone(),
-            Self::User { subject } => subject.as_str().to_string(),
+            Self::Group { id } | Self::User { id } => id.to_string(),
             Self::Public => "Public".to_string(),
         }
     }
 
     pub fn stable_key(&self) -> String {
         match self {
-            Self::Group { name } => format!("group:{name}"),
-            Self::User { subject } => format!("user:{}", subject.as_str()),
+            Self::Group { id } => PrincipalRef::group(id.clone())
+                .expect("namespace group grant id is provider-qualified group")
+                .stable_key(),
+            Self::User { id } => PrincipalRef::user(id.clone())
+                .expect("namespace user grant id is provider-qualified user")
+                .stable_key(),
             Self::Public => "public".to_string(),
         }
     }

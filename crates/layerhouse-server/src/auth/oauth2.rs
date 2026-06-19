@@ -11,6 +11,7 @@ use crate::routes::AppState;
 use crate::store::metadata::{NamespaceStore, ObservedIdentity};
 
 use super::identity::Subject;
+use super::principal::stable_group_ids;
 use super::session::DashboardSession;
 
 const OAUTH2_COOKIE: &str = "layerhouse_oauth2";
@@ -241,13 +242,20 @@ where
     let id_display_name = id_claims.display_name();
     let id_email = id_claims.email();
     let id_subject = id_claims.subject;
+    let principal = auth.user_principal(&id_subject)?;
+    let group_ids = stable_group_ids(auth.provider_name(), &all_groups)
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect();
 
     let session = DashboardSession {
         subject: id_subject,
+        principal: principal.to_string(),
         username: id_username,
         display_name: id_display_name,
         email: id_email,
         groups: all_groups,
+        group_ids,
         expires_at: now + session_max_age,
     };
 

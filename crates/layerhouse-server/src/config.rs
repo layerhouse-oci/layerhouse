@@ -32,6 +32,8 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthConfig {
+    #[serde(default = "default_provider_name")]
+    pub provider_name: String,
     pub issuer_url: String,
     #[serde(default)]
     pub issuer_internal_url: Option<String>,
@@ -78,6 +80,10 @@ fn default_cookie_secure_mode() -> CookieSecureMode {
 
 fn default_group_claim() -> String {
     "groups".to_string()
+}
+
+fn default_provider_name() -> String {
+    "oidc".to_string()
 }
 
 pub fn default_login_scopes() -> String {
@@ -536,6 +542,16 @@ fn validate_auth_config(auth: &AuthConfig) -> Result<(), ConfigError> {
             "auth.group_claim must not be empty".to_string(),
         ));
     }
+    if auth.provider_name.trim().is_empty() {
+        return Err(ConfigError::Invalid(
+            "auth.provider_name must not be empty".to_string(),
+        ));
+    }
+    if auth.provider_name.contains(':') {
+        return Err(ConfigError::Invalid(
+            "auth.provider_name must not contain ':'".to_string(),
+        ));
+    }
     if auth.login_scopes.trim().is_empty() {
         return Err(ConfigError::Invalid(
             "auth.login_scopes must not be empty".to_string(),
@@ -645,6 +661,7 @@ mod tests {
     fn auth_validates_signing_and_session_keys() {
         let mut config = base_config();
         config.auth = Some(AuthConfig {
+            provider_name: "kanidm".to_string(),
             issuer_url: "https://idp.example.test".to_string(),
             issuer_internal_url: None,
             issuer_internal_urls: Vec::new(),
@@ -683,6 +700,7 @@ mod tests {
     #[test]
     fn auth_internal_issuer_list_prefers_ordered_list() {
         let auth = AuthConfig {
+            provider_name: "kanidm".to_string(),
             issuer_url: "https://idp.example.test".to_string(),
             issuer_internal_url: Some("https://legacy.internal".to_string()),
             issuer_internal_urls: vec![

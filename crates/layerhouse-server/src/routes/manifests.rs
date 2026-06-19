@@ -1062,15 +1062,15 @@ mod tests {
     }
 
     fn identity_with_scopes(scopes: Vec<String>) -> AuthIdentity {
-        AuthIdentity {
-            subject: crate::auth::identity::Subject::new("user-1"),
-            username: Some("alice".to_string()),
-            display_name: None,
-            email: None,
-            groups: Vec::new(),
-            scopes,
-            token_type: crate::auth::token::TokenType::PersonalAccess,
-        }
+        let scope_refs = scopes.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut identity = AuthIdentity::for_test(
+            "user-1",
+            crate::auth::token::TokenType::PersonalAccess,
+            &[],
+            &scope_refs,
+        );
+        identity.username = Some("alice".to_string());
+        identity
     }
 
     // Claim `handle` for an org owner unrelated to the test identity, so the
