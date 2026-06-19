@@ -218,10 +218,16 @@ fn authenticate_session_cookies(
         // encrypted cookie is trusted for the session lifetime (max 1 hour).
         return Ok(super::token::AuthIdentity {
             subject: super::identity::Subject::new(session.subject),
+            principal: super::principal::ProviderQualifiedId::parse(session.principal)?,
             username: session.username,
             display_name: session.display_name,
             email: session.email,
             groups: session.groups,
+            group_ids: session
+                .group_ids
+                .into_iter()
+                .map(super::principal::ProviderQualifiedId::parse)
+                .collect::<Result<Vec<_>, _>>()?,
             scopes: vec![],
             token_type: super::token::TokenType::Session,
         });
@@ -469,10 +475,12 @@ mod tests {
     fn encrypted_session(expires_at: u64) -> String {
         DashboardSession {
             subject: "user-1".to_string(),
+            principal: "test:user:user-1".to_string(),
             username: Some("user".to_string()),
             display_name: None,
             email: None,
             groups: vec!["layerhouse_admins@example.com".to_string()],
+            group_ids: vec![],
             expires_at,
         }
         .encrypt(&[42u8; 32])

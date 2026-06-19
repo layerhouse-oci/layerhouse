@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::auth::permissions::OciAction;
+use crate::auth::principal::ProviderQualifiedId;
 use crate::auth::token::AuthIdentity;
 use crate::error::LayerhouseError;
 use crate::routes::AppState;
@@ -27,21 +28,21 @@ pub(crate) struct ReleaseNamespaceRequest {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum NamespaceGrantGranteeRequest {
-    Group { name: String },
-    User { subject: String },
+    Group { id: String },
+    User { id: String },
     Public,
 }
 
 impl NamespaceGrantGranteeRequest {
-    pub(crate) fn into_grantee(self) -> NamespaceGrantGrantee {
+    pub(crate) fn into_grantee(self) -> Result<NamespaceGrantGrantee, LayerhouseError> {
         match self {
-            Self::Group { name } => NamespaceGrantGrantee::Group {
-                name: name.trim().to_string(),
-            },
-            Self::User { subject } => NamespaceGrantGrantee::User {
-                subject: crate::auth::identity::Subject::new(subject.trim().to_string()),
-            },
-            Self::Public => NamespaceGrantGrantee::Public,
+            Self::Group { id } => Ok(NamespaceGrantGrantee::Group {
+                id: ProviderQualifiedId::parse(id)?,
+            }),
+            Self::User { id } => Ok(NamespaceGrantGrantee::User {
+                id: ProviderQualifiedId::parse(id)?,
+            }),
+            Self::Public => Ok(NamespaceGrantGrantee::Public),
         }
     }
 }
@@ -89,8 +90,8 @@ pub(crate) struct NamespaceListResponse {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum NamespaceGrantGranteeResponse {
-    Group { name: String },
-    User { subject: String },
+    Group { id: String },
+    User { id: String },
     Public,
 }
 
@@ -163,12 +164,12 @@ pub(crate) fn namespace_grant_response(grant: &NamespaceGrant) -> NamespaceGrant
         id: grant.id.clone(),
         namespace: grant.namespace.clone(),
         grantee: match &grant.grantee {
-            NamespaceGrantGrantee::Group { name } => {
-                NamespaceGrantGranteeResponse::Group { name: name.clone() }
+            NamespaceGrantGrantee::Group { id } => {
+                NamespaceGrantGranteeResponse::Group { id: id.to_string() }
             }
-            NamespaceGrantGrantee::User { subject } => NamespaceGrantGranteeResponse::User {
-                subject: subject.as_str().to_string(),
-            },
+            NamespaceGrantGrantee::User { id } => {
+                NamespaceGrantGranteeResponse::User { id: id.to_string() }
+            }
             NamespaceGrantGrantee::Public => NamespaceGrantGranteeResponse::Public,
         },
         action: grant.action,

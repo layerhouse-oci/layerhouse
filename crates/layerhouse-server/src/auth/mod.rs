@@ -1,9 +1,13 @@
+pub mod authorization;
+#[cfg(test)]
+mod cedar_shadow;
 pub mod discovery;
 pub mod identity;
 pub mod jwks;
 pub mod middleware;
 pub mod oauth2;
 pub mod permissions;
+pub mod principal;
 pub mod session;
 pub mod token;
 pub mod token_endpoint;
@@ -11,6 +15,7 @@ pub mod token_endpoint;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use async_trait::async_trait;
 use axum::http::HeaderMap;
 
 use crate::config::{AuthConfig, CookieSecureMode, S3Config};
@@ -20,11 +25,13 @@ use crate::store::metadata::{
     NamespaceGrant, NamespaceGrantGrantee, NamespaceStore, Owner, TokenStore,
 };
 
+use self::authorization::{Authorizer, AuthzDecision, AuthzRequest};
 use self::discovery::OidcDiscovery;
 use self::identity::Subject;
 use self::jwks::{CachedJwksDocument, JwksCache, JwksMetrics, JwksS3Cache};
 use self::permissions::PermissionResolver;
 use self::permissions::action_rank;
+use self::principal::{PrincipalKind, ProviderQualifiedId, stable_group_ids};
 use self::token::{AuthIdentity, TokenType};
 
 /// Whether a namespace `owner` grants `identity` the full action ladder in the
@@ -48,11 +55,8 @@ fn namespace_grant_matches(
         return false;
     }
     match &grant.grantee {
-        NamespaceGrantGrantee::Group { name } => identity
-            .groups
-            .iter()
-            .any(|group| permissions::group_matches(name, group)),
-        NamespaceGrantGrantee::User { subject } => *subject == identity.subject,
+        NamespaceGrantGrantee::Group { id } => identity.group_ids.iter().any(|group| group == id),
+        NamespaceGrantGrantee::User { id } => *id == identity.principal,
         NamespaceGrantGrantee::Public => action == permissions::OciAction::Pull,
     }
 }
@@ -89,6 +93,17 @@ struct FreshAuthMaterial {
 }
 
 impl AuthService {
+    pub(crate) fn provider_name(&self) -> &str {
+        self.config.provider_name.trim()
+    }
+
+    pub(crate) fn user_principal(
+        &self,
+        subject: &str,
+    ) -> Result<ProviderQualifiedId, LayerhouseError> {
+        ProviderQualifiedId::new(self.provider_name(), PrincipalKind::User, subject)
+    }
+
     pub async fn new(
         config: AuthConfig,
         s3_config: Option<&S3Config>,
@@ -425,12 +440,15 @@ impl AuthService {
             }
         }
 
+        let principal = self.user_principal(&pat.subject)?;
         Ok(AuthIdentity {
             subject: Subject::new(pat.subject),
+            principal,
             username: pat.username,
             display_name: None,
             email: None,
             groups: vec![],
+            group_ids: vec![],
             scopes: pat.scopes,
             token_type: TokenType::PersonalAccess,
         })
@@ -453,12 +471,17 @@ impl AuthService {
         let display_name = claims.display_name();
         let username = claims.username();
         let email = claims.email();
+        let groups = claims.groups.unwrap_or_default();
+        let principal = self.user_principal(&claims.subject)?;
+        let group_ids = stable_group_ids(self.provider_name(), &groups);
         Ok(AuthIdentity {
             subject: Subject::new(claims.subject),
+            principal,
             username,
             display_name,
             email,
-            groups: claims.groups.unwrap_or_default(),
+            groups,
+            group_ids,
             scopes: claims
                 .scope
                 .map(|s| s.split(' ').map(ToString::to_string).collect())
@@ -560,13 +583,17 @@ impl AuthService {
         let username = claims.username();
         let email = claims.email();
         let user_groups = claims.extract_groups(&self.config.group_claim);
+        let principal = self.user_principal(&claims.subject)?;
+        let group_ids = stable_group_ids(self.provider_name(), &user_groups);
 
         Ok(AuthIdentity {
             subject: Subject::new(claims.subject),
+            principal,
             username,
             display_name,
             email,
             groups: user_groups,
+            group_ids,
             scopes: vec![],
             token_type: TokenType::OidcAccess,
         })
@@ -579,12 +606,33 @@ impl AuthService {
         action: permissions::OciAction,
         namespaces: &dyn NamespaceStore,
     ) -> Result<(), LayerhouseError> {
+        let request = AuthzRequest {
+            actor: identity.actor(),
+            repository: repository.to_string(),
+            action,
+        };
+        match self.authorize(&request, namespaces).await? {
+            AuthzDecision::Allow => Ok(()),
+            AuthzDecision::Deny => Err(LayerhouseError::Denied(format!(
+                "access denied for repository {}",
+                repository
+            ))),
+        }
+    }
+
+    async fn authorize_repository(
+        &self,
+        identity: &AuthIdentity,
+        repository: &str,
+        action: permissions::OciAction,
+        namespaces: &dyn NamespaceStore,
+    ) -> Result<AuthzDecision, LayerhouseError> {
         // Personal-namespace auto-grant: any authenticated user has the full
         // action ladder under `users/<their-username>/`. Keyed on
         // `identity.username`, which is now populated for PATs as well as OIDC
         // sessions (see `validate_pat`).
         if permissions::in_personal_namespace(identity.username.as_deref(), repository) {
-            return Ok(());
+            return Ok(AuthzDecision::Allow);
         }
 
         // Personal-namespace boundary guard: repos under `users/<someone>/`
@@ -596,10 +644,7 @@ impl AuthService {
         if let Some(ns_user) = permissions::in_personal_namespace_of(repository)
             && identity.username.as_deref().is_none_or(|u| u != ns_user)
         {
-            return Err(LayerhouseError::Denied(format!(
-                "access denied for repository {}",
-                repository
-            )));
+            return Ok(AuthzDecision::Deny);
         }
 
         // Writes to `<handle>/...` are gated on a live namespace claim, mirroring
@@ -618,14 +663,14 @@ impl AuthService {
                     )));
                 }
                 None => {}
-                Some(ns) if owner_grants(&ns.owner, identity) => return Ok(()),
+                Some(ns) if owner_grants(&ns.owner, identity) => return Ok(AuthzDecision::Allow),
                 Some(_) => {
                     let grants = namespaces.list_namespace_grants(handle).await?;
                     if grants
                         .iter()
                         .any(|grant| namespace_grant_matches(grant, identity, action))
                     {
-                        return Ok(());
+                        return Ok(AuthzDecision::Allow);
                     }
                 }
             }
@@ -636,14 +681,30 @@ impl AuthService {
             identity.token_type,
             TokenType::PersonalAccess | TokenType::OciBearer
         ) {
-            return self
+            return match self
                 .permission_resolver
-                .check_scopes(&identity.scopes, repository, action);
+                .check_scopes(&identity.scopes, repository, action)
+            {
+                Ok(()) => Ok(AuthzDecision::Allow),
+                Err(LayerhouseError::Denied(_)) => Ok(AuthzDecision::Deny),
+                Err(error) => Err(error),
+            };
         }
 
         // OIDC tokens: map groups to permissions via config
-        self.permission_resolver
-            .check(&identity.groups, repository, action)
+        let group_keys = identity
+            .group_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        match self
+            .permission_resolver
+            .check(&group_keys, repository, action)
+        {
+            Ok(()) => Ok(AuthzDecision::Allow),
+            Err(LayerhouseError::Denied(_)) => Ok(AuthzDecision::Deny),
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn check_admin_access(
@@ -835,6 +896,29 @@ impl AuthService {
     }
 }
 
+#[async_trait]
+impl Authorizer for AuthService {
+    async fn authorize(
+        &self,
+        request: &AuthzRequest,
+        namespaces: &dyn NamespaceStore,
+    ) -> Result<AuthzDecision, LayerhouseError> {
+        let identity = AuthIdentity {
+            subject: Subject::new(request.actor.principal.local_id()),
+            principal: request.actor.principal.clone(),
+            username: request.actor.username.clone(),
+            display_name: request.actor.display_name.clone(),
+            email: request.actor.email.clone(),
+            groups: request.actor.display_groups.clone(),
+            group_ids: request.actor.group_ids.clone(),
+            scopes: request.actor.scopes.clone(),
+            token_type: request.actor.token_type.clone(),
+        };
+        self.authorize_repository(&identity, &request.repository, request.action, namespaces)
+            .await
+    }
+}
+
 pub(crate) struct CookieFlags {
     pub secure: bool,
     pub same_site: &'static str,
@@ -908,6 +992,7 @@ mod tests {
     use super::{AuthService, CachedJwksDocument, JwksCache, jwks};
     use crate::auth::identity::Subject;
     use crate::auth::permissions::OciAction;
+    use crate::auth::principal::{PrincipalKind, ProviderQualifiedId};
     use crate::auth::token::{AuthIdentity, TokenType};
     use crate::config::{AuthConfig, PermissionMapping};
     use crate::store::metadata::typed_id::OrgId;
@@ -918,6 +1003,7 @@ mod tests {
 
     pub(super) fn auth_config() -> AuthConfig {
         AuthConfig {
+            provider_name: "test".to_string(),
             issuer_url: "https://idp.example.test/oauth2/openid/layerhouse".to_string(),
             issuer_internal_url: None,
             issuer_internal_urls: Vec::new(),
@@ -1019,15 +1105,15 @@ mod tests {
         groups: &[&str],
         scopes: &[&str],
     ) -> AuthIdentity {
-        AuthIdentity {
-            subject: Subject::new(subject),
-            username: None,
-            display_name: None,
-            email: None,
-            groups: groups.iter().map(|g| g.to_string()).collect(),
-            scopes: scopes.iter().map(|s| s.to_string()).collect(),
-            token_type,
-        }
+        AuthIdentity::for_test(subject, token_type, groups, scopes)
+    }
+
+    fn user_id(subject: &str) -> ProviderQualifiedId {
+        ProviderQualifiedId::new("test", PrincipalKind::User, subject).unwrap()
+    }
+
+    fn group_id(id: &str) -> ProviderQualifiedId {
+        ProviderQualifiedId::new("test", PrincipalKind::Group, id).unwrap()
     }
 
     async fn claim(store: &InMemoryMetadataStore, handle: &str, owner: Owner) {
@@ -1102,13 +1188,18 @@ mod tests {
     async fn delegated_rbac_grant_authorizes_non_owner_write() {
         let auth = AuthService::for_test(vec![PermissionMapping {
             name: "ci".to_string(),
-            groups: vec!["ci".to_string()],
+            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440002".to_string()],
             scopes: vec!["repository:acme/*:create".to_string()],
         }]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
 
-        let ci = identity("subject-ci", TokenType::OidcAccess, &["ci"], &[]);
+        let ci = identity(
+            "subject-ci",
+            TokenType::OidcAccess,
+            &["550e8400-e29b-41d4-a716-446655440002"],
+            &[],
+        );
         auth.check_permission(&ci, "acme/app", OciAction::Create, &store)
             .await
             .expect("delegated group grant authorizes the write");
@@ -1124,13 +1215,18 @@ mod tests {
             "acme",
             "grant-1",
             NamespaceGrantGrantee::Group {
-                name: "builders".to_string(),
+                id: group_id("550e8400-e29b-41d4-a716-446655440001"),
             },
             OciAction::Create,
         )
         .await;
 
-        let builder = identity("subject-builder", TokenType::OidcAccess, &["builders"], &[]);
+        let builder = identity(
+            "subject-builder",
+            TokenType::OidcAccess,
+            &["550e8400-e29b-41d4-a716-446655440001"],
+            &[],
+        );
         auth.check_permission(&builder, "acme/app", OciAction::Pull, &store)
             .await
             .expect("create grant includes pull");
@@ -1152,7 +1248,7 @@ mod tests {
             "acme",
             "grant-1",
             NamespaceGrantGrantee::User {
-                subject: Subject::new("subject-alice"),
+                id: user_id("subject-alice"),
             },
             OciAction::Pull,
         )
@@ -1198,13 +1294,18 @@ mod tests {
     async fn reads_are_ungated_by_namespace_claim() {
         let auth = AuthService::for_test(vec![PermissionMapping {
             name: "readers".to_string(),
-            groups: vec!["readers".to_string()],
+            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440003".to_string()],
             scopes: vec!["repository:acme/*:pull".to_string()],
         }]);
         let store = InMemoryMetadataStore::default();
 
         // No claim for "acme"; a Pull still resolves via RBAC.
-        let reader = identity("subject-r", TokenType::OidcAccess, &["readers"], &[]);
+        let reader = identity(
+            "subject-r",
+            TokenType::OidcAccess,
+            &["550e8400-e29b-41d4-a716-446655440003"],
+            &[],
+        );
         auth.check_permission(&reader, "acme/app", OciAction::Pull, &store)
             .await
             .expect("pulls skip the namespace gate");
@@ -1214,7 +1315,7 @@ mod tests {
     async fn admin_access_bypasses_namespace_gate() {
         let auth = AuthService::for_test(vec![PermissionMapping {
             name: "admin".to_string(),
-            groups: vec!["registry_admins".to_string()],
+            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440004".to_string()],
             scopes: vec!["repository:*:*".to_string()],
         }]);
         let store = InMemoryMetadataStore::default();
@@ -1222,7 +1323,7 @@ mod tests {
         let admin = identity(
             "subject-admin",
             TokenType::OidcAccess,
-            &["registry_admins"],
+            &["550e8400-e29b-41d4-a716-446655440004"],
             &[],
         );
         auth.check_admin_access(&admin, &store)

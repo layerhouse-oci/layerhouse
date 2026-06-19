@@ -68,7 +68,6 @@ pub fn routes<M: NamespaceStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::identity::Subject;
     use crate::auth::token::AuthIdentity;
     use crate::routes::test_state_with_auth;
     use crate::store::blob::InMemoryBlobStore;
@@ -78,39 +77,36 @@ mod tests {
     use tower::ServiceExt;
 
     fn user_identity() -> AuthIdentity {
-        AuthIdentity {
-            subject: Subject::new("user-1"),
-            username: Some("alice".to_string()),
-            display_name: None,
-            email: None,
-            groups: vec![],
-            scopes: vec![],
-            token_type: crate::auth::token::TokenType::PersonalAccess,
-        }
+        let mut identity = AuthIdentity::for_test(
+            "user-1",
+            crate::auth::token::TokenType::PersonalAccess,
+            &[],
+            &[],
+        );
+        identity.username = Some("alice".to_string());
+        identity
     }
 
     fn admin_identity() -> AuthIdentity {
-        AuthIdentity {
-            subject: Subject::new("admin-1"),
-            username: Some("admin".to_string()),
-            display_name: None,
-            email: None,
-            groups: vec!["registry_admins".to_string()],
-            scopes: vec!["repository:*:*".to_string()],
-            token_type: crate::auth::token::TokenType::PersonalAccess,
-        }
+        let mut identity = AuthIdentity::for_test(
+            "admin-1",
+            crate::auth::token::TokenType::PersonalAccess,
+            &["registry_admins"],
+            &["repository:*:*"],
+        );
+        identity.username = Some("admin".to_string());
+        identity
     }
 
     fn other_user_identity() -> AuthIdentity {
-        AuthIdentity {
-            subject: Subject::new("user-2"),
-            username: Some("bob".to_string()),
-            display_name: None,
-            email: None,
-            groups: vec![],
-            scopes: vec![],
-            token_type: crate::auth::token::TokenType::PersonalAccess,
-        }
+        let mut identity = AuthIdentity::for_test(
+            "user-2",
+            crate::auth::token::TokenType::PersonalAccess,
+            &[],
+            &[],
+        );
+        identity.username = Some("bob".to_string());
+        identity
     }
 
     fn post_json(
@@ -308,7 +304,7 @@ mod tests {
             .oneshot(post_json(
                 "/api/v1/account/namespaces/acme/grants",
                 &serde_json::json!({
-                    "grantee": {"kind": "group", "name": "builders"},
+                    "grantee": {"kind": "group", "id": "test:group:550e8400-e29b-41d4-a716-446655440020"},
                     "action": "create"
                 }),
                 &user_identity(),
@@ -373,7 +369,7 @@ mod tests {
             .oneshot(post_json(
                 "/api/v1/account/namespaces/acme/grants",
                 &serde_json::json!({
-                    "grantee": {"kind": "group", "name": "builders"},
+                    "grantee": {"kind": "group", "id": "test:group:550e8400-e29b-41d4-a716-446655440020"},
                     "action": "pull"
                 }),
                 &other_user_identity(),
@@ -402,7 +398,7 @@ mod tests {
             .oneshot(post_json(
                 "/api/v1/admin/namespaces/acme/grants",
                 &serde_json::json!({
-                    "grantee": {"kind": "user", "subject": "user-2"},
+                    "grantee": {"kind": "user", "id": "test:user:user-2"},
                     "action": "pull"
                 }),
                 &admin_identity(),
@@ -416,7 +412,7 @@ mod tests {
             .oneshot(post_json(
                 "/api/v1/admin/namespaces/acme/grants",
                 &serde_json::json!({
-                    "grantee": {"kind": "user", "subject": "user-2"},
+                    "grantee": {"kind": "user", "id": "test:user:user-2"},
                     "action": "pull",
                     "reason": "support request"
                 }),
@@ -499,15 +495,7 @@ mod tests {
         assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
 
         // Bob cannot release Alice's namespace
-        let bob = AuthIdentity {
-            subject: Subject::new("user-2"),
-            username: Some("bob".to_string()),
-            display_name: None,
-            email: None,
-            groups: vec![],
-            scopes: vec![],
-            token_type: crate::auth::token::TokenType::PersonalAccess,
-        };
+        let bob = other_user_identity();
         let resp = app
             .clone()
             .oneshot(post_json(

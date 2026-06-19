@@ -324,7 +324,7 @@ async fn put_namespace_grant_response<M: NamespaceStore, B: BlobStore>(
 ) -> Result<Response, LayerhouseError> {
     ensure_namespace_exists(state, handle).await?;
     let reason = normalized_reason(req.reason.as_deref(), admin)?;
-    let grantee = req.grantee.into_grantee();
+    let grantee = req.grantee.into_grantee()?;
     let existing = matching_grant(state, handle, &grantee).await?;
     let now = crate::store::metadata::now_epoch();
     let action = public_safe_action(&grantee, req.action);

@@ -816,12 +816,14 @@ fn validate_namespace_grant(
         )));
     }
     match &grant.grantee {
-        NamespaceGrantGrantee::Group { name } if name.trim().is_empty() => Err(
-            LayerhouseError::NameInvalid("group grant requires a group name".to_string()),
-        ),
-        NamespaceGrantGrantee::User { subject } if subject.as_str().trim().is_empty() => Err(
-            LayerhouseError::NameInvalid("user grant requires a subject".to_string()),
-        ),
+        NamespaceGrantGrantee::Group { id } => {
+            crate::auth::principal::PrincipalRef::group(id.clone())?;
+            Ok(())
+        }
+        NamespaceGrantGrantee::User { id } => {
+            crate::auth::principal::PrincipalRef::user(id.clone())?;
+            Ok(())
+        }
         NamespaceGrantGrantee::Public
             if grant.action != crate::auth::permissions::OciAction::Pull =>
         {
@@ -1833,7 +1835,12 @@ mod tests {
             id: "grant-1".to_string(),
             namespace: "alice".to_string(),
             grantee: NamespaceGrantGrantee::Group {
-                name: "team-a".to_string(),
+                id: crate::auth::principal::ProviderQualifiedId::new(
+                    "test",
+                    crate::auth::principal::PrincipalKind::Group,
+                    "550e8400-e29b-41d4-a716-446655440000",
+                )
+                .unwrap(),
             },
             action: crate::auth::permissions::OciAction::Create,
             label: "team-a".to_string(),
@@ -1942,7 +1949,7 @@ mod tests {
         assert_eq!(grant.action, crate::auth::permissions::OciAction::Create);
         assert!(matches!(
             grant.grantee,
-            NamespaceGrantGrantee::Group { ref name } if name == "team-a"
+            NamespaceGrantGrantee::Group { ref id } if id.as_str() == "test:group:550e8400-e29b-41d4-a716-446655440000"
         ));
 
         let observed = restored
