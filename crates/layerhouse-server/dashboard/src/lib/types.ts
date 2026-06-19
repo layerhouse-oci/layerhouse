@@ -124,10 +124,12 @@ export interface DeleteCounts {
 export interface DashboardSession {
   auth_enabled: boolean;
   subject: string | null;
+  principal: string | null;
   username: string | null;
   display_name: string | null;
   email: string | null;
   groups: string[];
+  group_ids: string[];
   scopes: string[];
   token_type: string | null;
   is_admin: boolean;
@@ -207,8 +209,8 @@ export interface ReleaseNamespaceRequest {
 }
 
 export type NamespaceGrantGrantee =
-  | { kind: "group"; name: string }
-  | { kind: "user"; subject: string }
+  | { kind: "group"; id: string }
+  | { kind: "user"; id: string }
   | { kind: "public" };
 
 export interface NamespaceGrant {
@@ -259,10 +261,12 @@ export interface NamespaceGrantAuditListResponse {
 
 export interface ObservedIdentity {
   subject: string;
+  principal: string;
   username: string | null;
   display_name: string | null;
   email: string | null;
   groups: string[];
+  group_ids: string[];
   last_seen_at: number;
 }
 

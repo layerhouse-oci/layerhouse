@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
 use crate::auth::identity::Subject;
@@ -353,9 +353,10 @@ pub struct NamespaceGrant {
 /// User identity observed during successful login/token validation. This is not
 /// an IdP directory; it gives the UI a searchable cache for one-off user grants
 /// while authorization still keys on immutable subject.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ObservedIdentity {
     pub subject: Subject,
+    pub principal: ProviderQualifiedId,
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
@@ -364,7 +365,55 @@ pub struct ObservedIdentity {
     pub email: Option<String>,
     #[serde(default)]
     pub groups: Vec<String>,
+    #[serde(default)]
+    pub group_ids: Vec<ProviderQualifiedId>,
     pub last_seen_at: u64,
+}
+
+impl<'de> Deserialize<'de> for ObservedIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ObservedIdentityWire {
+            subject: Subject,
+            #[serde(default)]
+            principal: Option<ProviderQualifiedId>,
+            #[serde(default)]
+            username: Option<String>,
+            #[serde(default)]
+            display_name: Option<String>,
+            #[serde(default)]
+            email: Option<String>,
+            #[serde(default)]
+            groups: Vec<String>,
+            #[serde(default)]
+            group_ids: Vec<ProviderQualifiedId>,
+            last_seen_at: u64,
+        }
+
+        let wire = ObservedIdentityWire::deserialize(deserializer)?;
+        let principal = match wire.principal {
+            Some(principal) => principal,
+            None => ProviderQualifiedId::new(
+                "oidc",
+                crate::auth::principal::PrincipalKind::User,
+                wire.subject.as_str(),
+            )
+            .map_err(serde::de::Error::custom)?,
+        };
+        Ok(Self {
+            subject: wire.subject,
+            principal,
+            username: wire.username,
+            display_name: wire.display_name,
+            email: wire.email,
+            groups: wire.groups,
+            group_ids: wire.group_ids,
+            last_seen_at: wire.last_seen_at,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1105,6 +1154,23 @@ mod tests {
             body,
             referenced_blobs,
         )
+    }
+
+    #[test]
+    fn observed_identity_deserializes_old_records_without_principal() {
+        let identity: ObservedIdentity = serde_json::from_value(serde_json::json!({
+            "subject": "user-123",
+            "username": "alice",
+            "groups": ["registry_admins"],
+            "last_seen_at": 42
+        }))
+        .unwrap();
+
+        assert_eq!(identity.subject, Subject::new("user-123"));
+        assert_eq!(identity.principal.to_string(), "oidc:user:user-123");
+        assert_eq!(identity.username.as_deref(), Some("alice"));
+        assert_eq!(identity.groups, vec!["registry_admins"]);
+        assert!(identity.group_ids.is_empty());
     }
 
     #[test]

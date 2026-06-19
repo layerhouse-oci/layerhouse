@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::auth::permissions::OciAction;
-use crate::auth::principal::ProviderQualifiedId;
+use crate::auth::principal::{PrincipalRef, ProviderQualifiedId};
 use crate::auth::token::AuthIdentity;
 use crate::error::LayerhouseError;
 use crate::routes::AppState;
@@ -36,12 +36,16 @@ pub(crate) enum NamespaceGrantGranteeRequest {
 impl NamespaceGrantGranteeRequest {
     pub(crate) fn into_grantee(self) -> Result<NamespaceGrantGrantee, LayerhouseError> {
         match self {
-            Self::Group { id } => Ok(NamespaceGrantGrantee::Group {
-                id: ProviderQualifiedId::parse(id)?,
-            }),
-            Self::User { id } => Ok(NamespaceGrantGrantee::User {
-                id: ProviderQualifiedId::parse(id)?,
-            }),
+            Self::Group { id } => {
+                let id = ProviderQualifiedId::parse(id)?;
+                PrincipalRef::group(id.clone())?;
+                Ok(NamespaceGrantGrantee::Group { id })
+            }
+            Self::User { id } => {
+                let id = ProviderQualifiedId::parse(id)?;
+                PrincipalRef::user(id.clone())?;
+                Ok(NamespaceGrantGrantee::User { id })
+            }
             Self::Public => Ok(NamespaceGrantGrantee::Public),
         }
     }
@@ -135,10 +139,12 @@ pub(crate) struct NamespaceGrantAuditListResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct ObservedIdentityResponse {
     subject: String,
+    principal: String,
     username: Option<String>,
     display_name: Option<String>,
     email: Option<String>,
     groups: Vec<String>,
+    group_ids: Vec<String>,
     last_seen_at: u64,
 }
 
@@ -201,10 +207,12 @@ pub(crate) fn namespace_grant_audit_response(
 pub(crate) fn observed_identity_response(identity: &ObservedIdentity) -> ObservedIdentityResponse {
     ObservedIdentityResponse {
         subject: identity.subject.as_str().to_string(),
+        principal: identity.principal.to_string(),
         username: identity.username.clone(),
         display_name: identity.display_name.clone(),
         email: identity.email.clone(),
         groups: identity.groups.clone(),
+        group_ids: identity.group_ids.iter().map(ToString::to_string).collect(),
         last_seen_at: identity.last_seen_at,
     }
 }
@@ -238,4 +246,27 @@ pub(crate) fn require_auth<'a, M, B>(
         });
     };
     Ok(identity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NamespaceGrantGranteeRequest;
+
+    #[test]
+    fn grantee_request_rejects_mismatched_principal_kind() {
+        assert!(
+            NamespaceGrantGranteeRequest::Group {
+                id: "test:user:alice".to_string(),
+            }
+            .into_grantee()
+            .is_err()
+        );
+        assert!(
+            NamespaceGrantGranteeRequest::User {
+                id: "test:group:550e8400-e29b-41d4-a716-446655440000".to_string(),
+            }
+            .into_grantee()
+            .is_err()
+        );
+    }
 }

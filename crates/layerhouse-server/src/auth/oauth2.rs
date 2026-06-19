@@ -264,10 +264,12 @@ where
         .metadata
         .put_observed_identity(ObservedIdentity {
             subject: Subject::new(session.subject.clone()),
+            principal,
             username: session.username.clone(),
             display_name: session.display_name.clone(),
             email: session.email.clone(),
             groups: session.groups.clone(),
+            group_ids: stable_group_ids(auth.provider_name(), &session.groups),
             last_seen_at: now,
         })
         .await

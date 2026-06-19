@@ -14,10 +14,12 @@ use crate::store::metadata::NamespaceStore;
 pub struct SessionResponse {
     pub auth_enabled: bool,
     pub subject: Option<String>,
+    pub principal: Option<String>,
     pub username: Option<String>,
     pub display_name: Option<String>,
     pub email: Option<String>,
     pub groups: Vec<String>,
+    pub group_ids: Vec<String>,
     pub scopes: Vec<String>,
     pub token_type: Option<String>,
     pub is_admin: bool,
@@ -40,10 +42,12 @@ async fn get_session<M: NamespaceStore, B: Send + Sync + 'static>(
         return Ok(Json(SessionResponse {
             auth_enabled: false,
             subject: None,
+            principal: None,
             username: None,
             display_name: None,
             email: None,
             groups: vec![],
+            group_ids: vec![],
             scopes: vec![],
             token_type: None,
             is_admin: true,
@@ -57,10 +61,12 @@ async fn get_session<M: NamespaceStore, B: Send + Sync + 'static>(
         return Ok(Json(SessionResponse {
             auth_enabled: true,
             subject: None,
+            principal: None,
             username: None,
             display_name: None,
             email: None,
             groups: vec![],
+            group_ids: vec![],
             scopes: vec![],
             token_type: None,
             is_admin: false,
@@ -78,10 +84,12 @@ async fn get_session<M: NamespaceStore, B: Send + Sync + 'static>(
     Ok(Json(SessionResponse {
         auth_enabled: true,
         subject: Some(identity.subject.into_string()),
+        principal: Some(identity.principal.to_string()),
         username: identity.username,
         display_name: identity.display_name,
         email: identity.email,
         groups: identity.groups,
+        group_ids: identity.group_ids.iter().map(ToString::to_string).collect(),
         scopes: identity.scopes,
         token_type: Some(token_type_name(identity.token_type).to_string()),
         is_admin,
@@ -178,10 +186,12 @@ mod tests {
         let value = serde_json::to_value(SessionResponse {
             auth_enabled: true,
             subject: Some("subject-uuid".to_string()),
+            principal: Some("test:user:subject-uuid".to_string()),
             username: Some("admin".to_string()),
             display_name: Some("Admin User".to_string()),
             email: Some("admin@layerhouse.local".to_string()),
             groups: vec!["registry_admins".to_string()],
+            group_ids: vec!["test:group:550e8400-e29b-41d4-a716-446655440000".to_string()],
             scopes: vec![],
             token_type: Some("oidc_access".to_string()),
             is_admin: true,
@@ -190,9 +200,14 @@ mod tests {
 
         assert!(value.get("user_id").is_none());
         assert_eq!(value["subject"], "subject-uuid");
+        assert_eq!(value["principal"], "test:user:subject-uuid");
         assert_eq!(value["username"], "admin");
         assert_eq!(value["display_name"], "Admin User");
         assert_eq!(value["email"], "admin@layerhouse.local");
+        assert_eq!(
+            value["group_ids"],
+            serde_json::json!(["test:group:550e8400-e29b-41d4-a716-446655440000"])
+        );
         assert_eq!(value["is_admin"], true);
     }
 
@@ -201,10 +216,12 @@ mod tests {
         let value = serde_json::to_value(SessionResponse {
             auth_enabled: false,
             subject: None,
+            principal: None,
             username: None,
             display_name: None,
             email: None,
             groups: vec![],
+            group_ids: vec![],
             scopes: vec![],
             token_type: None,
             is_admin: true,
@@ -213,6 +230,7 @@ mod tests {
 
         assert!(value.get("user_id").is_none());
         assert!(value["subject"].is_null());
+        assert!(value["principal"].is_null());
         assert!(value["username"].is_null());
         assert!(value["display_name"].is_null());
         assert!(value["email"].is_null());
@@ -227,10 +245,12 @@ mod tests {
         let value = serde_json::to_value(SessionResponse {
             auth_enabled: true,
             subject: None,
+            principal: None,
             username: None,
             display_name: None,
             email: None,
             groups: vec![],
+            group_ids: vec![],
             scopes: vec![],
             token_type: None,
             is_admin: false,
@@ -239,6 +259,7 @@ mod tests {
 
         assert_eq!(value["auth_enabled"], true);
         assert!(value["subject"].is_null());
+        assert!(value["principal"].is_null());
         assert_eq!(value["is_admin"], false);
     }
 }
