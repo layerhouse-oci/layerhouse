@@ -213,8 +213,13 @@ where
                         }
                         _ => {
                             // Check OIDC group grants too.
+                            let group_ids = identity
+                                .group_ids
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>();
                             let group_max = state.auth.as_ref().and_then(|a| {
-                                a.max_action_from_groups(&identity.groups, &format!("{prefix}/*"))
+                                a.max_action_from_groups(&group_ids, &format!("{prefix}/*"))
                             });
                             match group_max {
                                 Some(gm) if permissions::action_matches(gm, best_action) => {}
@@ -604,12 +609,12 @@ mod tests {
     async fn create_pat_allows_namespace_pattern_via_group_grant() {
         let state = test_state_with_auth(vec![PermissionMapping {
             name: "ci-team".to_string(),
-            groups: vec!["ci".to_string()],
+            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440030".to_string()],
             scopes: vec!["repository:team-a/*:*".to_string()],
         }]);
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
 
-        // Actor has no explicit scope but is in the `ci` group.
+        // Actor has no explicit scope but is in the stable CI group.
         let response = app
             .oneshot(post_tokens(
                 serde_json::json!({
@@ -618,7 +623,10 @@ mod tests {
                         {"repository": "team-a/*", "actions": ["pull"]}
                     ]
                 }),
-                Some(identity_with_groups(Vec::new(), vec!["ci"])),
+                Some(identity_with_groups(
+                    Vec::new(),
+                    vec!["550e8400-e29b-41d4-a716-446655440030"],
+                )),
             ))
             .await
             .unwrap();
@@ -938,7 +946,7 @@ mod tests {
     async fn grantable_scopes_includes_group_grant_repos() {
         let state = test_state_with_auth(vec![PermissionMapping {
             name: "ci-team".to_string(),
-            groups: vec!["ci".to_string()],
+            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440031".to_string()],
             scopes: vec!["repository:team-a/*:pull,create".to_string()],
         }]);
         seed_repos(&state, &["team-a/worker", "team-a/frontend"]).await;
@@ -947,7 +955,10 @@ mod tests {
         let response = app
             .oneshot(get_grantable_scopes(
                 "q=team-a",
-                Some(identity_with_groups(Vec::new(), vec!["ci"])),
+                Some(identity_with_groups(
+                    Vec::new(),
+                    vec!["550e8400-e29b-41d4-a716-446655440031"],
+                )),
             ))
             .await
             .unwrap();

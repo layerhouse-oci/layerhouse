@@ -72,6 +72,16 @@ fn max_namespace_grant_action(
         .max_by_key(|action| action_rank(*action))
 }
 
+fn authorization_group_keys(identity: &AuthIdentity) -> Vec<String> {
+    let mut keys = identity
+        .group_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    keys.extend(identity.groups.iter().cloned());
+    keys
+}
+
 pub struct AuthService {
     pub config: AuthConfig,
     discovery: RwLock<OidcDiscovery>,
@@ -692,11 +702,7 @@ impl AuthService {
         }
 
         // OIDC tokens: map groups to permissions via config
-        let group_keys = identity
-            .group_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
+        let group_keys = authorization_group_keys(identity);
         match self
             .permission_resolver
             .check(&group_keys, repository, action)
@@ -750,9 +756,10 @@ impl AuthService {
         let scope_max = permissions::max_action_from_scopes(&identity.scopes, repository);
 
         // Check OIDC group grants.
+        let group_keys = authorization_group_keys(identity);
         let group_max = self
             .permission_resolver
-            .max_action_from_groups(&identity.groups, repository);
+            .max_action_from_groups(&group_keys, repository);
 
         let max = match (scope_max, group_max) {
             (Some(s), Some(g)) => Some(if action_rank(s) >= action_rank(g) {
@@ -991,7 +998,7 @@ mod tests {
 
     use super::{AuthService, CachedJwksDocument, JwksCache, jwks};
     use crate::auth::identity::Subject;
-    use crate::auth::permissions::OciAction;
+    use crate::auth::permissions::{self, OciAction};
     use crate::auth::principal::{PrincipalKind, ProviderQualifiedId};
     use crate::auth::token::{AuthIdentity, TokenType};
     use crate::config::{AuthConfig, PermissionMapping};
@@ -1203,6 +1210,52 @@ mod tests {
         auth.check_permission(&ci, "acme/app", OciAction::Create, &store)
             .await
             .expect("delegated group grant authorizes the write");
+    }
+
+    #[tokio::test]
+    async fn grantable_action_uses_stable_group_ids() {
+        let auth = AuthService::for_test(vec![PermissionMapping {
+            name: "ci".to_string(),
+            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440002".to_string()],
+            scopes: vec!["repository:acme/*:create".to_string()],
+        }]);
+        let store = InMemoryMetadataStore::default();
+        let ci = identity(
+            "subject-ci",
+            TokenType::OidcAccess,
+            &["550e8400-e29b-41d4-a716-446655440002"],
+            &[],
+        );
+
+        let (action, source) = auth
+            .max_grantable_action(&ci, "acme/app", &store)
+            .await
+            .expect("stable group ID grants are grantable");
+        assert_eq!(action, OciAction::Create);
+        assert_eq!(source, permissions::GrantSource::GroupGrant);
+    }
+
+    #[tokio::test]
+    async fn grantable_action_preserves_exact_display_group_mappings() {
+        let auth = AuthService::for_test(vec![PermissionMapping {
+            name: "admins".to_string(),
+            groups: vec!["registry_admins".to_string()],
+            scopes: vec!["repository:acme/*:create".to_string()],
+        }]);
+        let store = InMemoryMetadataStore::default();
+        let admin = identity(
+            "subject-admin",
+            TokenType::OidcAccess,
+            &["registry_admins"],
+            &[],
+        );
+
+        let (action, source) = auth
+            .max_grantable_action(&admin, "acme/app", &store)
+            .await
+            .expect("exact display group mappings remain grantable");
+        assert_eq!(action, OciAction::Create);
+        assert_eq!(source, permissions::GrantSource::GroupGrant);
     }
 
     #[tokio::test]
