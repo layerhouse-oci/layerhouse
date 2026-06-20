@@ -5,6 +5,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::LayerhouseError;
+use crate::store::metadata::NamespaceEpoch;
 
 use super::token::TokenType;
 
@@ -130,6 +131,7 @@ pub struct Actor {
     pub group_ids: Vec<ProviderQualifiedId>,
     pub display_groups: Vec<String>,
     pub scopes: Vec<String>,
+    pub namespace_epochs: Vec<NamespaceEpoch>,
     pub token_type: TokenType,
 }
 

@@ -20,7 +20,27 @@ pub trait ManifestStore: Send + Sync + 'static {
         entry: ManifestEntry,
     ) -> Result<(), LayerhouseError>;
 
+    async fn put_manifest_with_expected_namespace(
+        &self,
+        name: &str,
+        reference: &str,
+        entry: ManifestEntry,
+        _expected_namespace: Option<NamespaceEpoch>,
+        _require_reference_absent: bool,
+    ) -> Result<(), LayerhouseError> {
+        self.put_manifest(name, reference, entry).await
+    }
+
     async fn delete_manifest(&self, name: &str, digest: &Digest) -> Result<(), LayerhouseError>;
+
+    async fn delete_manifest_with_expected_namespace(
+        &self,
+        name: &str,
+        digest: &Digest,
+        _expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<(), LayerhouseError> {
+        self.delete_manifest(name, digest).await
+    }
 
     async fn list_tags(
         &self,
@@ -49,13 +69,40 @@ pub trait ManifestStore: Send + Sync + 'static {
         tag: &str,
     ) -> Result<bool, LayerhouseError>;
 
+    async fn delete_tag_with_expected_namespace(
+        &self,
+        name: &str,
+        digest: &Digest,
+        tag: &str,
+        _expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<bool, LayerhouseError> {
+        self.delete_tag(name, digest, tag).await
+    }
+
     async fn delete_repository(&self, name: &str) -> Result<DeleteCounts, LayerhouseError>;
+
+    async fn delete_repository_with_expected_namespace(
+        &self,
+        name: &str,
+        _expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<DeleteCounts, LayerhouseError> {
+        self.delete_repository(name).await
+    }
 
     async fn delete_manifests(
         &self,
         name: &str,
         digests: &[Digest],
     ) -> Result<DeleteCounts, LayerhouseError>;
+
+    async fn delete_manifests_with_expected_namespace(
+        &self,
+        name: &str,
+        digests: &[Digest],
+        _expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<DeleteCounts, LayerhouseError> {
+        self.delete_manifests(name, digests).await
+    }
 
     async fn list_referrers(
         &self,
@@ -70,6 +117,16 @@ pub trait ManifestStore: Send + Sync + 'static {
         dest_repo: &str,
         digest: &Digest,
     ) -> Result<(), LayerhouseError>;
+
+    async fn mount_blob_with_expected_namespace(
+        &self,
+        source_repo: &str,
+        dest_repo: &str,
+        digest: &Digest,
+        _expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<(), LayerhouseError> {
+        self.mount_blob(source_repo, dest_repo, digest).await
+    }
 
     async fn record_blob_delete_request(
         &self,
@@ -192,7 +249,21 @@ pub trait HelmStore: Send + Sync + 'static {
 pub trait RepositoryStore: Send + Sync + 'static {
     async fn get_repository(&self, name: &str) -> Result<Option<Repository>, LayerhouseError>;
     async fn put_repository(&self, repo: Repository) -> Result<(), LayerhouseError>;
+    async fn put_repository_with_expected_namespace(
+        &self,
+        repo: Repository,
+        _expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<(), LayerhouseError> {
+        self.put_repository(repo).await
+    }
     async fn delete_repository_meta(&self, name: &str) -> Result<bool, LayerhouseError>;
+    async fn delete_repository_meta_with_expected_namespace(
+        &self,
+        name: &str,
+        _expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<bool, LayerhouseError> {
+        self.delete_repository_meta(name).await
+    }
 }
 
 /// Namespace (first-segment handle) ownership. A live `Namespace` entry is the

@@ -82,12 +82,14 @@ pub async fn token_endpoint<M: TokenStore + NamespaceStore, B: BlobStore>(
         .await?;
 
     let requested_scope = scope_string(&query.scope);
+    let mut namespace_epochs = Vec::new();
     if let Some(scope) = &requested_scope {
         for requested in scope.split_whitespace() {
             if let Some((repository, action)) = crate::auth::permissions::parse_scope(requested) {
-                auth_service
+                let access = auth_service
                     .check_permission(&identity, &repository, action, &state.core.metadata)
                     .await?;
+                access.record_expected_namespace(&mut namespace_epochs);
             }
         }
     }
@@ -97,6 +99,7 @@ pub async fn token_endpoint<M: TokenStore + NamespaceStore, B: BlobStore>(
         &identity,
         query.service.as_deref().unwrap_or(""),
         requested_scope.as_deref().unwrap_or(""),
+        namespace_epochs,
     )?;
 
     let now = chrono::Utc::now();

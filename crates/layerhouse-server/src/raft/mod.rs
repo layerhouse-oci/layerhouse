@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::identity::Subject;
 use crate::store::metadata::{
-    BlobDeleteStatus, DeleteCounts, MirrorRule, NamespaceGrant, ObservedIdentity, Owner,
-    PersonalAccessToken, ProxyCache, ProxyCacheTagValidation, ReleaseReason, Repository, SyncJob,
-    SyncJobRun, WarmImage,
+    BlobDeleteStatus, DeleteCounts, MirrorRule, NamespaceEpoch, NamespaceGrant, ObservedIdentity,
+    Owner, PersonalAccessToken, ProxyCache, ProxyCacheTagValidation, ReleaseReason, Repository,
+    SyncJob, SyncJobRun, WarmImage,
 };
 
 openraft::declare_raft_types!(
@@ -39,7 +39,9 @@ pub type RaftInstance = openraft::Raft<TypeConfig>;
 pub enum ManifestRequest {
     PutManifest {
         name: String,
+        expected_namespace: Option<NamespaceEpoch>,
         reference: String,
+        require_reference_absent: bool,
         digest: String,
         content_type: String,
         body: Vec<u8>,
@@ -55,23 +57,28 @@ pub enum ManifestRequest {
     },
     DeleteManifest {
         name: String,
+        expected_namespace: Option<NamespaceEpoch>,
         digest: String,
     },
     DeleteTag {
         name: String,
+        expected_namespace: Option<NamespaceEpoch>,
         digest: String,
         tag: String,
     },
     DeleteRepository {
         name: String,
+        expected_namespace: Option<NamespaceEpoch>,
     },
     DeleteManifests {
         name: String,
+        expected_namespace: Option<NamespaceEpoch>,
         digests: Vec<String>,
     },
     MountBlob {
         source_repo: String,
         dest_repo: String,
+        expected_namespace: Option<NamespaceEpoch>,
         digest: String,
     },
     RecordBlobDelete {
@@ -149,8 +156,14 @@ pub enum TokenResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RepositoryRequest {
-    PutRepository(Repository),
-    DeleteRepository { name: String },
+    PutRepository {
+        repository: Repository,
+        expected_namespace: Option<NamespaceEpoch>,
+    },
+    DeleteRepository {
+        name: String,
+        expected_namespace: Option<NamespaceEpoch>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

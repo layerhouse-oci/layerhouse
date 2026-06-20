@@ -190,6 +190,7 @@ export type NamespaceOwnerKind = "user" | "org";
 
 export interface NamespaceResponse {
   handle: string;
+  generation: number;
   owner_kind: NamespaceOwnerKind;
   owner_label: string;
   created_at: number;

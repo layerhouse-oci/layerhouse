@@ -15,8 +15,8 @@ use crate::oci::digest::Digest;
 use crate::raft::membership;
 use crate::store::blob::BlobStore;
 use crate::store::metadata::{
-    DeleteCounts, ManifestStore, ManifestSummary, NamespaceStore, Repository, RepositoryStore,
-    Visibility,
+    DeleteCounts, ManifestStore, ManifestSummary, NamespaceEpoch, NamespaceStore, Repository,
+    RepositoryStore, Visibility,
 };
 
 use super::{AppState, percent_decode};
@@ -458,6 +458,7 @@ async fn create_repository<M: ManifestStore + RepositoryStore + NamespaceStore, 
     let name = req.name.trim().to_string();
     validate_repository_name(&name)?;
 
+    let mut expected_namespace = None;
     let created_by = if let Some(auth) = state.auth.as_ref() {
         let Some(Extension(identity)) = identity else {
             return Err(LayerhouseError::Unauthorized {
@@ -467,13 +468,15 @@ async fn create_repository<M: ManifestStore + RepositoryStore + NamespaceStore, 
                 scope: None,
             });
         };
-        auth.check_permission(
-            &identity,
-            &name,
-            crate::auth::permissions::OciAction::Create,
-            &state.core.metadata,
-        )
-        .await?;
+        expected_namespace = auth
+            .check_permission(
+                &identity,
+                &name,
+                crate::auth::permissions::OciAction::Create,
+                &state.core.metadata,
+            )
+            .await?
+            .expected_namespace;
         Some(identity.subject.clone())
     } else {
         None
@@ -493,7 +496,15 @@ async fn create_repository<M: ManifestStore + RepositoryStore + NamespaceStore, 
         visibility: req.visibility,
         created_at: crate::store::metadata::now_epoch(),
     };
-    state.core.metadata.put_repository(repo.clone()).await?;
+    if state.auth.is_some() {
+        state
+            .core
+            .metadata
+            .put_repository_with_expected_namespace(repo.clone(), expected_namespace)
+            .await?;
+    } else {
+        state.core.metadata.put_repository(repo.clone()).await?;
+    }
 
     Ok((StatusCode::CREATED, Json(repo)).into_response())
 }
@@ -503,9 +514,9 @@ async fn require_delete_permission(
     identity: Option<&Extension<crate::auth::token::AuthIdentity>>,
     name: &str,
     namespaces: &dyn NamespaceStore,
-) -> Result<(), LayerhouseError> {
+) -> Result<Option<NamespaceEpoch>, LayerhouseError> {
     let Some(auth) = auth.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(Extension(identity)) = identity else {
         return Err(LayerhouseError::Unauthorized {
@@ -515,14 +526,15 @@ async fn require_delete_permission(
             scope: None,
         });
     };
-    auth.check_permission(
-        identity,
-        name,
-        crate::auth::permissions::OciAction::Delete,
-        namespaces,
-    )
-    .await?;
-    Ok(())
+    Ok(auth
+        .check_permission(
+            identity,
+            name,
+            crate::auth::permissions::OciAction::Delete,
+            namespaces,
+        )
+        .await?
+        .expected_namespace)
 }
 
 /// Validate an OCI repository name against the Distribution Spec grammar:
@@ -791,10 +803,21 @@ async fn delete_tag<M: ManifestStore + RepositoryStore + NamespaceStore, B: Blob
     Path((name, digest, tag)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
-    require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata).await?;
+    let expected_namespace =
+        require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata)
+            .await?;
     let digest = Digest::from_str_checked(&digest)
         .ok_or_else(|| LayerhouseError::DigestInvalid(digest.clone()))?;
-    if !state.core.metadata.delete_tag(&name, &digest, &tag).await? {
+    let deleted = if state.auth.is_some() {
+        state
+            .core
+            .metadata
+            .delete_tag_with_expected_namespace(&name, &digest, &tag, expected_namespace)
+            .await?
+    } else {
+        state.core.metadata.delete_tag(&name, &digest, &tag).await?
+    };
+    if !deleted {
         return Err(LayerhouseError::NameUnknown(tag));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -806,14 +829,24 @@ async fn delete_manifest<M: ManifestStore + RepositoryStore + NamespaceStore, B:
     Path((name, digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
-    require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata).await?;
+    let expected_namespace =
+        require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata)
+            .await?;
     let digest = Digest::from_str_checked(&digest)
         .ok_or_else(|| LayerhouseError::DigestInvalid(digest.clone()))?;
-    let counts = state
-        .core
-        .metadata
-        .delete_manifests(&name, &[digest])
-        .await?;
+    let counts = if state.auth.is_some() {
+        state
+            .core
+            .metadata
+            .delete_manifests_with_expected_namespace(&name, &[digest], expected_namespace)
+            .await?
+    } else {
+        state
+            .core
+            .metadata
+            .delete_manifests(&name, &[digest])
+            .await?
+    };
     Ok(Json(counts))
 }
 
@@ -827,7 +860,9 @@ async fn batch_delete_manifests<
     Json(req): Json<BatchDeleteRequest>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
-    require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata).await?;
+    let expected_namespace =
+        require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata)
+            .await?;
     let digests: Result<Vec<_>, _> = req
         .digests
         .iter()
@@ -836,11 +871,20 @@ async fn batch_delete_manifests<
                 .ok_or_else(|| LayerhouseError::DigestInvalid(digest.clone()))
         })
         .collect();
-    let counts = state
-        .core
-        .metadata
-        .delete_manifests(&name, &digests?)
-        .await?;
+    let digests = digests?;
+    let counts = if state.auth.is_some() {
+        state
+            .core
+            .metadata
+            .delete_manifests_with_expected_namespace(&name, &digests, expected_namespace)
+            .await?
+    } else {
+        state
+            .core
+            .metadata
+            .delete_manifests(&name, &digests)
+            .await?
+    };
     Ok(Json(counts))
 }
 
@@ -850,11 +894,29 @@ async fn delete_repository<M: ManifestStore + RepositoryStore + NamespaceStore, 
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     let name = percent_decode(&name);
-    require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata).await?;
-    let counts: DeleteCounts = state.core.metadata.delete_repository(&name).await?;
+    let expected_namespace =
+        require_delete_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata)
+            .await?;
+    let counts: DeleteCounts = if state.auth.is_some() {
+        state
+            .core
+            .metadata
+            .delete_repository_with_expected_namespace(&name, expected_namespace.clone())
+            .await?
+    } else {
+        state.core.metadata.delete_repository(&name).await?
+    };
     // Also drop any first-class repository metadata so a deleted repo does not
     // linger as an empty shadow entry.
-    state.core.metadata.delete_repository_meta(&name).await?;
+    if state.auth.is_some() {
+        state
+            .core
+            .metadata
+            .delete_repository_meta_with_expected_namespace(&name, expected_namespace)
+            .await?;
+    } else {
+        state.core.metadata.delete_repository_meta(&name).await?;
+    }
     Ok(Json(counts))
 }
 
