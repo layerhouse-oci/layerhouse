@@ -22,10 +22,12 @@ use crate::config::{AuthConfig, CookieSecureMode, S3Config};
 use crate::error::LayerhouseError;
 use crate::store::metadata::handle::{handle_of, is_handle_reserved};
 use crate::store::metadata::{
-    NamespaceGrant, NamespaceGrantGrantee, NamespaceStore, Owner, TokenStore,
+    NamespaceEpoch, NamespaceGrant, NamespaceGrantGrantee, NamespaceStore, Owner, TokenStore,
 };
 
-use self::authorization::{Authorizer, AuthzDecision, AuthzRequest};
+use self::authorization::{
+    AuthorizedRepositoryAccess, Authorizer, AuthzDecision, AuthzRequest, RepositoryResource,
+};
 use self::discovery::OidcDiscovery;
 use self::identity::Subject;
 use self::jwks::{CachedJwksDocument, JwksCache, JwksMetrics, JwksS3Cache};
@@ -100,6 +102,69 @@ struct FreshAuthMaterial {
     jwks_endpoint: String,
     jwks: serde_json::Value,
     fetched_at_unix: u64,
+}
+
+struct RepositoryAuthorization {
+    decision: AuthzDecision,
+    access: AuthorizedRepositoryAccess,
+    resource: Option<RepositoryResource>,
+}
+
+fn repository_authorization(
+    repository: &str,
+    action: permissions::OciAction,
+    decision: AuthzDecision,
+    expected_namespace: Option<NamespaceEpoch>,
+    resource: Option<RepositoryResource>,
+) -> RepositoryAuthorization {
+    RepositoryAuthorization {
+        decision,
+        access: AuthorizedRepositoryAccess::new(repository, action, expected_namespace),
+        resource,
+    }
+}
+
+fn scope_matches_namespace_epoch(
+    identity: &AuthIdentity,
+    repo_pattern: &str,
+    expected: Option<&NamespaceEpoch>,
+) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    let Ok(handle) = handle_of(repo_pattern) else {
+        return repo_pattern == "*";
+    };
+    if is_handle_reserved(handle) || handle != expected.handle {
+        return true;
+    }
+    identity
+        .namespace_epochs
+        .iter()
+        .any(|epoch| epoch == expected)
+}
+
+fn max_scope_action_for_identity(
+    identity: &AuthIdentity,
+    repository: &str,
+    expected: Option<&NamespaceEpoch>,
+) -> Option<permissions::OciAction> {
+    use permissions::OciAction::{Create, Delete, Pull, Update};
+
+    [Delete, Update, Create, Pull].into_iter().find(|action| {
+        permissions::matching_scope(&identity.scopes, repository, *action)
+            .map(|(repo_pattern, _)| {
+                scope_matches_namespace_epoch(identity, &repo_pattern, expected)
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn uses_explicit_scopes(identity: &AuthIdentity) -> bool {
+    matches!(
+        identity.token_type,
+        TokenType::PersonalAccess | TokenType::OciBearer
+    )
 }
 
 impl AuthService {
@@ -460,6 +525,7 @@ impl AuthService {
             groups: vec![],
             group_ids: vec![],
             scopes: pat.scopes,
+            namespace_epochs: pat.namespace_epochs,
             token_type: TokenType::PersonalAccess,
         })
     }
@@ -496,6 +562,7 @@ impl AuthService {
                 .scope
                 .map(|s| s.split(' ').map(ToString::to_string).collect())
                 .unwrap_or_default(),
+            namespace_epochs: claims.namespace_epochs,
             token_type: TokenType::OciBearer,
         })
     }
@@ -604,6 +671,7 @@ impl AuthService {
             email,
             groups: user_groups,
             group_ids,
+            namespace_epochs: Vec::new(),
             scopes: vec![],
             token_type: TokenType::OidcAccess,
         })
@@ -615,14 +683,35 @@ impl AuthService {
         repository: &str,
         action: permissions::OciAction,
         namespaces: &dyn NamespaceStore,
-    ) -> Result<(), LayerhouseError> {
+    ) -> Result<AuthorizedRepositoryAccess, LayerhouseError> {
+        let authorization = self
+            .authorize_repository(identity, repository, action, namespaces)
+            .await?;
         let request = AuthzRequest {
             actor: identity.actor(),
             repository: repository.to_string(),
+            resource: authorization.resource.clone(),
             action,
         };
-        match self.authorize(&request, namespaces).await? {
-            AuthzDecision::Allow => Ok(()),
+        let resource_id = request.resource.as_ref().map(RepositoryResource::entity_id);
+        tracing::trace!(
+            repository = %request.repository,
+            resource_id = resource_id.as_deref().unwrap_or("unresolved"),
+            action = ?request.action,
+            actor_subject = %request.actor.principal.local_id(),
+            actor_principal = %request.actor.principal,
+            actor_username = request.actor.username.as_deref().unwrap_or(""),
+            actor_display_name = request.actor.display_name.as_deref().unwrap_or(""),
+            actor_email = request.actor.email.as_deref().unwrap_or(""),
+            actor_group_count = request.actor.group_ids.len(),
+            actor_display_group_count = request.actor.display_groups.len(),
+            actor_scope_count = request.actor.scopes.len(),
+            actor_namespace_epoch_count = request.actor.namespace_epochs.len(),
+            actor_token_type = ?request.actor.token_type,
+            "compatibility authorizer evaluating request"
+        );
+        match authorization.decision {
+            AuthzDecision::Allow => Ok(authorization.access),
             AuthzDecision::Deny => Err(LayerhouseError::Denied(format!(
                 "access denied for repository {}",
                 repository
@@ -636,13 +725,19 @@ impl AuthService {
         repository: &str,
         action: permissions::OciAction,
         namespaces: &dyn NamespaceStore,
-    ) -> Result<AuthzDecision, LayerhouseError> {
+    ) -> Result<RepositoryAuthorization, LayerhouseError> {
         // Personal-namespace auto-grant: any authenticated user has the full
         // action ladder under `users/<their-username>/`. Keyed on
         // `identity.username`, which is now populated for PATs as well as OIDC
         // sessions (see `validate_pat`).
         if permissions::in_personal_namespace(identity.username.as_deref(), repository) {
-            return Ok(AuthzDecision::Allow);
+            return Ok(repository_authorization(
+                repository,
+                action,
+                AuthzDecision::Allow,
+                None,
+                None,
+            ));
         }
 
         // Personal-namespace boundary guard: repos under `users/<someone>/`
@@ -654,8 +749,17 @@ impl AuthService {
         if let Some(ns_user) = permissions::in_personal_namespace_of(repository)
             && identity.username.as_deref().is_none_or(|u| u != ns_user)
         {
-            return Ok(AuthzDecision::Deny);
+            return Ok(repository_authorization(
+                repository,
+                action,
+                AuthzDecision::Deny,
+                None,
+                None,
+            ));
         }
+
+        let mut expected_namespace = None;
+        let mut resource = None;
 
         // Writes to `<handle>/...` are gated on a live namespace claim, mirroring
         // the Raft apply-time gate (`require_live_namespace`). Reads and targets
@@ -673,44 +777,76 @@ impl AuthService {
                     )));
                 }
                 None => {}
-                Some(ns) if owner_grants(&ns.owner, identity) => return Ok(AuthzDecision::Allow),
-                Some(_) => {
+                Some(ns) => {
+                    expected_namespace =
+                        Some(crate::store::metadata::NamespaceEpoch::from_namespace(&ns));
+                    resource = Some(RepositoryResource::from_repository(repository, &ns)?);
+                    if owner_grants(&ns.owner, identity) && !uses_explicit_scopes(identity) {
+                        return Ok(repository_authorization(
+                            repository,
+                            action,
+                            AuthzDecision::Allow,
+                            expected_namespace,
+                            resource,
+                        ));
+                    }
                     let grants = namespaces.list_namespace_grants(handle).await?;
                     if grants
                         .iter()
                         .any(|grant| namespace_grant_matches(grant, identity, action))
                     {
-                        return Ok(AuthzDecision::Allow);
+                        return Ok(repository_authorization(
+                            repository,
+                            action,
+                            AuthzDecision::Allow,
+                            expected_namespace,
+                            resource,
+                        ));
                     }
                 }
             }
         }
 
         // PATs and minted OCI bearer tokens carry explicit repository scopes.
-        if matches!(
-            identity.token_type,
-            TokenType::PersonalAccess | TokenType::OciBearer
-        ) {
-            return match self
-                .permission_resolver
-                .check_scopes(&identity.scopes, repository, action)
-            {
-                Ok(()) => Ok(AuthzDecision::Allow),
-                Err(LayerhouseError::Denied(_)) => Ok(AuthzDecision::Deny),
-                Err(error) => Err(error),
+        if uses_explicit_scopes(identity) {
+            let decision = match permissions::matching_scope(&identity.scopes, repository, action) {
+                Some((repo_pattern, _))
+                    if scope_matches_namespace_epoch(
+                        identity,
+                        &repo_pattern,
+                        expected_namespace.as_ref(),
+                    ) =>
+                {
+                    AuthzDecision::Allow
+                }
+                Some(_) | None => AuthzDecision::Deny,
             };
+            return Ok(repository_authorization(
+                repository,
+                action,
+                decision,
+                expected_namespace,
+                resource,
+            ));
         }
 
         // OIDC tokens: map groups to permissions via config
         let group_keys = authorization_group_keys(identity);
-        match self
+        let decision = match self
             .permission_resolver
             .check(&group_keys, repository, action)
         {
             Ok(()) => Ok(AuthzDecision::Allow),
             Err(LayerhouseError::Denied(_)) => Ok(AuthzDecision::Deny),
             Err(error) => Err(error),
-        }
+        }?;
+        Ok(repository_authorization(
+            repository,
+            action,
+            decision,
+            expected_namespace,
+            resource,
+        ))
     }
 
     pub async fn check_admin_access(
@@ -719,7 +855,8 @@ impl AuthService {
         namespaces: &dyn NamespaceStore,
     ) -> Result<(), LayerhouseError> {
         self.check_permission(identity, "*", permissions::OciAction::Delete, namespaces)
-            .await
+            .await?;
+        Ok(())
     }
 
     /// Compute the maximum action the actor can perform on `repository`,
@@ -738,12 +875,15 @@ impl AuthService {
             return Ok((Delete, permissions::GrantSource::Personal));
         }
 
+        let mut expected_namespace = None;
+
         // Namespace owner via claim — full ladder.
         if let Ok(handle) = handle_of(repository)
             && !is_handle_reserved(handle)
             && let Some(ns) = namespaces.get_namespace(handle).await?
         {
-            if owner_grants(&ns.owner, identity) {
+            expected_namespace = Some(NamespaceEpoch::from_namespace(&ns));
+            if owner_grants(&ns.owner, identity) && !uses_explicit_scopes(identity) {
                 return Ok((Delete, permissions::GrantSource::Personal));
             }
             let grants = namespaces.list_namespace_grants(handle).await?;
@@ -753,7 +893,8 @@ impl AuthService {
         }
 
         // Check scopes (PAT or OCI bearer).
-        let scope_max = permissions::max_action_from_scopes(&identity.scopes, repository);
+        let scope_max =
+            max_scope_action_for_identity(identity, repository, expected_namespace.as_ref());
 
         // Check OIDC group grants.
         let group_keys = authorization_group_keys(identity);
@@ -821,6 +962,7 @@ impl AuthService {
         identity: &AuthIdentity,
         _service: &str,
         scopes: &str,
+        namespace_epochs: Vec<NamespaceEpoch>,
     ) -> Result<String, LayerhouseError> {
         let now = chrono::Utc::now();
         let exp = (now + chrono::Duration::hours(1)).timestamp() as usize;
@@ -834,6 +976,7 @@ impl AuthService {
             preferred_username: identity.username.clone(),
             email: identity.email.clone(),
             scope: Some(scopes.to_string()),
+            namespace_epochs,
             token_type: Some("oci_bearer".to_string()),
             iat: Some(now.timestamp() as usize),
             iss: Some("layerhouse".to_string()),
@@ -910,6 +1053,13 @@ impl Authorizer for AuthService {
         request: &AuthzRequest,
         namespaces: &dyn NamespaceStore,
     ) -> Result<AuthzDecision, LayerhouseError> {
+        let resource_id = request.resource.as_ref().map(RepositoryResource::entity_id);
+        tracing::trace!(
+            repository = %request.repository,
+            resource_id = resource_id.as_deref().unwrap_or("unresolved"),
+            action = ?request.action,
+            "compatibility authorizer evaluating request"
+        );
         let identity = AuthIdentity {
             subject: Subject::new(request.actor.principal.local_id()),
             principal: request.actor.principal.clone(),
@@ -919,10 +1069,13 @@ impl Authorizer for AuthService {
             groups: request.actor.display_groups.clone(),
             group_ids: request.actor.group_ids.clone(),
             scopes: request.actor.scopes.clone(),
+            namespace_epochs: request.actor.namespace_epochs.clone(),
             token_type: request.actor.token_type.clone(),
         };
-        self.authorize_repository(&identity, &request.repository, request.action, namespaces)
-            .await
+        Ok(self
+            .authorize_repository(&identity, &request.repository, request.action, namespaces)
+            .await?
+            .decision)
     }
 }
 
@@ -1004,8 +1157,8 @@ mod tests {
     use crate::config::{AuthConfig, PermissionMapping};
     use crate::store::metadata::typed_id::OrgId;
     use crate::store::metadata::{
-        InMemoryMetadataStore, NamespaceGrant, NamespaceGrantGrantee, NamespaceStore, Owner,
-        ReleaseReason,
+        InMemoryMetadataStore, NamespaceEpoch, NamespaceGrant, NamespaceGrantGrantee,
+        NamespaceStore, Owner, ReleaseReason,
     };
 
     pub(super) fn auth_config() -> AuthConfig {
@@ -1172,6 +1325,96 @@ mod tests {
         auth.check_permission(&bob, "acme/app", OciAction::Create, &store)
             .await
             .expect_err("non-owner without RBAC grant is denied");
+    }
+
+    #[tokio::test]
+    async fn check_permission_returns_authorized_namespace_epoch() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-alice"))).await;
+
+        let alice = identity("subject-alice", TokenType::OidcAccess, &[], &[]);
+        let first_access = auth
+            .check_permission(&alice, "acme/app", OciAction::Create, &store)
+            .await
+            .expect("owner gets first-generation access");
+        assert_eq!(
+            first_access.expected_namespace,
+            Some(NamespaceEpoch::new("acme", 1))
+        );
+
+        store
+            .release_namespace(
+                "acme",
+                Subject::new("subject-alice"),
+                ReleaseReason::OwnerDeleted,
+                101,
+            )
+            .await
+            .expect("owner can release empty namespace");
+        claim(&store, "acme", Owner::User(Subject::new("subject-bob"))).await;
+
+        let bob = identity("subject-bob", TokenType::OidcAccess, &[], &[]);
+        let second_access = auth
+            .check_permission(&bob, "acme/app", OciAction::Create, &store)
+            .await
+            .expect("new owner gets second-generation access");
+        assert_eq!(
+            second_access.expected_namespace,
+            Some(NamespaceEpoch::new("acme", 2))
+        );
+        assert_ne!(
+            first_access.expected_namespace,
+            second_access.expected_namespace
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_token_epoch_must_match_reclaimed_namespace() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
+
+        let mut old_pat = identity(
+            "subject-owner",
+            TokenType::PersonalAccess,
+            &[],
+            &["repository:acme/app:*"],
+        );
+        old_pat.namespace_epochs = vec![NamespaceEpoch::new("acme", 1)];
+
+        auth.check_permission(&old_pat, "acme/app", OciAction::Create, &store)
+            .await
+            .expect("epoch-bound PAT works before reclaim");
+
+        store
+            .release_namespace(
+                "acme",
+                Subject::new("subject-owner"),
+                ReleaseReason::OwnerDeleted,
+                101,
+            )
+            .await
+            .expect("owner can release empty namespace");
+        claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
+
+        auth.check_permission(&old_pat, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("stale PAT epoch cannot authorize reclaimed namespace");
+        auth.max_grantable_action(&old_pat, "acme/app", &store)
+            .await
+            .expect_err("stale PAT epoch cannot appear grantable after reclaim");
+
+        let mut new_pat = identity(
+            "subject-owner",
+            TokenType::PersonalAccess,
+            &[],
+            &["repository:acme/app:*"],
+        );
+        new_pat.namespace_epochs = vec![NamespaceEpoch::new("acme", 2)];
+        auth.check_permission(&new_pat, "acme/app", OciAction::Create, &store)
+            .await
+            .expect("current PAT epoch can authorize reclaimed namespace");
     }
 
     #[tokio::test]

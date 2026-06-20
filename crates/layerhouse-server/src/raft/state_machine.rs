@@ -20,7 +20,7 @@ use crate::oci::manifest::extract_referenced_digests;
 use crate::store::metadata::handle::{handle_of, is_handle_reserved, validate_handle};
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion,
-    ManifestEntry, ManifestSummary, MirrorRule, Namespace, NamespaceGrant,
+    ManifestEntry, ManifestSummary, MirrorRule, Namespace, NamespaceEpoch, NamespaceGrant,
     NamespaceGrantAuditEvent, NamespaceGrantAuditOperation, NamespaceGrantGrantee,
     ObservedIdentity, PermissionRule, PersonalAccessToken, ProxyCache, ReferrerEntry,
     ReleaseReason, ReleasedHandle, Repository, RepositorySummary, SyncJob, SyncJobKind, SyncJobRun,
@@ -34,8 +34,8 @@ use crate::store::metadata::{
 /// On-disk snapshot format version. The single source of truth for both the
 /// Raft `install_snapshot` path here and the S3 cold-start path in `main.rs`
 /// (which aliases this constant), so the two can never drift. Layerhouse is
-/// not yet deployed, so the format starts fresh at 1 with no legacy versions
-/// to accept — any other version is rejected outright.
+/// not yet deployed, so breaking layout changes can reuse the current version
+/// without legacy readers — any other version is rejected outright.
 pub(crate) const SNAPSHOT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -177,7 +177,9 @@ impl StateMachine {
         match req {
             ManifestRequest::PutManifest {
                 name,
+                expected_namespace,
                 reference,
+                require_reference_absent,
                 digest,
                 content_type,
                 body,
@@ -191,7 +193,15 @@ impl StateMachine {
                 config_summary,
                 referenced_blobs,
             } => {
-                require_live_namespace(data, &name)?;
+                require_expected_namespace(data, &name, expected_namespace.as_ref())?;
+                if require_reference_absent
+                    && !reference.contains(':')
+                    && data.get_manifest(&name, &reference).is_some()
+                {
+                    return Err(LayerhouseError::Conflict(format!(
+                        "manifest reference {reference:?} in repository {name:?} was created before commit"
+                    )));
+                }
                 let digest_parsed =
                     Digest::from_str_checked(&digest).unwrap_or_else(|| Digest::sha256(&body));
                 let subject_parsed = subject.and_then(|s| Digest::from_str_checked(&s));
@@ -248,7 +258,12 @@ impl StateMachine {
 
                 Ok(ManifestResponse::Ok)
             }
-            ManifestRequest::DeleteManifest { name, digest } => {
+            ManifestRequest::DeleteManifest {
+                name,
+                expected_namespace,
+                digest,
+            } => {
+                require_expected_namespace(data, &name, expected_namespace.as_ref())?;
                 let mut removed = None;
                 if let Some(repo) = data.manifests.get_mut(&name) {
                     removed = repo.remove(&digest);
@@ -275,7 +290,13 @@ impl StateMachine {
                 }
                 Ok(ManifestResponse::Ok)
             }
-            ManifestRequest::DeleteTag { name, digest, tag } => {
+            ManifestRequest::DeleteTag {
+                name,
+                expected_namespace,
+                digest,
+                tag,
+            } => {
+                require_expected_namespace(data, &name, expected_namespace.as_ref())?;
                 let removed = data
                     .tags
                     .get_mut(&name)
@@ -297,7 +318,11 @@ impl StateMachine {
                 }
                 Ok(ManifestResponse::Bool(removed))
             }
-            ManifestRequest::DeleteRepository { name } => {
+            ManifestRequest::DeleteRepository {
+                name,
+                expected_namespace,
+            } => {
+                require_expected_namespace(data, &name, expected_namespace.as_ref())?;
                 let removed = data.manifests.remove(&name);
                 if let Some(manifests) = removed.as_ref() {
                     for entry in manifests.values() {
@@ -315,7 +340,12 @@ impl StateMachine {
                     deleted_tags,
                 }))
             }
-            ManifestRequest::DeleteManifests { name, digests } => {
+            ManifestRequest::DeleteManifests {
+                name,
+                expected_namespace,
+                digests,
+            } => {
+                require_expected_namespace(data, &name, expected_namespace.as_ref())?;
                 let digest_set: std::collections::BTreeSet<String> = digests.into_iter().collect();
                 let mut deleted_manifests = 0;
                 let mut deleted_tags = 0;
@@ -358,9 +388,10 @@ impl StateMachine {
             ManifestRequest::MountBlob {
                 source_repo: _,
                 dest_repo,
+                expected_namespace,
                 digest: _,
             } => {
-                require_live_namespace(data, &dest_repo)?;
+                require_expected_namespace(data, &dest_repo, expected_namespace.as_ref())?;
                 Ok(ManifestResponse::Ok)
             }
             ManifestRequest::RecordBlobDelete {
@@ -538,12 +569,20 @@ impl StateMachine {
         req: RepositoryRequest,
     ) -> Result<RepositoryResponse, LayerhouseError> {
         match req {
-            RepositoryRequest::PutRepository(repo) => {
-                require_live_namespace(data, &repo.name)?;
-                data.repositories.insert(repo.name.clone(), repo);
+            RepositoryRequest::PutRepository {
+                repository,
+                expected_namespace,
+            } => {
+                require_expected_namespace(data, &repository.name, expected_namespace.as_ref())?;
+                data.repositories
+                    .insert(repository.name.clone(), repository);
                 Ok(RepositoryResponse::Ok)
             }
-            RepositoryRequest::DeleteRepository { name } => {
+            RepositoryRequest::DeleteRepository {
+                name,
+                expected_namespace,
+            } => {
+                require_expected_namespace(data, &name, expected_namespace.as_ref())?;
                 let removed = data.repositories.remove(&name).is_some();
                 Ok(RepositoryResponse::Bool(removed))
             }
@@ -632,13 +671,22 @@ pub(crate) fn apply_namespace_core(
                     "handle {handle:?} is already claimed by a {owner_kind}"
                 )));
             }
-            if let Some(tomb) = released_handles.get(&handle) {
+            let generation = if let Some(tomb) = released_handles.get(&handle) {
                 if !admin_override {
                     return Err(LayerhouseError::Denied(format!(
                         "handle {handle:?} was previously released ({}); reclaim requires admin override",
                         release_reason_label(&tomb.release_reason)
                     )));
                 }
+                tomb.prior_generation.checked_add(1).ok_or_else(|| {
+                    LayerhouseError::Conflict(format!(
+                        "handle {handle:?} cannot be reclaimed because its namespace generation is exhausted"
+                    ))
+                })?
+            } else {
+                1
+            };
+            if released_handles.contains_key(&handle) {
                 released_handles.remove(&handle);
             }
             let _ = actor;
@@ -646,6 +694,7 @@ pub(crate) fn apply_namespace_core(
                 handle.clone(),
                 Namespace {
                     handle,
+                    generation,
                     owner,
                     owner_label,
                     created_at: now,
@@ -688,6 +737,7 @@ pub(crate) fn apply_namespace_core(
                 ReleasedHandle {
                     handle: handle.clone(),
                     prior_owner: ns.owner,
+                    prior_generation: ns.generation,
                     prior_owner_label: ns.owner_label,
                     released_at: now,
                     released_by: actor,
@@ -697,6 +747,11 @@ pub(crate) fn apply_namespace_core(
             Ok(NamespaceResponse::Ok)
         }
         NamespaceRequest::AdminRevoke { handle, actor, now } => {
+            if has_content(&handle) {
+                return Err(LayerhouseError::Conflict(format!(
+                    "handle {handle:?} still owns repositories or manifests; delete them before revoking"
+                )));
+            }
             let Some(ns) = namespaces.remove(&handle) else {
                 return Err(LayerhouseError::NameUnknown(format!(
                     "handle {handle:?} is not currently claimed"
@@ -708,6 +763,7 @@ pub(crate) fn apply_namespace_core(
                 ReleasedHandle {
                     handle: handle.clone(),
                     prior_owner: ns.owner,
+                    prior_generation: ns.generation,
                     prior_owner_label: ns.owner_label,
                     released_at: now,
                     released_by: actor,
@@ -835,21 +891,39 @@ fn validate_namespace_grant(
     }
 }
 
-/// Apply-time precondition: every write that creates content under a handle
-/// must observe a live namespace claim for that handle. Rejecting here closes
-/// the race where a namespace is released between route-layer authorization
+/// Apply-time precondition: every namespace-owned mutation must carry the
+/// namespace epoch it was authorized against. Rejecting here closes the race
+/// where a handle is released and reclaimed between route-layer authorization
 /// and Raft commit.
-fn require_live_namespace(
+fn require_expected_namespace(
     data: &StateMachineData,
     repository: &str,
+    expected: Option<&NamespaceEpoch>,
 ) -> Result<(), LayerhouseError> {
     let handle = handle_of(repository)?;
     if is_handle_reserved(handle) {
         return Ok(());
     }
-    if !data.namespaces.contains_key(handle) {
+    let Some(expected) = expected else {
+        return Err(LayerhouseError::Denied(format!(
+            "namespace {handle:?} was not live when request was authorized"
+        )));
+    };
+    if expected.handle != handle {
+        return Err(LayerhouseError::NameInvalid(format!(
+            "expected namespace {:?} does not match repository {repository:?}",
+            expected.handle
+        )));
+    }
+    let Some(current) = data.namespaces.get(handle) else {
         return Err(LayerhouseError::NameUnknown(format!(
             "namespace {handle:?} does not exist (referenced by {repository:?})"
+        )));
+    };
+    if current.generation != expected.generation {
+        return Err(LayerhouseError::Conflict(format!(
+            "namespace {handle:?} changed generation from {} to {}",
+            expected.generation, current.generation
         )));
     }
     Ok(())
@@ -1398,11 +1472,20 @@ mod tests {
             handle.to_string(),
             Namespace {
                 handle: handle.to_string(),
+                generation: 1,
                 owner: Owner::User(Subject::new(format!("test-{handle}"))),
                 owner_label: handle.to_string(),
                 created_at: 1,
             },
         );
+    }
+
+    fn expected_namespace(handle: &str) -> Option<NamespaceEpoch> {
+        expected_namespace_generation(handle, 1)
+    }
+
+    fn expected_namespace_generation(handle: &str, generation: u64) -> Option<NamespaceEpoch> {
+        Some(NamespaceEpoch::new(handle, generation))
     }
 
     fn digest(id: u8) -> String {
@@ -1437,6 +1520,16 @@ mod tests {
         manifest_digest: &str,
         referenced_blobs: &[&str],
     ) -> Request {
+        put_manifest_for_generation(repo, reference, manifest_digest, referenced_blobs, 1)
+    }
+
+    fn put_manifest_for_generation(
+        repo: &str,
+        reference: &str,
+        manifest_digest: &str,
+        referenced_blobs: &[&str],
+        generation: u64,
+    ) -> Request {
         let default_config = digest(1);
         let config_digest = referenced_blobs
             .first()
@@ -1448,7 +1541,11 @@ mod tests {
             .unwrap_or(0);
         Request::Manifest(ManifestRequest::PutManifest {
             name: repo.to_string(),
+            expected_namespace: handle_of(repo)
+                .ok()
+                .map(|handle| NamespaceEpoch::new(handle, generation)),
             reference: reference.to_string(),
+            require_reference_absent: false,
             digest: manifest_digest.to_string(),
             content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
             manifest_size_bytes: body.len() as u64,
@@ -1526,6 +1623,7 @@ mod tests {
             &mut data,
             Request::Manifest(ManifestRequest::DeleteTag {
                 name: "alice/repo".to_string(),
+                expected_namespace: expected_namespace("alice"),
                 digest: manifest_b.clone(),
                 tag: "latest".to_string(),
             }),
@@ -1541,6 +1639,7 @@ mod tests {
             &mut data,
             Request::Manifest(ManifestRequest::DeleteManifest {
                 name: "alice/repo".to_string(),
+                expected_namespace: expected_namespace("alice"),
                 digest: manifest_a,
             }),
         );
@@ -1551,6 +1650,7 @@ mod tests {
             &mut data,
             Request::Manifest(ManifestRequest::DeleteManifests {
                 name: "alice/repo".to_string(),
+                expected_namespace: expected_namespace("alice"),
                 digests: vec![manifest_b],
             }),
         );
@@ -1577,6 +1677,7 @@ mod tests {
             &mut data,
             Request::Manifest(ManifestRequest::DeleteRepository {
                 name: "alice/repo".to_string(),
+                expected_namespace: expected_namespace("alice"),
             }),
         );
 
@@ -1642,6 +1743,7 @@ mod tests {
             token_hash: "hash".to_string(),
             token_prefix: "layerhouse-abc".to_string(),
             scopes: vec!["repository:*:pull".to_string()],
+            namespace_epochs: Vec::new(),
             created_at: 1,
             last_used_at: None,
             expires_at: None,
@@ -1775,6 +1877,7 @@ mod tests {
             &mut data,
             Request::Manifest(ManifestRequest::DeleteManifests {
                 name: "alice/repo".to_string(),
+                expected_namespace: expected_namespace("alice"),
                 digests: vec![manifest],
             }),
         );
@@ -1826,6 +1929,7 @@ mod tests {
             "alice".to_string(),
             Namespace {
                 handle: "alice".to_string(),
+                generation: 3,
                 owner: Owner::User(Subject::new("subject-alice")),
                 owner_label: "alice".to_string(),
                 created_at: 100,
@@ -1898,6 +2002,7 @@ mod tests {
             ReleasedHandle {
                 handle: "bob".to_string(),
                 prior_owner: Owner::User(Subject::new("subject-bob")),
+                prior_generation: 2,
                 prior_owner_label: "bob".to_string(),
                 released_at: 101,
                 released_by: Subject::new("subject-admin"),
@@ -1953,6 +2058,7 @@ mod tests {
             .get("alice")
             .expect("namespace preserved");
         assert_eq!(ns.owner_label, "alice");
+        assert_eq!(ns.generation, 3);
         assert_eq!(ns.created_at, 100);
 
         let grant = restored
@@ -1983,6 +2089,7 @@ mod tests {
             .get("bob")
             .expect("released handle preserved");
         assert_eq!(released.prior_owner_label, "bob");
+        assert_eq!(released.prior_generation, 2);
         assert!(matches!(
             released.release_reason,
             ReleaseReason::AdminRevoked
@@ -2023,7 +2130,9 @@ mod tests {
             &mut data,
             Request::Manifest(ManifestRequest::PutManifest {
                 name: "alice/shared-repo".to_string(),
+                expected_namespace: expected_namespace("alice"),
                 reference: "v1".to_string(),
+                require_reference_absent: false,
                 digest: manifest_digest.clone(),
                 content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
                 body: body.clone(),
@@ -2061,7 +2170,9 @@ mod tests {
                 &mut data,
                 Request::Manifest(ManifestRequest::PutManifest {
                     name: "alice/shared-repo".to_string(),
+                    expected_namespace: expected_namespace("alice"),
                     reference: (*tag).to_string(),
+                    require_reference_absent: false,
                     digest: manifest_digest.clone(),
                     content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
                     body: body.clone(),
@@ -2094,7 +2205,9 @@ mod tests {
                 &mut data,
                 Request::Manifest(ManifestRequest::PutManifest {
                     name: (*repo).to_string(),
+                    expected_namespace: expected_namespace("alice"),
                     reference: "latest".to_string(),
+                    require_reference_absent: false,
                     digest: manifest_digest.clone(),
                     content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
                     body: body.clone(),
@@ -2125,7 +2238,9 @@ mod tests {
             &mut data,
             Request::Manifest(ManifestRequest::PutManifest {
                 name: "alice/shared-repo".to_string(),
+                expected_namespace: expected_namespace("alice"),
                 reference: "v1".to_string(),
+                require_reference_absent: false,
                 digest: manifest_digest,
                 content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
                 manifest_size_bytes: body.len() as u64,
@@ -2164,6 +2279,7 @@ mod tests {
         assert!(matches!(resp, Response::Namespace(NamespaceResponse::Ok)));
         let ns = data.namespaces.get("alice").expect("namespace claimed");
         assert_eq!(ns.handle, "alice");
+        assert_eq!(ns.generation, 1);
         assert_eq!(ns.owner_label, "Alice");
         assert!(matches!(ns.owner, Owner::User(_)));
     }
@@ -2176,6 +2292,7 @@ mod tests {
             "alice".to_string(),
             Namespace {
                 handle: "alice".to_string(),
+                generation: 1,
                 owner: Owner::User(Subject::new("secret-subject-uuid-do-not-leak")),
                 owner_label: "Alice".to_string(),
                 created_at: 1,
@@ -2203,6 +2320,7 @@ mod tests {
             ReleasedHandle {
                 handle: "alice".to_string(),
                 prior_owner: Owner::User(Subject::new("idp-alice")),
+                prior_generation: 7,
                 prior_owner_label: "Alice".to_string(),
                 released_at: 1,
                 released_by: Subject::new("idp-alice"),
@@ -2221,7 +2339,161 @@ mod tests {
         let resp = StateMachine::apply_request(&mut data, claim_request("alice", "Alice2", true));
         assert!(matches!(resp, Response::Namespace(NamespaceResponse::Ok)));
         assert!(!data.released_handles.contains_key("alice"));
-        assert!(data.namespaces.contains_key("alice"));
+        let ns = data.namespaces.get("alice").expect("namespace reclaimed");
+        assert_eq!(ns.generation, 8);
+    }
+
+    #[test]
+    fn stale_epoch_write_is_rejected_after_reclaim() {
+        let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "acme");
+        let old_epoch = expected_namespace("acme");
+
+        let release = StateMachine::apply_request(
+            &mut data,
+            Request::Namespace(NamespaceRequest::Delete {
+                handle: "acme".to_string(),
+                actor: Subject::new("test-acme"),
+                reason: ReleaseReason::OwnerDeleted,
+                now: 10,
+            }),
+        );
+        assert!(matches!(
+            release,
+            Response::Namespace(NamespaceResponse::Ok)
+        ));
+
+        let reclaim = StateMachine::apply_request(
+            &mut data,
+            Request::Namespace(NamespaceRequest::Claim {
+                handle: "acme".to_string(),
+                owner: Owner::User(Subject::new("idp-new-owner")),
+                owner_label: "new-owner".to_string(),
+                actor: Subject::new("admin-1"),
+                admin_override: true,
+                now: 11,
+            }),
+        );
+        assert!(matches!(
+            reclaim,
+            Response::Namespace(NamespaceResponse::Ok)
+        ));
+        assert_eq!(data.namespaces.get("acme").unwrap().generation, 2);
+
+        let body = manifest_body(&digest(1), &[]);
+        let stale_write = StateMachine::apply_request(
+            &mut data,
+            Request::Manifest(ManifestRequest::PutManifest {
+                name: "acme/api".to_string(),
+                expected_namespace: old_epoch,
+                reference: "latest".to_string(),
+                require_reference_absent: false,
+                digest: Digest::sha256(&body).to_string(),
+                content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                manifest_size_bytes: body.len() as u64,
+                body,
+                subject: None,
+                artifact_type: None,
+                annotations: None,
+                stored_size_bytes: 0,
+                created_at: 12,
+                last_modified: 12,
+                config_summary: None,
+                referenced_blobs: vec![],
+            }),
+        );
+
+        assert!(
+            matches!(stale_write, Response::Conflict(_)),
+            "stale epoch write must fail: {stale_write:?}"
+        );
+        assert!(!data.manifests.contains_key("acme/api"));
+    }
+
+    #[test]
+    fn stale_epoch_delete_cannot_delete_reclaimed_namespace_content() {
+        let manifest = digest(90);
+        let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "acme");
+        let old_epoch = expected_namespace("acme");
+
+        assert!(matches!(
+            StateMachine::apply_request(
+                &mut data,
+                Request::Namespace(NamespaceRequest::Delete {
+                    handle: "acme".to_string(),
+                    actor: Subject::new("test-acme"),
+                    reason: ReleaseReason::OwnerDeleted,
+                    now: 10,
+                }),
+            ),
+            Response::Namespace(NamespaceResponse::Ok)
+        ));
+        assert!(matches!(
+            StateMachine::apply_request(
+                &mut data,
+                Request::Namespace(NamespaceRequest::Claim {
+                    handle: "acme".to_string(),
+                    owner: Owner::User(Subject::new("idp-new-owner")),
+                    owner_label: "new-owner".to_string(),
+                    actor: Subject::new("admin-1"),
+                    admin_override: true,
+                    now: 11,
+                }),
+            ),
+            Response::Namespace(NamespaceResponse::Ok)
+        ));
+
+        StateMachine::apply_request(
+            &mut data,
+            put_manifest_for_generation("acme/api", "latest", &manifest, &[], 2),
+        );
+        assert!(data.get_manifest("acme/api", &manifest).is_some());
+
+        let stale_delete = StateMachine::apply_request(
+            &mut data,
+            Request::Manifest(ManifestRequest::DeleteManifest {
+                name: "acme/api".to_string(),
+                expected_namespace: old_epoch,
+                digest: manifest.clone(),
+            }),
+        );
+
+        assert!(
+            matches!(stale_delete, Response::Conflict(_)),
+            "stale epoch delete must fail: {stale_delete:?}"
+        );
+        assert!(data.get_manifest("acme/api", &manifest).is_some());
+    }
+
+    #[test]
+    fn create_authorized_manifest_put_rejects_tag_that_appeared_before_commit() {
+        let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "acme");
+
+        let first = put_manifest("acme/api", "latest", &digest(70), &[]);
+        let first_resp = StateMachine::apply_request(&mut data, first);
+        assert!(matches!(
+            first_resp,
+            Response::Manifest(ManifestResponse::Ok)
+        ));
+
+        let mut create_authorized = put_manifest("acme/api", "latest", &digest(71), &[]);
+        if let Request::Manifest(ManifestRequest::PutManifest {
+            require_reference_absent,
+            ..
+        }) = &mut create_authorized
+        {
+            *require_reference_absent = true;
+        }
+
+        let stale_create = StateMachine::apply_request(&mut data, create_authorized);
+        assert!(
+            matches!(stale_create, Response::Conflict(_)),
+            "create-authorized put must not overwrite an existing tag: {stale_create:?}"
+        );
+        assert!(data.get_manifest("acme/api", &digest(70)).is_some());
+        assert!(data.get_manifest("acme/api", &digest(71)).is_none());
     }
 
     #[test]
@@ -2273,8 +2545,35 @@ mod tests {
             .get("alice")
             .expect("tombstone present");
         assert_eq!(tomb.prior_owner_label, "alice");
+        assert_eq!(tomb.prior_generation, 1);
         assert!(matches!(tomb.release_reason, ReleaseReason::OwnerDeleted));
         assert_eq!(tomb.released_at, 200);
+    }
+
+    #[test]
+    fn namespace_admin_revoke_blocks_when_content_exists() {
+        let mut data = StateMachineData::default();
+        seed_namespace(&mut data, "alice");
+        StateMachine::apply_request(
+            &mut data,
+            put_manifest("alice/repo", "latest", &digest(80), &[]),
+        );
+
+        let resp = StateMachine::apply_request(
+            &mut data,
+            Request::Namespace(NamespaceRequest::AdminRevoke {
+                handle: "alice".to_string(),
+                actor: Subject::new("admin-1"),
+                now: 300,
+            }),
+        );
+
+        assert!(
+            matches!(resp, Response::Conflict(_)),
+            "admin revoke must reject non-empty namespace until force-drain exists: {resp:?}"
+        );
+        assert!(data.namespaces.contains_key("alice"));
+        assert!(!data.released_handles.contains_key("alice"));
     }
 
     #[test]
@@ -2296,26 +2595,44 @@ mod tests {
             .get("alice")
             .expect("tombstone present");
         assert!(matches!(tomb.release_reason, ReleaseReason::AdminRevoked));
+        assert_eq!(tomb.prior_generation, 1);
         assert_eq!(tomb.released_at, 300);
     }
 
     #[test]
-    fn put_manifest_rejected_without_live_namespace() {
+    fn put_manifest_rejected_without_expected_namespace_epoch() {
         let mut data = StateMachineData::default();
-        let (_body, manifest_digest) = seed_manifest_entry_json();
+        let (body, manifest_digest) = seed_manifest_entry_json();
         let resp = StateMachine::apply_request(
             &mut data,
-            put_manifest("ghost/repo", "v1", &manifest_digest, &[]),
+            Request::Manifest(ManifestRequest::PutManifest {
+                name: "ghost/repo".to_string(),
+                expected_namespace: None,
+                reference: "v1".to_string(),
+                require_reference_absent: false,
+                digest: manifest_digest,
+                content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                body,
+                subject: None,
+                artifact_type: None,
+                annotations: None,
+                stored_size_bytes: 200,
+                manifest_size_bytes: 200,
+                created_at: 100,
+                last_modified: 200,
+                config_summary: None,
+                referenced_blobs: vec![],
+            }),
         );
-        let Response::NameUnknown(msg) = resp else {
-            panic!("expected Response::NameUnknown, got {resp:?}");
+        let Response::Denied(msg) = resp else {
+            panic!("expected Response::Denied, got {resp:?}");
         };
         assert!(msg.contains("ghost"), "{msg:?}");
         assert!(!data.manifests.contains_key("ghost/repo"));
     }
 
     #[test]
-    fn mount_blob_rejected_without_live_namespace() {
+    fn mount_blob_rejected_without_expected_namespace_epoch() {
         let mut data = StateMachineData::default();
         seed_namespace(&mut data, "alice");
         let blob = digest(42);
@@ -2325,17 +2642,18 @@ mod tests {
             Request::Manifest(ManifestRequest::MountBlob {
                 source_repo: "alice/source".to_string(),
                 dest_repo: "ghost/dest".to_string(),
+                expected_namespace: None,
                 digest: blob.clone(),
             }),
         );
         assert!(
-            matches!(resp, Response::NameUnknown(_)),
+            matches!(resp, Response::Denied(_)),
             "mount into ghost namespace must fail: {resp:?}"
         );
     }
 
     #[test]
-    fn put_repository_rejected_without_live_namespace() {
+    fn put_repository_rejected_without_expected_namespace_epoch() {
         let mut data = StateMachineData::default();
         let repo = Repository {
             name: "ghost/repo".to_string(),
@@ -2346,10 +2664,13 @@ mod tests {
         };
         let resp = StateMachine::apply_request(
             &mut data,
-            Request::Repository(RepositoryRequest::PutRepository(repo)),
+            Request::Repository(RepositoryRequest::PutRepository {
+                repository: repo,
+                expected_namespace: None,
+            }),
         );
         assert!(
-            matches!(resp, Response::NameUnknown(_)),
+            matches!(resp, Response::Denied(_)),
             "put_repository under ghost namespace must fail: {resp:?}"
         );
     }

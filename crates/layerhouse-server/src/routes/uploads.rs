@@ -5,6 +5,7 @@ use axum::extract::Request;
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 
+use crate::auth::authorization::AuthorizedRepositoryAccess;
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
 use crate::store::blob::BlobStore;
@@ -72,6 +73,10 @@ async fn start_upload<M: ManifestStore, B: BlobStore>(
     name: &str,
     req: Request<Body>,
 ) -> Result<Response, LayerhouseError> {
+    let expected_namespace = req
+        .extensions()
+        .get::<AuthorizedRepositoryAccess>()
+        .and_then(|access| access.expected_namespace.clone());
     let query = super::query_params(req.uri());
 
     if let Some(digest_str) = query.get("digest") {
@@ -116,11 +121,24 @@ async fn start_upload<M: ManifestStore, B: BlobStore>(
             .ok_or_else(|| LayerhouseError::DigestInvalid(mount_digest.clone()))?;
 
         if state.core.blobs.stat(&digest).await.is_ok() {
-            state
-                .core
-                .metadata
-                .mount_blob(from_repo, name, &digest)
-                .await?;
+            if state.auth.is_some() {
+                state
+                    .core
+                    .metadata
+                    .mount_blob_with_expected_namespace(
+                        from_repo,
+                        name,
+                        &digest,
+                        expected_namespace,
+                    )
+                    .await?;
+            } else {
+                state
+                    .core
+                    .metadata
+                    .mount_blob(from_repo, name, &digest)
+                    .await?;
+            }
             state
                 .core
                 .metadata

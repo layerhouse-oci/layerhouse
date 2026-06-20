@@ -11,6 +11,7 @@ use crate::routes::percent_decode;
 use crate::store::blob::BlobStore;
 use crate::store::metadata::{ManifestStore, MetadataStore, TokenStore};
 
+use super::authorization::AuthorizedRepositoryAccess;
 use super::permissions::OciAction;
 use super::session::DashboardSession;
 
@@ -103,15 +104,17 @@ pub async fn auth_middleware<M: MetadataStore, B: BlobStore>(
         Err(e) => return e.into_response(),
     };
 
+    let mut authorized_repository_access: Option<AuthorizedRepositoryAccess> = None;
     if path.starts_with("/v2/") {
         let repository = extract_repository_from_path(&path);
         let action = oci_action.unwrap_or(OciAction::Pull);
 
-        if let Err(e) = auth_service
+        match auth_service
             .check_permission(&identity, &repository, action, &state.core.metadata)
             .await
         {
-            return e.into_response();
+            Ok(access) => authorized_repository_access = Some(access),
+            Err(e) => return e.into_response(),
         }
     }
 
@@ -127,6 +130,9 @@ pub async fn auth_middleware<M: MetadataStore, B: BlobStore>(
     // Attach identity to request extensions for downstream handlers
     let mut req = req;
     req.extensions_mut().insert(identity);
+    if let Some(access) = authorized_repository_access {
+        req.extensions_mut().insert(access);
+    }
     next.run(req).await
 }
 
@@ -229,6 +235,7 @@ fn authenticate_session_cookies(
                 .map(super::principal::ProviderQualifiedId::parse)
                 .collect::<Result<Vec<_>, _>>()?,
             scopes: vec![],
+            namespace_epochs: Vec::new(),
             token_type: super::token::TokenType::Session,
         });
     }

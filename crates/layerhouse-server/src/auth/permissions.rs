@@ -125,27 +125,6 @@ impl PermissionResolver {
         )))
     }
 
-    /// Check permissions using explicit scopes (for PAT tokens).
-    pub fn check_scopes(
-        &self,
-        scopes: &[String],
-        repository: &str,
-        action: OciAction,
-    ) -> Result<(), LayerhouseError> {
-        for scope in scopes {
-            if let Some((repo_pattern, allowed_action)) = parse_scope(scope)
-                && match_repository(&repo_pattern, repository)
-                && action_matches(allowed_action, action)
-            {
-                return Ok(());
-            }
-        }
-        Err(LayerhouseError::Denied(format!(
-            "access denied for repository {}",
-            repository
-        )))
-    }
-
     /// Maximum action granted by group mappings for a repository.
     /// Returns `None` when no group grant covers the repository.
     pub fn max_action_from_groups(
@@ -196,6 +175,21 @@ pub(crate) fn parse_scope(scope: &str) -> Option<(String, OciAction)> {
         .filter_map(parse_action_token)
         .max_by_key(|action| action_rank(*action))?;
     Some((repo, action))
+}
+
+pub(crate) fn matching_scope(
+    scopes: &[String],
+    repository: &str,
+    action: OciAction,
+) -> Option<(String, OciAction)> {
+    scopes.iter().find_map(|scope| {
+        let (repo_pattern, allowed_action) = parse_scope(scope)?;
+        if match_repository(&repo_pattern, repository) && action_matches(allowed_action, action) {
+            Some((repo_pattern, allowed_action))
+        } else {
+            None
+        }
+    })
 }
 
 /// Map a single scope-string token to its action. `*` is an alias for the
