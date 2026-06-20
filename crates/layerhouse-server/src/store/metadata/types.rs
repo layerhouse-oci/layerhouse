@@ -252,6 +252,8 @@ pub struct PersonalAccessToken {
     pub token_hash: String,
     pub token_prefix: String,
     pub scopes: Vec<String>,
+    #[serde(default)]
+    pub namespace_epochs: Vec<NamespaceEpoch>,
     pub created_at: u64,
     #[serde(default)]
     pub last_used_at: Option<u64>,
@@ -285,12 +287,14 @@ pub enum Owner {
     Org(OrgId),
 }
 
-/// A claimed first-segment handle. The `(handle, owner)` pair is the unit of
-/// namespace ownership: pushes under `<handle>/...` are gated on the owner.
+/// A claimed first-segment handle. The `(handle, generation)` pair is the
+/// namespace ownership epoch: mutating requests authorized against one epoch
+/// must not be able to land after the handle is reclaimed into a later epoch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct Namespace {
     pub handle: String,
+    pub generation: u64,
     pub owner: Owner,
     /// Frozen username/org-name captured at claim time. Persisted because the
     /// IdP-side label (preferred_username, displayName) is mutable; freezing
@@ -299,6 +303,29 @@ pub struct Namespace {
     #[serde(default)]
     pub owner_label: String,
     pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceEpoch {
+    pub handle: String,
+    pub generation: u64,
+}
+
+impl NamespaceEpoch {
+    pub fn new(handle: impl Into<String>, generation: u64) -> Self {
+        Self {
+            handle: handle.into(),
+            generation,
+        }
+    }
+
+    pub fn from_namespace(namespace: &Namespace) -> Self {
+        Self::new(namespace.handle.clone(), namespace.generation)
+    }
+
+    pub fn entity_id(&self) -> String {
+        format!("{}#{}", self.handle, self.generation)
+    }
 }
 
 /// Principal that receives a namespace-scoped grant. User and group grants are
@@ -453,6 +480,7 @@ pub struct NamespaceGrantAuditEvent {
 pub struct ReleasedHandle {
     pub handle: String,
     pub prior_owner: Owner,
+    pub prior_generation: u64,
     /// Frozen username/org-name at the moment of release. Stored explicitly
     /// because the IdP-side label is mutable and may diverge after release.
     pub prior_owner_label: String,

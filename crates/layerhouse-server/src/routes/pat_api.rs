@@ -12,7 +12,10 @@ use crate::auth::permissions::{self, GrantSource, OciAction, RepoKind};
 use crate::error::LayerhouseError;
 use crate::routes::AppState;
 use crate::store::blob::BlobStore;
-use crate::store::metadata::{ManifestStore, NamespaceStore, PersonalAccessToken, TokenStore};
+use crate::store::metadata::handle::{handle_of, is_handle_reserved};
+use crate::store::metadata::{
+    ManifestStore, NamespaceEpoch, NamespaceStore, PersonalAccessToken, TokenStore,
+};
 
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 200;
@@ -155,6 +158,7 @@ where
     // 1. Convert structured scope selections to canonical scope strings
     //    and validate each against cross-user personal namespace + ceiling.
     let mut scope_strings: Vec<String> = Vec::with_capacity(req.scopes.len());
+    let mut namespace_epochs = Vec::new();
     for selection in &req.scopes {
         let repo = selection.repository.trim();
         if repo.is_empty() {
@@ -200,6 +204,7 @@ where
                     )));
                 }
             }
+            record_scope_namespace_epoch(repo, &state.core.metadata, &mut namespace_epochs).await?;
             // 3. Namespace-pattern ceiling: a namespace pattern scope
             //    (e.g. "repository:team-a/*") requires a matching grant.
             if repo.ends_with("/*") {
@@ -258,6 +263,7 @@ where
         token_hash,
         token_prefix,
         scopes: scope_strings.clone(),
+        namespace_epochs,
         created_at: now,
         last_used_at: None,
         expires_at,
@@ -419,6 +425,27 @@ fn required_identity(
             service: None,
             scope: None,
         })
+}
+
+async fn record_scope_namespace_epoch(
+    repo: &str,
+    namespaces: &dyn NamespaceStore,
+    epochs: &mut Vec<NamespaceEpoch>,
+) -> Result<(), LayerhouseError> {
+    let Ok(handle) = handle_of(repo) else {
+        return Ok(());
+    };
+    if is_handle_reserved(handle) {
+        return Ok(());
+    }
+    let Some(namespace) = namespaces.get_namespace(handle).await? else {
+        return Ok(());
+    };
+    let epoch = NamespaceEpoch::from_namespace(&namespace);
+    if !epochs.iter().any(|existing| existing == &epoch) {
+        epochs.push(epoch);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ use crate::auth::identity::Subject;
 use crate::auth::principal::{Actor, ProviderQualifiedId};
 #[cfg(test)]
 use crate::auth::principal::{PrincipalKind, stable_group_ids};
+use crate::store::metadata::NamespaceEpoch;
 
 #[derive(Debug, Clone)]
 pub struct AuthIdentity {
@@ -16,6 +17,7 @@ pub struct AuthIdentity {
     pub groups: Vec<String>,
     pub group_ids: Vec<ProviderQualifiedId>,
     pub scopes: Vec<String>,
+    pub namespace_epochs: Vec<NamespaceEpoch>,
     pub token_type: TokenType,
 }
 
@@ -29,6 +31,7 @@ impl AuthIdentity {
             group_ids: self.group_ids.clone(),
             display_groups: self.groups.clone(),
             scopes: self.scopes.clone(),
+            namespace_epochs: self.namespace_epochs.clone(),
             token_type: self.token_type.clone(),
         }
     }
@@ -56,6 +59,7 @@ impl AuthIdentity {
             groups,
             group_ids,
             scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            namespace_epochs: Vec::new(),
             token_type,
         }
     }
@@ -134,6 +138,8 @@ pub struct TokenClaims {
     pub email: Option<String>,
     #[serde(default)]
     pub scope: Option<String>,
+    #[serde(default)]
+    pub namespace_epochs: Vec<NamespaceEpoch>,
     #[serde(default, rename = "token_type")]
     pub token_type: Option<String>,
     #[serde(default)]
@@ -220,6 +226,7 @@ mod tests {
             preferred_username: preferred_username.map(ToString::to_string),
             email: email.map(ToString::to_string),
             scope: None,
+            namespace_epochs: Vec::new(),
             token_type: None,
             iat: None,
             iss: None,
@@ -355,6 +362,7 @@ mod tests {
             preferred_username: None,
             email: None,
             scope: Some("repository:*:pull".to_string()),
+            namespace_epochs: Vec::new(),
             token_type: Some("oci_bearer".to_string()),
             iat: Some(1),
             iss: Some("layerhouse".to_string()),

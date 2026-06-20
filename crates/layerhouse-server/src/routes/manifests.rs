@@ -5,6 +5,7 @@ use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
+use crate::auth::authorization::AuthorizedRepositoryAccess;
 use crate::auth::permissions::OciAction;
 use crate::auth::token::AuthIdentity;
 use crate::error::LayerhouseError;
@@ -65,7 +66,7 @@ pub async fn dispatch<M: RegistryStore + NamespaceStore, B: BlobStore>(
         Method::GET => respond_manifest(&state, name, reference, true).await,
         Method::HEAD => respond_manifest(&state, name, reference, false).await,
         Method::PUT => put_manifest(&state, name, reference, req).await,
-        Method::DELETE => delete_manifest(&state, name, reference).await,
+        Method::DELETE => delete_manifest(&state, name, reference, req).await,
         _ => Err(LayerhouseError::Unsupported("method not allowed".into())),
     }
 }
@@ -167,6 +168,17 @@ async fn put_manifest<M: RegistryStore + NamespaceStore, B: BlobStore>(
     req: Request<Body>,
 ) -> Result<Response, LayerhouseError> {
     let identity = req.extensions().get::<AuthIdentity>().cloned();
+    let authorized_access = req
+        .extensions()
+        .get::<AuthorizedRepositoryAccess>()
+        .cloned();
+    let mut expected_namespace = authorized_access
+        .as_ref()
+        .and_then(|access| access.expected_namespace.clone());
+    let mut require_reference_absent = state.auth.is_some()
+        && authorized_access
+            .as_ref()
+            .is_none_or(|access| access.action == OciAction::Create);
     let headers = req.headers().clone();
     let body = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
         .await
@@ -217,8 +229,14 @@ async fn put_manifest<M: RegistryStore + NamespaceStore, B: BlobStore>(
                 service: None,
                 scope: None,
             })?;
-            auth.check_permission(&identity, name, OciAction::Update, &state.core.metadata)
-                .await?;
+            let update_access = auth
+                .check_permission(&identity, name, OciAction::Update, &state.core.metadata)
+                .await?
+                .expected_namespace;
+            if expected_namespace.is_none() {
+                expected_namespace = update_access;
+            }
+            require_reference_absent = false;
         }
     }
 
@@ -232,11 +250,25 @@ async fn put_manifest<M: RegistryStore + NamespaceStore, B: BlobStore>(
         ManifestEntry::from_parsed_json(&parsed, content_type, body.to_vec(), referenced_blobs);
     let subject = entry.subject.clone();
 
-    state
-        .core
-        .metadata
-        .put_manifest(name, reference, entry)
-        .await?;
+    if state.auth.is_some() {
+        state
+            .core
+            .metadata
+            .put_manifest_with_expected_namespace(
+                name,
+                reference,
+                entry,
+                expected_namespace,
+                require_reference_absent,
+            )
+            .await?;
+    } else {
+        state
+            .core
+            .metadata
+            .put_manifest(name, reference, entry)
+            .await?;
+    }
 
     let mut resp = StatusCode::CREATED.into_response();
     let location = format!("/v2/{}/manifests/{}", name, digest);
@@ -264,11 +296,24 @@ async fn delete_manifest<M: RegistryStore, B: BlobStore>(
     state: &AppState<M, B>,
     name: &str,
     reference: &str,
+    req: Request<Body>,
 ) -> Result<Response, LayerhouseError> {
+    let expected_namespace = req
+        .extensions()
+        .get::<AuthorizedRepositoryAccess>()
+        .and_then(|access| access.expected_namespace.clone());
     let digest = Digest::from_str_checked(reference)
         .ok_or_else(|| LayerhouseError::Unsupported("tag deletion not supported".into()))?;
 
-    state.core.metadata.delete_manifest(name, &digest).await?;
+    if state.auth.is_some() {
+        state
+            .core
+            .metadata
+            .delete_manifest_with_expected_namespace(name, &digest, expected_namespace)
+            .await?;
+    } else {
+        state.core.metadata.delete_manifest(name, &digest).await?;
+    }
 
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -1070,6 +1115,10 @@ mod tests {
             &scope_refs,
         );
         identity.username = Some("alice".to_string());
+        if scopes.iter().any(|scope| scope.contains("team-a/")) {
+            identity.namespace_epochs =
+                vec![crate::store::metadata::NamespaceEpoch::new("team-a", 1)];
+        }
         identity
     }
 

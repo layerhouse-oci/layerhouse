@@ -81,6 +81,7 @@ pub(crate) struct ObservedUsersQuery {
 #[derive(Debug, Serialize)]
 pub(crate) struct NamespaceResponse {
     handle: String,
+    generation: u64,
     owner_kind: String,
     owner_label: String,
     created_at: u64,
@@ -156,6 +157,7 @@ pub(crate) struct ObservedIdentityListResponse {
 pub(crate) fn namespace_response(ns: &crate::store::metadata::Namespace) -> NamespaceResponse {
     NamespaceResponse {
         handle: ns.handle.clone(),
+        generation: ns.generation,
         owner_kind: match &ns.owner {
             Owner::User(_) => "user".to_string(),
             Owner::Org(_) => "org".to_string(),

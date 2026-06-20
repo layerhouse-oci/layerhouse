@@ -16,13 +16,14 @@ use crate::config::RaftTlsConfig;
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
 use crate::raft::network;
+use crate::store::metadata::handle::{handle_of, is_handle_reserved};
 use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion, HelmStore,
     JobStore, ManifestEntry, ManifestStore, ManifestSummary, MirrorConfigStore, MirrorRule,
-    Namespace, NamespaceGrant, NamespaceGrantAuditEvent, NamespaceStore, ObservedIdentity, Owner,
-    PersonalAccessToken, ProxyCache, ProxyCacheTagValidation, ReferrerEntry, ReleaseReason,
-    ReleasedHandle, Repository, RepositoryStore, RepositorySummary, SyncJob, SyncJobRun,
-    TokenStore, WarmImage,
+    Namespace, NamespaceEpoch, NamespaceGrant, NamespaceGrantAuditEvent, NamespaceStore,
+    ObservedIdentity, Owner, PersonalAccessToken, ProxyCache, ProxyCacheTagValidation,
+    ReferrerEntry, ReleaseReason, ReleasedHandle, Repository, RepositoryStore, RepositorySummary,
+    SyncJob, SyncJobRun, TokenStore, WarmImage,
 };
 
 const FOLLOWER_READ_LAG_THRESHOLD: u64 = 100;
@@ -191,6 +192,23 @@ impl RaftMetadataStore {
             ))),
         }
     }
+
+    async fn expected_namespace_for_repository(
+        &self,
+        repository: &str,
+    ) -> Result<Option<NamespaceEpoch>, LayerhouseError> {
+        let Ok(handle) = handle_of(repository) else {
+            return Ok(None);
+        };
+        if is_handle_reserved(handle) {
+            return Ok(None);
+        }
+        let state = self.state.read().await;
+        Ok(state
+            .namespaces
+            .get(handle)
+            .map(NamespaceEpoch::from_namespace))
+    }
 }
 
 #[async_trait]
@@ -211,9 +229,29 @@ impl ManifestStore for RaftMetadataStore {
         reference: &str,
         entry: ManifestEntry,
     ) -> Result<(), LayerhouseError> {
+        self.put_manifest_with_expected_namespace(
+            name,
+            reference,
+            entry,
+            self.expected_namespace_for_repository(name).await?,
+            false,
+        )
+        .await
+    }
+
+    async fn put_manifest_with_expected_namespace(
+        &self,
+        name: &str,
+        reference: &str,
+        entry: ManifestEntry,
+        expected_namespace: Option<NamespaceEpoch>,
+        require_reference_absent: bool,
+    ) -> Result<(), LayerhouseError> {
         self.write_manifest(ManifestRequest::PutManifest {
             name: name.to_string(),
+            expected_namespace,
             reference: reference.to_string(),
+            require_reference_absent,
             digest: entry.digest.to_string(),
             content_type: entry.content_type,
             body: entry.body,
@@ -236,8 +274,23 @@ impl ManifestStore for RaftMetadataStore {
     }
 
     async fn delete_manifest(&self, name: &str, digest: &Digest) -> Result<(), LayerhouseError> {
+        self.delete_manifest_with_expected_namespace(
+            name,
+            digest,
+            self.expected_namespace_for_repository(name).await?,
+        )
+        .await
+    }
+
+    async fn delete_manifest_with_expected_namespace(
+        &self,
+        name: &str,
+        digest: &Digest,
+        expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<(), LayerhouseError> {
         self.write_manifest(ManifestRequest::DeleteManifest {
             name: name.to_string(),
+            expected_namespace,
             digest: digest.to_string(),
         })
         .await?;
@@ -286,9 +339,26 @@ impl ManifestStore for RaftMetadataStore {
         digest: &Digest,
         tag: &str,
     ) -> Result<bool, LayerhouseError> {
+        self.delete_tag_with_expected_namespace(
+            name,
+            digest,
+            tag,
+            self.expected_namespace_for_repository(name).await?,
+        )
+        .await
+    }
+
+    async fn delete_tag_with_expected_namespace(
+        &self,
+        name: &str,
+        digest: &Digest,
+        tag: &str,
+        expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<bool, LayerhouseError> {
         let resp = self
             .write_manifest(ManifestRequest::DeleteTag {
                 name: name.to_string(),
+                expected_namespace,
                 digest: digest.to_string(),
                 tag: tag.to_string(),
             })
@@ -304,9 +374,22 @@ impl ManifestStore for RaftMetadataStore {
     }
 
     async fn delete_repository(&self, name: &str) -> Result<DeleteCounts, LayerhouseError> {
+        self.delete_repository_with_expected_namespace(
+            name,
+            self.expected_namespace_for_repository(name).await?,
+        )
+        .await
+    }
+
+    async fn delete_repository_with_expected_namespace(
+        &self,
+        name: &str,
+        expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<DeleteCounts, LayerhouseError> {
         let resp = self
             .write_manifest(ManifestRequest::DeleteRepository {
                 name: name.to_string(),
+                expected_namespace,
             })
             .await?;
         match resp {
@@ -324,9 +407,24 @@ impl ManifestStore for RaftMetadataStore {
         name: &str,
         digests: &[Digest],
     ) -> Result<DeleteCounts, LayerhouseError> {
+        self.delete_manifests_with_expected_namespace(
+            name,
+            digests,
+            self.expected_namespace_for_repository(name).await?,
+        )
+        .await
+    }
+
+    async fn delete_manifests_with_expected_namespace(
+        &self,
+        name: &str,
+        digests: &[Digest],
+        expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<DeleteCounts, LayerhouseError> {
         let resp = self
             .write_manifest(ManifestRequest::DeleteManifests {
                 name: name.to_string(),
+                expected_namespace,
                 digests: digests.iter().map(ToString::to_string).collect(),
             })
             .await?;
@@ -357,9 +455,26 @@ impl ManifestStore for RaftMetadataStore {
         dest_repo: &str,
         digest: &Digest,
     ) -> Result<(), LayerhouseError> {
+        self.mount_blob_with_expected_namespace(
+            source_repo,
+            dest_repo,
+            digest,
+            self.expected_namespace_for_repository(dest_repo).await?,
+        )
+        .await
+    }
+
+    async fn mount_blob_with_expected_namespace(
+        &self,
+        source_repo: &str,
+        dest_repo: &str,
+        digest: &Digest,
+        expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<(), LayerhouseError> {
         self.write_manifest(ManifestRequest::MountBlob {
             source_repo: source_repo.to_string(),
             dest_repo: dest_repo.to_string(),
+            expected_namespace,
             digest: digest.to_string(),
         })
         .await?;
@@ -675,15 +790,41 @@ impl RepositoryStore for RaftMetadataStore {
     }
 
     async fn put_repository(&self, repo: Repository) -> Result<(), LayerhouseError> {
-        self.write_repository(RepositoryRequest::PutRepository(repo))
-            .await?;
+        let expected_namespace = self.expected_namespace_for_repository(&repo.name).await?;
+        self.put_repository_with_expected_namespace(repo, expected_namespace)
+            .await
+    }
+
+    async fn put_repository_with_expected_namespace(
+        &self,
+        repo: Repository,
+        expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<(), LayerhouseError> {
+        self.write_repository(RepositoryRequest::PutRepository {
+            repository: repo,
+            expected_namespace,
+        })
+        .await?;
         Ok(())
     }
 
     async fn delete_repository_meta(&self, name: &str) -> Result<bool, LayerhouseError> {
+        self.delete_repository_meta_with_expected_namespace(
+            name,
+            self.expected_namespace_for_repository(name).await?,
+        )
+        .await
+    }
+
+    async fn delete_repository_meta_with_expected_namespace(
+        &self,
+        name: &str,
+        expected_namespace: Option<NamespaceEpoch>,
+    ) -> Result<bool, LayerhouseError> {
         let resp = self
             .write_repository(RepositoryRequest::DeleteRepository {
                 name: name.to_string(),
+                expected_namespace,
             })
             .await?;
         match resp {
