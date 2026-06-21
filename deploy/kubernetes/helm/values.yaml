@@ -57,6 +57,7 @@ raft:
 
 auth:
   enabled: false
+  providerName: oidc
   issuerUrl: ""
   issuerInternalUrl: ""
   issuerInternalUrls: []
@@ -77,7 +78,7 @@ auth:
   accessTokenAudience: ""
   permissions:
     - name: admin-full-access
-      groups: ["registry_admins"]
+      groups: ["oidc:group:00000000-0000-0000-0000-000000000001"]
       scopes: ["repository:*:*"]
 
 certManager:

@@ -75,13 +75,7 @@ fn max_namespace_grant_action(
 }
 
 fn authorization_group_keys(identity: &AuthIdentity) -> Vec<String> {
-    let mut keys = identity
-        .group_ids
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    keys.extend(identity.groups.iter().cloned());
-    keys
+    identity.group_ids.iter().map(ToString::to_string).collect()
 }
 
 pub struct AuthService {
@@ -1180,7 +1174,7 @@ mod tests {
             session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
             permissions: vec![PermissionMapping {
                 name: "admin".to_string(),
-                groups: vec!["registry_admins".to_string()],
+                groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440000".to_string()],
                 scopes: vec!["repository:*:*".to_string()],
             }],
             cookie_secure_mode: super::CookieSecureMode::Auto,
@@ -1479,7 +1473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grantable_action_preserves_exact_display_group_mappings() {
+    async fn grantable_action_ignores_display_group_mappings() {
         let auth = AuthService::for_test(vec![PermissionMapping {
             name: "admins".to_string(),
             groups: vec!["registry_admins".to_string()],
@@ -1493,12 +1487,9 @@ mod tests {
             &[],
         );
 
-        let (action, source) = auth
-            .max_grantable_action(&admin, "acme/app", &store)
+        auth.max_grantable_action(&admin, "acme/app", &store)
             .await
-            .expect("exact display group mappings remain grantable");
-        assert_eq!(action, OciAction::Create);
-        assert_eq!(source, permissions::GrantSource::GroupGrant);
+            .expect_err("display group labels must not authorize");
     }
 
     #[tokio::test]

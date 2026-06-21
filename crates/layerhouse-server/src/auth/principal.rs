@@ -160,6 +160,10 @@ impl ProviderQualifiedId {
         &self.0
     }
 
+    pub fn provider(&self) -> &str {
+        self.0.split(':').next().unwrap_or_default()
+    }
+
     pub fn kind(&self) -> PrincipalKind {
         let kind = self.0.split(':').nth(1).unwrap_or_default();
         PrincipalKind::from_str(kind).expect("ProviderQualifiedId is constructed canonically")
@@ -310,6 +314,7 @@ mod tests {
     fn provider_qualified_id_round_trips() {
         let id = ProviderQualifiedId::new("kanidm", PrincipalKind::User, "user-1").unwrap();
         assert_eq!(id.as_str(), "kanidm:user:user-1");
+        assert_eq!(id.provider(), "kanidm");
         assert_eq!(ProviderQualifiedId::parse(id.as_str()).unwrap(), id);
         assert_eq!(id.local_id(), "user-1".to_string());
         assert_eq!(id.kind(), PrincipalKind::User);

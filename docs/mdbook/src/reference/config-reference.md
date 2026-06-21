@@ -56,6 +56,7 @@ and descriptions.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `provider_name` | string | `"oidc"` | Stable provider prefix used in user and group principal IDs |
 | `issuer_url` | string | — | Public OIDC issuer URL |
 | `issuer_internal_url` | string | same as issuer_url | Internal issuer URL for discovery/JWKS |
 | `issuer_internal_urls` | []string | `[]` | Ordered internal issuer URLs for discovery/JWKS failover |
@@ -79,5 +80,5 @@ and descriptions.
 | Key | Type | Description |
 |-----|------|-------------|
 | `name` | string | Rule name |
-| `groups` | []string | IdP groups |
-| `scopes` | []string | OCI scope patterns |
+| `groups` | []string | Provider-qualified stable group IDs, e.g. `kanidm:group:<uuid>` |
+| `scopes` | []string | OCI scope patterns using `pull`, `create`, `update`, and `delete` |

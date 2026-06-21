@@ -30,6 +30,7 @@ Create an OAuth2 client in your IdP with:
 
 ```toml
 [auth]
+provider_name = "oidc"
 issuer_url = "https://idp.example.com/realms/your-realm"
 issuer_internal_url = "https://keycloak.internal:8443/realms/your-realm"
 client_id = "layerhouse"
@@ -41,7 +42,7 @@ session_encryption_key = "<base64-encoded-32-byte-key>"
 
 [[auth.permissions]]
 name = "admin-access"
-groups = ["registry_admins"]
+groups = ["oidc:group:00000000-0000-0000-0000-000000000001"]
 scopes = ["repository:*:*"]
 ```
 
@@ -52,8 +53,8 @@ IdP uses a different claim path, configure it:
 
 | Provider | `group_claim` | Notes |
 |----------|---------------|-------|
-| Kanidm | `"groups"` (default) | Groups are SPN-formatted (`group@domain`); layerhouse matches by local name |
-| Keycloak (default) | `"groups"` | Built-in group mapper; see note below about full group paths |
+| Kanidm | `"groups"` (default) | UUID entries authorize; SPN/name entries are display hints only |
+| Keycloak (default) | `"groups"` | Use a mapper that emits stable group IDs, not display paths |
 | Keycloak (realm roles) | `"realm_access.roles"` | When using realm roles instead of groups |
 | Authentik | `"groups"` | Built-in group claim |
 | Authelia | `"groups"` | Groups configured in Authelia YAML |
@@ -99,13 +100,11 @@ access_token_audience = "https://api.example.com"
 3. Add a client scope that maps group membership to the `groups` claim
 4. Set `issuer_url` to `https://keycloak.example.com/realms/<realm>`
 
-If using realm roles instead of groups for RBAC, set `group_claim = "realm_access.roles"` and assign realm roles to users.
+If using realm roles instead of groups for RBAC, set `group_claim = "realm_access.roles"` and assign stable role IDs to users.
 
-> **Group path format**: By default, Keycloak emits group paths like `/registry_admins`.
-> layerhouse's permission matcher does exact string comparison against the configured
-> group names, so `groups = ["/registry_admins"]` (with the leading slash) is required.
-> To disable full group paths in Keycloak, set the `--spi-group-full-path-enabled=false`
-> option or use a custom claim mapper that strips the path prefix.
+> **Stable group IDs**: Layerhouse does not authorize with Keycloak display paths like `/registry_admins`.
+> Configure a mapper that emits stable IDs, and use provider-qualified config entries like
+> `groups = ["oidc:group:<stable-id>"]`.
 
 ### Azure AD
 

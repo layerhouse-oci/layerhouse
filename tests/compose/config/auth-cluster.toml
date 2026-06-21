@@ -24,6 +24,7 @@ data_dir = "/tmp/raft"
 discovery_dns = "layerhouse"
 
 [auth]
+provider_name = "kanidm"
 issuer_url = "https://localhost:8443/oauth2/openid/layerhouse"
 issuer_internal_url = "https://kanidm:8443/oauth2/openid/layerhouse"
 client_id = "layerhouse"
@@ -37,10 +38,10 @@ session_encryption_key = "PLACEHOLDER_ENCRYPTION_KEY"
 
 [[auth.permissions]]
 name = "admin-full-access"
-groups = ["registry_admins"]
+groups = ["kanidm:group:PLACEHOLDER_ADMIN_GROUP_ID"]
 scopes = ["repository:*:*"]
 
 [[auth.permissions]]
 name = "developer-access"
-groups = ["registry_developers"]
-scopes = ["repository:dev/*:push", "repository:dev/*:pull"]
+groups = ["kanidm:group:PLACEHOLDER_DEVELOPER_GROUP_ID"]
+scopes = ["repository:dev/*:pull,create,update", "repository:dev/*:pull"]

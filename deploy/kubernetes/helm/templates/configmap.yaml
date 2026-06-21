@@ -50,6 +50,7 @@ data:
     {{- if .Values.auth.enabled }}
 
     [auth]
+    provider_name = {{ .Values.auth.providerName | quote }}
     issuer_url = {{ .Values.auth.issuerUrl | quote }}
     issuer_internal_url = {{ .Values.auth.issuerInternalUrl | quote }}
     issuer_internal_urls = {{ toJson .Values.auth.issuerInternalUrls }}

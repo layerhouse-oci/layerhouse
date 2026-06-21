@@ -2,7 +2,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::auth::principal::ProviderId;
+use crate::auth::principal::{PrincipalKind, ProviderId, ProviderQualifiedId};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -544,8 +544,34 @@ fn validate_auth_config(auth: &AuthConfig) -> Result<(), ConfigError> {
             "auth.group_claim must not be empty".to_string(),
         ));
     }
-    ProviderId::new(&auth.provider_name)
+    let auth_provider = ProviderId::new(&auth.provider_name)
         .map_err(|err| ConfigError::Invalid(format!("auth.provider_name is invalid: {err}")))?;
+    for (mapping_index, mapping) in auth.permissions.iter().enumerate() {
+        for (group_index, group) in mapping.groups.iter().enumerate() {
+            let group_id = ProviderQualifiedId::parse(group).map_err(|err| {
+                ConfigError::Invalid(format!(
+                    "auth.permissions[{mapping_index}].groups[{group_index}] must be a provider-qualified stable group id: {err}"
+                ))
+            })?;
+            if group.as_str() != group_id.as_str() {
+                return Err(ConfigError::Invalid(format!(
+                    "auth.permissions[{mapping_index}].groups[{group_index}] must use canonical provider-qualified form {:?}",
+                    group_id.as_str()
+                )));
+            }
+            if group_id.kind() != PrincipalKind::Group {
+                return Err(ConfigError::Invalid(format!(
+                    "auth.permissions[{mapping_index}].groups[{group_index}] must use principal kind group"
+                )));
+            }
+            if group_id.provider() != auth_provider.as_str() {
+                return Err(ConfigError::Invalid(format!(
+                    "auth.permissions[{mapping_index}].groups[{group_index}] provider must match auth.provider_name {:?}",
+                    auth_provider.as_str()
+                )));
+            }
+        }
+    }
     if auth.login_scopes.trim().is_empty() {
         return Err(ConfigError::Invalid(
             "auth.login_scopes must not be empty".to_string(),
@@ -587,6 +613,31 @@ mod tests {
             },
             gc: GcConfig::default(),
             auth: None,
+        }
+    }
+
+    fn base_auth_config() -> AuthConfig {
+        AuthConfig {
+            provider_name: "kanidm".to_string(),
+            issuer_url: "https://idp.example.test".to_string(),
+            issuer_internal_url: None,
+            issuer_internal_urls: Vec::new(),
+            jwks_urls: Vec::new(),
+            client_id: "layerhouse".to_string(),
+            client_secret: "secret".to_string(),
+            token_endpoint_url: "https://idp.example.test/oauth2/token".to_string(),
+            redirect_uri: "https://registry.example.test/oauth2/callback".to_string(),
+            tls_insecure_skip_verify: false,
+            jwks_refresh_seconds: 300,
+            jwks_cache_s3_key: "auth/jwks/last-good.json".to_string(),
+            jwks_max_stale_seconds: 86_400,
+            token_signing_keys: vec![base64::engine::general_purpose::STANDARD.encode(b"signing")],
+            session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+            permissions: Vec::new(),
+            cookie_secure_mode: CookieSecureMode::Auto,
+            group_claim: "groups".to_string(),
+            login_scopes: "openid profile email groups".to_string(),
+            access_token_audience: None,
         }
     }
 
@@ -694,28 +745,9 @@ mod tests {
     #[test]
     fn auth_provider_name_uses_principal_provider_grammar() {
         let mut config = base_config();
-        config.auth = Some(AuthConfig {
-            provider_name: "kanidm-prod_1".to_string(),
-            issuer_url: "https://idp.example.test".to_string(),
-            issuer_internal_url: None,
-            issuer_internal_urls: Vec::new(),
-            jwks_urls: Vec::new(),
-            client_id: "layerhouse".to_string(),
-            client_secret: "secret".to_string(),
-            token_endpoint_url: "https://idp.example.test/oauth2/token".to_string(),
-            redirect_uri: "https://registry.example.test/oauth2/callback".to_string(),
-            tls_insecure_skip_verify: false,
-            jwks_refresh_seconds: 300,
-            jwks_cache_s3_key: "auth/jwks/last-good.json".to_string(),
-            jwks_max_stale_seconds: 86_400,
-            token_signing_keys: vec![base64::engine::general_purpose::STANDARD.encode(b"signing")],
-            session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
-            permissions: Vec::new(),
-            cookie_secure_mode: CookieSecureMode::Auto,
-            group_claim: "groups".to_string(),
-            login_scopes: "openid profile email groups".to_string(),
-            access_token_audience: None,
-        });
+        let mut auth = base_auth_config();
+        auth.provider_name = "kanidm-prod_1".to_string();
+        config.auth = Some(auth);
         assert!(config.validate().is_ok());
 
         config.auth.as_mut().unwrap().provider_name = "Kanidm".to_string();
@@ -725,6 +757,34 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.auth.as_mut().unwrap().provider_name = "kanidm.example".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn auth_permission_groups_must_be_provider_qualified_group_ids() {
+        let mut config = base_config();
+        let mut auth = base_auth_config();
+        auth.permissions = vec![PermissionMapping {
+            name: "admins".to_string(),
+            groups: vec!["kanidm:group:550e8400-e29b-41d4-a716-446655440000".to_string()],
+            scopes: vec!["repository:*:*".to_string()],
+        }];
+        config.auth = Some(auth);
+        assert!(config.validate().is_ok());
+
+        config.auth.as_mut().unwrap().permissions[0].groups = vec!["registry_admins".to_string()];
+        assert!(config.validate().is_err());
+
+        config.auth.as_mut().unwrap().permissions[0].groups =
+            vec!["kanidm:user:subject-admin".to_string()];
+        assert!(config.validate().is_err());
+
+        config.auth.as_mut().unwrap().permissions[0].groups =
+            vec!["other:group:550e8400-e29b-41d4-a716-446655440000".to_string()];
+        assert!(config.validate().is_err());
+
+        config.auth.as_mut().unwrap().permissions[0].groups =
+            vec![" kanidm:group:550e8400-e29b-41d4-a716-446655440000".to_string()];
         assert!(config.validate().is_err());
     }
 
