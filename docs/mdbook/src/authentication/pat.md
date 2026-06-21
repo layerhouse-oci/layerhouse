@@ -12,14 +12,14 @@ PATs are created through the dashboard or API:
 curl -X POST http://localhost:5050/api/v1/tokens \
   -H "Content-Type: application/json" \
   -H "Cookie: layerhouse_session=<session>" \
-  -d '{"name": "my-laptop", "scopes": ["repository:dev/*:push", "repository:dev/*:pull"]}'
+  -d '{"name": "my-laptop", "scopes": ["repository:dev/*:pull,create,update"]}'
 
 # Response (token shown only once)
 {
   "id": "a1b2c3d4-...",
   "name": "my-laptop",
   "token": "layerhouse-abcdef1234567890abcdef1234567890",
-  "scopes": ["repository:dev/*:push", "repository:dev/*:pull"],
+  "scopes": ["repository:dev/*:pull,create,update"],
   "created_at": 1716854400,
   "expires_at": null
 }
@@ -57,7 +57,7 @@ PATs carry explicit OCI scope strings that define what the token can do:
 
 | Scope | Allows |
 |-------|--------|
-| `repository:foo/*:push` | Push to `foo` and all sub-repositories |
+| `repository:foo/*:pull,create,update` | Pull, create, or update manifests under `foo` and all sub-repositories |
 | `repository:foo:pull` | Pull from `foo` |
 | `repository:*:*` | All repositories, all actions (admin) |
 

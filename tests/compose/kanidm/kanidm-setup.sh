@@ -121,6 +121,26 @@ $CURL -f -H "$AUTH" \
   "$KANIDM_URL/v1/group" >/dev/null 2>&1 || echo "  (group may exist)"
 echo "  registry_developers group created"
 
+group_uuid() {
+  GROUP_NAME="$1"
+  GROUP_RESP=$($CURL -f -H "$AUTH" "$KANIDM_URL/v1/group/$GROUP_NAME" 2>/dev/null || true)
+  UUID=$(printf '%s' "$GROUP_RESP" | grep -oE '"uuid"[[:space:]]*:[[:space:]]*\[[^]]+\]' | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -1 || true)
+  if [ -z "$UUID" ]; then
+    UUID=$(printf '%s' "$GROUP_RESP" | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -1 || true)
+  fi
+  if [ -z "$UUID" ]; then
+    echo "ERROR: Could not extract UUID for Kanidm group $GROUP_NAME"
+    echo "$GROUP_RESP"
+    exit 1
+  fi
+  printf '%s' "$UUID"
+}
+
+ADMIN_GROUP_ID=$(group_uuid registry_admins)
+DEVELOPER_GROUP_ID=$(group_uuid registry_developers)
+echo "  registry_admins uuid: $ADMIN_GROUP_ID"
+echo "  registry_developers uuid: $DEVELOPER_GROUP_ID"
+
 echo "=== Adding users to groups ==="
 $CURL -f -H "$AUTH" \
   -H "Content-Type: application/json" \
@@ -197,11 +217,15 @@ sed_escape() {
 CLIENT_SECRET_ESCAPED=$(sed_escape "$CLIENT_SECRET")
 SIGNING_KEY_ESCAPED=$(sed_escape "$SIGNING_KEY_B64")
 ENCRYPTION_KEY_ESCAPED=$(sed_escape "$ENCRYPTION_KEY_B64")
+ADMIN_GROUP_ID_ESCAPED=$(sed_escape "$ADMIN_GROUP_ID")
+DEVELOPER_GROUP_ID_ESCAPED=$(sed_escape "$DEVELOPER_GROUP_ID")
 
 sed \
   -e "s/PLACEHOLDER_CLIENT_SECRET/$CLIENT_SECRET_ESCAPED/" \
   -e "s/PLACEHOLDER_SIGNING_KEY/$SIGNING_KEY_ESCAPED/" \
   -e "s/PLACEHOLDER_ENCRYPTION_KEY/$ENCRYPTION_KEY_ESCAPED/" \
+  -e "s/PLACEHOLDER_ADMIN_GROUP_ID/$ADMIN_GROUP_ID_ESCAPED/" \
+  -e "s/PLACEHOLDER_DEVELOPER_GROUP_ID/$DEVELOPER_GROUP_ID_ESCAPED/" \
   /templates/auth-cluster.toml > /shared/auth-cluster.toml
 
 echo "=== Kanidm setup complete ==="

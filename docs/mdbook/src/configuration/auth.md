@@ -5,6 +5,7 @@ all endpoints are open.
 
 ```toml
 [auth]
+provider_name = "kanidm"
 issuer_url = "https://registry.example.com/oauth2/openid/layerhouse"
 issuer_internal_url = "https://kanidm:8443/oauth2/openid/layerhouse"
 issuer_internal_urls = ["https://kanidm-a:8443/oauth2/openid/layerhouse", "https://kanidm-b:8443/oauth2/openid/layerhouse"]
@@ -22,12 +23,13 @@ session_encryption_key = "<base64-encoded-key>"
 
 [[auth.permissions]]
 name = "admin-access"
-groups = ["registry_admins"]
+groups = ["kanidm:group:00000000-0000-0000-0000-000000000001"]
 scopes = ["repository:*:*"]
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `provider_name` | string | `"oidc"` | Stable provider prefix used in user and group principal IDs |
 | `issuer_url` | string | (required) | Public OIDC issuer URL advertised to browsers and tokens |
 | `issuer_internal_url` | string | same as `issuer_url` | Internal issuer URL for discovery, token exchange, and JWKS (e.g., Docker network) |
 | `issuer_internal_urls` | []string | `[]` | Ordered internal issuer URLs for discovery/JWKS failover; when set, this list takes precedence over `issuer_internal_url` |
@@ -48,15 +50,15 @@ scopes = ["repository:*:*"]
 
 ## Permission Mappings
 
-Each `[[auth.permissions]]` entry maps IdP groups to OCI scopes:
+Each `[[auth.permissions]]` entry maps stable provider-qualified group IDs to OCI scopes. Display names, SPNs, emails, and local group labels are not authorization keys.
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `name` | string | Human-readable name for this rule |
-| `groups` | []string | IdP groups that grant this permission |
-| `scopes` | []string | OCI scope patterns (e.g., `repository:foo/*:push`) |
+| `groups` | []string | Provider-qualified stable group IDs, e.g. `kanidm:group:<uuid>` |
+| `scopes` | []string | OCI scope patterns (e.g., `repository:foo/*:pull,create,update`) |
 
 Scope patterns use wildcards:
 - `repository:*:*` — all repositories, all actions
-- `repository:foo/*:push` — push to any sub-repository of `foo`
+- `repository:foo/*:pull,create,update` — pull, create, or update any sub-repository of `foo`
 - `repository:bar:pull` — pull only from `bar`

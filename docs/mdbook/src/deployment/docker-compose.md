@@ -88,6 +88,7 @@ data_dir = "/tmp/raft"
 discovery_dns = "layerhouse"
 
 [auth]
+provider_name = "kanidm"
 issuer_url = "https://kani.example.com/oauth2/openid/layerhouse"
 client_id = "layerhouse"
 client_secret = "<kanidm-oauth2-client-secret>"
@@ -98,13 +99,13 @@ session_encryption_key = "<base64-32-byte-key>"
 
 [[auth.permissions]]
 name = "admin-full-access"
-groups = ["layerhouse_admins"]
+groups = ["kanidm:group:00000000-0000-0000-0000-000000000001"]
 scopes = ["repository:*:*"]
 
 [[auth.permissions]]
 name = "developer-access"
-groups = ["layerhouse_developers"]
-scopes = ["repository:dev/*:push", "repository:dev/*:pull"]
+groups = ["kanidm:group:00000000-0000-0000-0000-000000000002"]
+scopes = ["repository:dev/*:pull,create,update", "repository:dev/*:pull"]
 ```
 
 Generate signing and encryption keys:

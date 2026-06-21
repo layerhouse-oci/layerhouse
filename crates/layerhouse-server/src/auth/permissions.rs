@@ -453,14 +453,14 @@ mod tests {
     }
 
     #[test]
-    fn exact_group_spn_does_not_match_other_domains() {
+    fn exact_group_id_does_not_match_other_ids() {
         assert!(group_matches(
-            "registry_admins@prod.example",
-            "registry_admins@prod.example"
+            "test:group:550e8400-e29b-41d4-a716-446655440010",
+            "test:group:550e8400-e29b-41d4-a716-446655440010"
         ));
         assert!(!group_matches(
-            "registry_admins@prod.example",
-            "registry_admins@localhost"
+            "test:group:550e8400-e29b-41d4-a716-446655440010",
+            "test:group:550e8400-e29b-41d4-a716-446655440011"
         ));
     }
 
