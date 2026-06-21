@@ -59,6 +59,7 @@ rand = "0.10"
 rcgen = "0.14"
 time = "0.3"
 httpmock = "0.7"
+cedar-policy = { version = "4.11.1", default-features = false }
 
 [profile.release]
 panic = "abort"
