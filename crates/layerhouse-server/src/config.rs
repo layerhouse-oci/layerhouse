@@ -2,6 +2,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::auth::principal::ProviderId;
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("HOSTNAME env var not set; must be <prefix>-<N>")]
@@ -542,16 +544,8 @@ fn validate_auth_config(auth: &AuthConfig) -> Result<(), ConfigError> {
             "auth.group_claim must not be empty".to_string(),
         ));
     }
-    if auth.provider_name.trim().is_empty() {
-        return Err(ConfigError::Invalid(
-            "auth.provider_name must not be empty".to_string(),
-        ));
-    }
-    if auth.provider_name.contains(':') {
-        return Err(ConfigError::Invalid(
-            "auth.provider_name must not contain ':'".to_string(),
-        ));
-    }
+    ProviderId::new(&auth.provider_name)
+        .map_err(|err| ConfigError::Invalid(format!("auth.provider_name is invalid: {err}")))?;
     if auth.login_scopes.trim().is_empty() {
         return Err(ConfigError::Invalid(
             "auth.login_scopes must not be empty".to_string(),
@@ -694,6 +688,43 @@ mod tests {
             vec![base64::engine::general_purpose::STANDARD.encode(b"signing")];
         config.auth.as_mut().unwrap().session_encryption_key =
             base64::engine::general_purpose::STANDARD.encode([1u8; 31]);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn auth_provider_name_uses_principal_provider_grammar() {
+        let mut config = base_config();
+        config.auth = Some(AuthConfig {
+            provider_name: "kanidm-prod_1".to_string(),
+            issuer_url: "https://idp.example.test".to_string(),
+            issuer_internal_url: None,
+            issuer_internal_urls: Vec::new(),
+            jwks_urls: Vec::new(),
+            client_id: "layerhouse".to_string(),
+            client_secret: "secret".to_string(),
+            token_endpoint_url: "https://idp.example.test/oauth2/token".to_string(),
+            redirect_uri: "https://registry.example.test/oauth2/callback".to_string(),
+            tls_insecure_skip_verify: false,
+            jwks_refresh_seconds: 300,
+            jwks_cache_s3_key: "auth/jwks/last-good.json".to_string(),
+            jwks_max_stale_seconds: 86_400,
+            token_signing_keys: vec![base64::engine::general_purpose::STANDARD.encode(b"signing")],
+            session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+            permissions: Vec::new(),
+            cookie_secure_mode: CookieSecureMode::Auto,
+            group_claim: "groups".to_string(),
+            login_scopes: "openid profile email groups".to_string(),
+            access_token_audience: None,
+        });
+        assert!(config.validate().is_ok());
+
+        config.auth.as_mut().unwrap().provider_name = "Kanidm".to_string();
+        assert!(config.validate().is_err());
+
+        config.auth.as_mut().unwrap().provider_name = "1kanidm".to_string();
+        assert!(config.validate().is_err());
+
+        config.auth.as_mut().unwrap().provider_name = "kanidm.example".to_string();
         assert!(config.validate().is_err());
     }
 

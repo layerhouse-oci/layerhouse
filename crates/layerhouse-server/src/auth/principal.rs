@@ -39,6 +39,90 @@ impl FromStr for PrincipalKind {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProviderId(String);
+
+impl ProviderId {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, LayerhouseError> {
+        let value = value.as_ref().trim();
+        if value.is_empty() {
+            return Err(LayerhouseError::NameInvalid(
+                "principal provider must not be empty".to_string(),
+            ));
+        }
+        if value.len() > 64 {
+            return Err(LayerhouseError::NameInvalid(format!(
+                "principal provider must be at most 64 characters: {value:?}"
+            )));
+        }
+        let mut chars = value.chars();
+        let Some(first) = chars.next() else {
+            return Err(LayerhouseError::NameInvalid(
+                "principal provider must not be empty".to_string(),
+            ));
+        };
+        if !first.is_ascii_lowercase() {
+            return Err(LayerhouseError::NameInvalid(format!(
+                "principal provider must start with a lowercase ASCII letter: {value:?}"
+            )));
+        }
+        if !chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
+        {
+            return Err(LayerhouseError::NameInvalid(format!(
+                "principal provider contains invalid characters: {value:?}"
+            )));
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProviderId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ProviderId {
+    type Err = LayerhouseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrincipalLocalId(String);
+
+impl PrincipalLocalId {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, LayerhouseError> {
+        let value = value.as_ref();
+        if value.is_empty() {
+            return Err(LayerhouseError::NameInvalid(
+                "principal id must not be empty".to_string(),
+            ));
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn encoded(&self) -> String {
+        escape_local_id(self.as_str())
+    }
+}
+
+impl fmt::Display for PrincipalLocalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ProviderQualifiedId(String);
@@ -49,9 +133,14 @@ impl ProviderQualifiedId {
         kind: PrincipalKind,
         id: impl AsRef<str>,
     ) -> Result<Self, LayerhouseError> {
-        let provider = validate_segment("provider", provider.as_ref())?;
-        let id = validate_segment("id", id.as_ref())?;
-        Ok(Self(format!("{provider}:{}:{id}", kind.as_str())))
+        let provider = ProviderId::new(provider)?;
+        let id = PrincipalLocalId::new(id)?;
+        Ok(Self(format!(
+            "{}:{}:{}",
+            provider.as_str(),
+            kind.as_str(),
+            id.encoded()
+        )))
     }
 
     pub fn parse(value: impl AsRef<str>) -> Result<Self, LayerhouseError> {
@@ -63,7 +152,8 @@ impl ProviderQualifiedId {
             )));
         }
         let kind = PrincipalKind::from_str(parts[1])?;
-        Self::new(parts[0], kind, parts[2])
+        let id = PrincipalLocalId::new(unescape_local_id(parts[2])?)?;
+        Self::new(parts[0], kind, id.as_str())
     }
 
     pub fn as_str(&self) -> &str {
@@ -75,8 +165,9 @@ impl ProviderQualifiedId {
         PrincipalKind::from_str(kind).expect("ProviderQualifiedId is constructed canonically")
     }
 
-    pub fn local_id(&self) -> &str {
-        self.0.split(':').nth(2).unwrap_or_default()
+    pub fn local_id(&self) -> String {
+        unescape_local_id(self.0.split(':').nth(2).unwrap_or_default())
+            .expect("ProviderQualifiedId is constructed canonically")
     }
 }
 
@@ -148,21 +239,6 @@ pub fn stable_group_ids(provider: &str, groups: &[String]) -> Vec<ProviderQualif
     seen.into_iter().collect()
 }
 
-fn validate_segment(name: &str, value: &str) -> Result<String, LayerhouseError> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err(LayerhouseError::NameInvalid(format!(
-            "principal {name} must not be empty"
-        )));
-    }
-    if value.contains(':') {
-        return Err(LayerhouseError::NameInvalid(format!(
-            "principal {name} must not contain ':'"
-        )));
-    }
-    Ok(value.to_string())
-}
-
 fn ensure_kind(id: &ProviderQualifiedId, kind: PrincipalKind) -> Result<(), LayerhouseError> {
     if id.kind() != kind {
         return Err(LayerhouseError::NameInvalid(format!(
@@ -171,6 +247,59 @@ fn ensure_kind(id: &ProviderQualifiedId, kind: PrincipalKind) -> Result<(), Laye
         )));
     }
     Ok(())
+}
+
+fn escape_local_id(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~') {
+            escaped.push(char::from(byte));
+        } else {
+            escaped.push('%');
+            escaped.push(char::from(HEX[usize::from(byte >> 4)]));
+            escaped.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    escaped
+}
+
+fn unescape_local_id(value: &str) -> Result<String, LayerhouseError> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        if index + 2 >= bytes.len() {
+            return Err(LayerhouseError::NameInvalid(format!(
+                "principal id contains truncated escape: {value:?}"
+            )));
+        }
+        let high = hex_value(bytes[index + 1]).ok_or_else(|| {
+            LayerhouseError::NameInvalid(format!("principal id contains invalid escape: {value:?}"))
+        })?;
+        let low = hex_value(bytes[index + 2]).ok_or_else(|| {
+            LayerhouseError::NameInvalid(format!("principal id contains invalid escape: {value:?}"))
+        })?;
+        decoded.push((high << 4) | low);
+        index += 3;
+    }
+    String::from_utf8(decoded).map_err(|err| {
+        LayerhouseError::NameInvalid(format!("principal id is not valid UTF-8: {err}"))
+    })
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -182,18 +311,51 @@ mod tests {
         let id = ProviderQualifiedId::new("kanidm", PrincipalKind::User, "user-1").unwrap();
         assert_eq!(id.as_str(), "kanidm:user:user-1");
         assert_eq!(ProviderQualifiedId::parse(id.as_str()).unwrap(), id);
-        assert_eq!(id.local_id(), "user-1");
+        assert_eq!(id.local_id(), "user-1".to_string());
         assert_eq!(id.kind(), PrincipalKind::User);
     }
 
     #[test]
-    fn provider_qualified_id_rejects_ambiguous_segments() {
+    fn provider_qualified_id_rejects_invalid_provider_segments() {
         assert!(ProviderQualifiedId::new("", PrincipalKind::User, "u").is_err());
+        assert!(ProviderQualifiedId::new("Kanidm", PrincipalKind::User, "u").is_err());
+        assert!(ProviderQualifiedId::new("1kanidm", PrincipalKind::User, "u").is_err());
         assert!(ProviderQualifiedId::new("kan:idm", PrincipalKind::User, "u").is_err());
+        assert!(ProviderQualifiedId::new("kanidm.example", PrincipalKind::User, "u").is_err());
         assert!(ProviderQualifiedId::new("kanidm", PrincipalKind::User, "").is_err());
-        assert!(ProviderQualifiedId::new("kanidm", PrincipalKind::User, "u:1").is_err());
         assert!(ProviderQualifiedId::parse("kanidm:user").is_err());
         assert!(ProviderQualifiedId::parse("kanidm:team:u").is_err());
+    }
+
+    #[test]
+    fn provider_qualified_id_escapes_opaque_local_ids() {
+        let id = ProviderQualifiedId::new("kanidm", PrincipalKind::User, "user:one/space id")
+            .expect("opaque local id should be escaped");
+
+        assert_eq!(id.as_str(), "kanidm:user:user%3Aone%2Fspace%20id");
+        assert_eq!(id.local_id(), "user:one/space id".to_string());
+        assert_eq!(ProviderQualifiedId::parse(id.as_str()).unwrap(), id);
+    }
+
+    #[test]
+    fn provider_qualified_id_escape_prevents_local_id_collisions() {
+        let literal_colon = ProviderQualifiedId::new("kanidm", PrincipalKind::User, "user:1")
+            .expect("colon should be escaped");
+        let literal_escape = ProviderQualifiedId::new("kanidm", PrincipalKind::User, "user%3A1")
+            .expect("percent should be escaped");
+
+        assert_eq!(literal_colon.as_str(), "kanidm:user:user%3A1");
+        assert_eq!(literal_escape.as_str(), "kanidm:user:user%253A1");
+        assert_ne!(literal_colon, literal_escape);
+        assert_eq!(literal_colon.local_id(), "user:1".to_string());
+        assert_eq!(literal_escape.local_id(), "user%3A1".to_string());
+    }
+
+    #[test]
+    fn provider_qualified_id_rejects_invalid_escape_sequences() {
+        assert!(ProviderQualifiedId::parse("kanidm:user:user%2").is_err());
+        assert!(ProviderQualifiedId::parse("kanidm:user:user%xx").is_err());
+        assert!(ProviderQualifiedId::parse("kanidm:user:%FF").is_err());
     }
 
     #[test]
