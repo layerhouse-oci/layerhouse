@@ -1,6 +1,5 @@
 pub mod authorization;
-#[cfg(test)]
-mod cedar_shadow;
+pub(crate) mod cedar_shadow;
 pub mod discovery;
 pub mod identity;
 pub mod jwks;
@@ -704,6 +703,8 @@ impl AuthService {
             actor_token_type = ?request.actor.token_type,
             "compatibility authorizer evaluating request"
         );
+        self.trace_cedar_shadow_decision(&request, namespaces, authorization.decision)
+            .await;
         match authorization.decision {
             AuthzDecision::Allow => Ok(authorization.access),
             AuthzDecision::Deny => Err(LayerhouseError::Denied(format!(
@@ -864,6 +865,9 @@ impl AuthService {
     ) -> Result<(permissions::OciAction, permissions::GrantSource), LayerhouseError> {
         use permissions::OciAction::*;
 
+        self.trace_cedar_shadow_max_grantable(identity, repository, namespaces)
+            .await;
+
         // Personal namespace grants the full ladder.
         if permissions::in_personal_namespace(identity.username.as_deref(), repository) {
             return Ok((Delete, permissions::GrantSource::Personal));
@@ -923,20 +927,128 @@ impl AuthService {
     ) -> Result<(), LayerhouseError> {
         let handle = handle_of(repository)?;
         if is_handle_reserved(handle) {
+            self.trace_cedar_shadow_public_pull(repository, namespaces, AuthzDecision::Deny)
+                .await;
             return Err(LayerhouseError::Denied(format!(
                 "repository {repository:?} is not public"
             )));
         }
         let grants = namespaces.list_namespace_grants(handle).await?;
-        if grants.iter().any(|grant| {
+        let decision = if grants.iter().any(|grant| {
             matches!(grant.grantee, NamespaceGrantGrantee::Public)
                 && permissions::action_matches(grant.action, permissions::OciAction::Pull)
         }) {
-            Ok(())
+            AuthzDecision::Allow
         } else {
-            Err(LayerhouseError::Denied(format!(
+            AuthzDecision::Deny
+        };
+        self.trace_cedar_shadow_public_pull(repository, namespaces, decision)
+            .await;
+        match decision {
+            AuthzDecision::Allow => Ok(()),
+            AuthzDecision::Deny => Err(LayerhouseError::Denied(format!(
                 "repository {repository:?} is not public"
-            )))
+            ))),
+        }
+    }
+
+    async fn trace_cedar_shadow_decision(
+        &self,
+        request: &AuthzRequest,
+        namespaces: &dyn NamespaceStore,
+        compatibility: AuthzDecision,
+    ) {
+        match cedar_shadow::CedarShadowAuthorizer::new()
+            .authorize(self, request, namespaces)
+            .await
+        {
+            Ok(shadow) if shadow != compatibility => {
+                tracing::warn!(
+                    repository = %request.repository,
+                    action = ?request.action,
+                    compatibility = ?compatibility,
+                    cedar_shadow = ?shadow,
+                    "Cedar shadow authorization mismatch"
+                );
+            }
+            Ok(shadow) => {
+                tracing::trace!(
+                    repository = %request.repository,
+                    action = ?request.action,
+                    cedar_shadow = ?shadow,
+                    "Cedar shadow authorization matched compatibility decision"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    repository = %request.repository,
+                    action = ?request.action,
+                    err = %err,
+                    "Cedar shadow authorization failed closed"
+                );
+            }
+        }
+    }
+
+    async fn trace_cedar_shadow_public_pull(
+        &self,
+        repository: &str,
+        namespaces: &dyn NamespaceStore,
+        compatibility: AuthzDecision,
+    ) {
+        match cedar_shadow::CedarShadowAuthorizer::new()
+            .authorize_public_pull(repository, namespaces)
+            .await
+        {
+            Ok(shadow) if shadow != compatibility => {
+                tracing::warn!(
+                    repository,
+                    compatibility = ?compatibility,
+                    cedar_shadow = ?shadow,
+                    "Cedar shadow public-pull mismatch"
+                );
+            }
+            Ok(shadow) => {
+                tracing::trace!(
+                    repository,
+                    cedar_shadow = ?shadow,
+                    "Cedar shadow public-pull matched compatibility decision"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    repository,
+                    err = %err,
+                    "Cedar shadow public-pull failed closed"
+                );
+            }
+        }
+    }
+
+    async fn trace_cedar_shadow_max_grantable(
+        &self,
+        identity: &AuthIdentity,
+        repository: &str,
+        namespaces: &dyn NamespaceStore,
+    ) {
+        match cedar_shadow::CedarShadowAuthorizer::new()
+            .max_grantable_action(self, &identity.actor(), repository, namespaces)
+            .await
+        {
+            Ok(action) => {
+                tracing::trace!(
+                    repository,
+                    cedar_shadow_max_grantable = ?action,
+                    "Cedar shadow grantability evaluated"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    repository,
+                    err = %err,
+                    "Cedar shadow grantability failed closed"
+                );
+            }
         }
     }
 
