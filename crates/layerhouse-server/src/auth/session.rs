@@ -67,18 +67,29 @@ impl DashboardSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::principal::{PrincipalKind, ProviderQualifiedId};
 
     #[test]
     fn encrypt_decrypt_round_trip() {
         let key = [42u8; 32];
+        let principal = ProviderQualifiedId::new("kanidm", PrincipalKind::User, "user:1")
+            .unwrap()
+            .to_string();
+        let group = ProviderQualifiedId::new(
+            "kanidm",
+            PrincipalKind::Group,
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .unwrap()
+        .to_string();
         let session = DashboardSession {
             subject: "user-1".into(),
-            principal: "kanidm:user:user-1".into(),
+            principal,
             username: Some("admin".into()),
             display_name: Some("Admin".into()),
             email: Some("admin@test.local".into()),
             groups: vec!["registry_admins".into()],
-            group_ids: vec![],
+            group_ids: vec![group],
             expires_at: 1717200000,
         };
 
@@ -86,9 +97,11 @@ mod tests {
         let decrypted = DashboardSession::decrypt(&encrypted, &key).unwrap();
 
         assert_eq!(decrypted.subject, session.subject);
+        assert_eq!(decrypted.principal, session.principal);
         assert_eq!(decrypted.username, session.username);
         assert_eq!(decrypted.email, session.email);
         assert_eq!(decrypted.groups, session.groups);
+        assert_eq!(decrypted.group_ids, session.group_ids);
         assert_eq!(decrypted.expires_at, session.expires_at);
     }
 
