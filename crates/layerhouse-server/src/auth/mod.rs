@@ -1,5 +1,5 @@
 pub mod authorization;
-pub(crate) mod cedar_shadow;
+pub(crate) mod cedar_authorizer;
 pub mod discovery;
 pub mod identity;
 pub mod jwks;
@@ -20,9 +20,7 @@ use axum::http::HeaderMap;
 use crate::config::{AuthConfig, CookieSecureMode, S3Config};
 use crate::error::LayerhouseError;
 use crate::store::metadata::handle::{handle_of, is_handle_reserved};
-use crate::store::metadata::{
-    NamespaceEpoch, NamespaceGrant, NamespaceGrantGrantee, NamespaceStore, Owner, TokenStore,
-};
+use crate::store::metadata::{NamespaceEpoch, NamespaceStore, Owner, TokenStore};
 
 use self::authorization::{
     AuthorizedRepositoryAccess, Authorizer, AuthzDecision, AuthzRequest, RepositoryResource,
@@ -30,59 +28,14 @@ use self::authorization::{
 use self::discovery::OidcDiscovery;
 use self::identity::Subject;
 use self::jwks::{CachedJwksDocument, JwksCache, JwksMetrics, JwksS3Cache};
-use self::permissions::PermissionResolver;
-use self::permissions::action_rank;
 use self::principal::{PrincipalKind, ProviderQualifiedId, stable_group_ids};
 use self::token::{AuthIdentity, TokenType};
-
-/// Whether a namespace `owner` grants `identity` the full action ladder in the
-/// claimed namespace. A `User` owner matches by typed subject. `Org` ownership
-/// returns `false` for now: there is no actor->org membership map yet, so
-/// org-owned namespaces rely on admin or an explicit RBAC grant until org
-/// membership lands.
-fn owner_grants(owner: &Owner, identity: &AuthIdentity) -> bool {
-    match owner {
-        Owner::User(subject) => *subject == identity.subject,
-        Owner::Org(_) => false,
-    }
-}
-
-fn namespace_grant_matches(
-    grant: &NamespaceGrant,
-    identity: &AuthIdentity,
-    action: permissions::OciAction,
-) -> bool {
-    if !permissions::action_matches(grant.action, action) {
-        return false;
-    }
-    match &grant.grantee {
-        NamespaceGrantGrantee::Group { id } => identity.group_ids.iter().any(|group| group == id),
-        NamespaceGrantGrantee::User { id } => *id == identity.principal,
-        NamespaceGrantGrantee::Public => action == permissions::OciAction::Pull,
-    }
-}
-
-fn max_namespace_grant_action(
-    grants: &[NamespaceGrant],
-    identity: &AuthIdentity,
-) -> Option<permissions::OciAction> {
-    grants
-        .iter()
-        .filter(|grant| namespace_grant_matches(grant, identity, permissions::OciAction::Pull))
-        .map(|grant| grant.action)
-        .max_by_key(|action| action_rank(*action))
-}
-
-fn authorization_group_keys(identity: &AuthIdentity) -> Vec<String> {
-    identity.group_ids.iter().map(ToString::to_string).collect()
-}
 
 pub struct AuthService {
     pub config: AuthConfig,
     discovery: RwLock<OidcDiscovery>,
     jwks_cache: Arc<RwLock<JwksCache>>,
     jwks_s3_cache: Option<Arc<JwksS3Cache>>,
-    permission_resolver: PermissionResolver,
     token_signing_key: jsonwebtoken::EncodingKey,
     token_verification_key: jsonwebtoken::DecodingKey,
     session_key: [u8; 32],
@@ -100,7 +53,6 @@ struct FreshAuthMaterial {
 struct RepositoryAuthorization {
     decision: AuthzDecision,
     access: AuthorizedRepositoryAccess,
-    resource: Option<RepositoryResource>,
 }
 
 fn repository_authorization(
@@ -108,49 +60,11 @@ fn repository_authorization(
     action: permissions::OciAction,
     decision: AuthzDecision,
     expected_namespace: Option<NamespaceEpoch>,
-    resource: Option<RepositoryResource>,
 ) -> RepositoryAuthorization {
     RepositoryAuthorization {
         decision,
         access: AuthorizedRepositoryAccess::new(repository, action, expected_namespace),
-        resource,
     }
-}
-
-fn scope_matches_namespace_epoch(
-    identity: &AuthIdentity,
-    repo_pattern: &str,
-    expected: Option<&NamespaceEpoch>,
-) -> bool {
-    let Some(expected) = expected else {
-        return true;
-    };
-    let Ok(handle) = handle_of(repo_pattern) else {
-        return repo_pattern == "*";
-    };
-    if is_handle_reserved(handle) || handle != expected.handle {
-        return true;
-    }
-    identity
-        .namespace_epochs
-        .iter()
-        .any(|epoch| epoch == expected)
-}
-
-fn max_scope_action_for_identity(
-    identity: &AuthIdentity,
-    repository: &str,
-    expected: Option<&NamespaceEpoch>,
-) -> Option<permissions::OciAction> {
-    use permissions::OciAction::{Create, Delete, Pull, Update};
-
-    [Delete, Update, Create, Pull].into_iter().find(|action| {
-        permissions::matching_scope(&identity.scopes, repository, *action)
-            .map(|(repo_pattern, _)| {
-                scope_matches_namespace_epoch(identity, &repo_pattern, expected)
-            })
-            .unwrap_or(false)
-    })
 }
 
 fn uses_explicit_scopes(identity: &AuthIdentity) -> bool {
@@ -200,7 +114,6 @@ impl AuthService {
             LayerhouseError::Internal("session encryption key must be 32 bytes".to_string())
         })?;
 
-        let permission_resolver = PermissionResolver::new(&config.permissions);
         let jwks_cache = Arc::new(RwLock::new(JwksCache::empty()));
         let jwks_s3_cache = match s3_config {
             Some(s3_config) => Some(Arc::new(
@@ -236,7 +149,6 @@ impl AuthService {
             discovery: RwLock::new(discovery),
             jwks_cache,
             jwks_s3_cache,
-            permission_resolver,
             token_signing_key: signing_key,
             token_verification_key: verification_key,
             session_key,
@@ -680,31 +592,6 @@ impl AuthService {
         let authorization = self
             .authorize_repository(identity, repository, action, namespaces)
             .await?;
-        let request = AuthzRequest {
-            actor: identity.actor(),
-            repository: repository.to_string(),
-            resource: authorization.resource.clone(),
-            action,
-        };
-        let resource_id = request.resource.as_ref().map(RepositoryResource::entity_id);
-        tracing::trace!(
-            repository = %request.repository,
-            resource_id = resource_id.as_deref().unwrap_or("unresolved"),
-            action = ?request.action,
-            actor_subject = %request.actor.principal.local_id(),
-            actor_principal = %request.actor.principal,
-            actor_username = request.actor.username.as_deref().unwrap_or(""),
-            actor_display_name = request.actor.display_name.as_deref().unwrap_or(""),
-            actor_email = request.actor.email.as_deref().unwrap_or(""),
-            actor_group_count = request.actor.group_ids.len(),
-            actor_display_group_count = request.actor.display_groups.len(),
-            actor_scope_count = request.actor.scopes.len(),
-            actor_namespace_epoch_count = request.actor.namespace_epochs.len(),
-            actor_token_type = ?request.actor.token_type,
-            "compatibility authorizer evaluating request"
-        );
-        self.trace_cedar_shadow_decision(&request, namespaces, authorization.decision)
-            .await;
         match authorization.decision {
             AuthzDecision::Allow => Ok(authorization.access),
             AuthzDecision::Deny => Err(LayerhouseError::Denied(format!(
@@ -714,54 +601,19 @@ impl AuthService {
         }
     }
 
-    async fn authorize_repository(
+    async fn repository_resource_context(
         &self,
-        identity: &AuthIdentity,
         repository: &str,
         action: permissions::OciAction,
         namespaces: &dyn NamespaceStore,
-    ) -> Result<RepositoryAuthorization, LayerhouseError> {
-        // Personal-namespace auto-grant: any authenticated user has the full
-        // action ladder under `users/<their-username>/`. Keyed on
-        // `identity.username`, which is now populated for PATs as well as OIDC
-        // sessions (see `validate_pat`).
-        if permissions::in_personal_namespace(identity.username.as_deref(), repository) {
-            return Ok(repository_authorization(
-                repository,
-                action,
-                AuthzDecision::Allow,
-                None,
-                None,
-            ));
-        }
-
-        // Personal-namespace boundary guard: repos under `users/<someone>/`
-        // are private. Only the namespace owner (matched above) gets through;
-        // any other access — cross-user PAT scope, delegated RBAC, OCI bearer
-        // tokens — is denied. This closes the gap where a PAT scoped to
-        // `users/bob/*` could bypass the namespace gate (the `users` handle is
-        // reserved, so `is_handle_reserved` skips the claim check).
-        if let Some(ns_user) = permissions::in_personal_namespace_of(repository)
-            && identity.username.as_deref().is_none_or(|u| u != ns_user)
-        {
-            return Ok(repository_authorization(
-                repository,
-                action,
-                AuthzDecision::Deny,
-                None,
-                None,
-            ));
-        }
-
+    ) -> Result<(Option<NamespaceEpoch>, Option<RepositoryResource>), LayerhouseError> {
         let mut expected_namespace = None;
         let mut resource = None;
 
-        // Writes to `<handle>/...` are gated on a live namespace claim, mirroring
-        // the Raft apply-time gate (`require_live_namespace`). Reads and targets
-        // with no resolvable handle (the `"*"` admin wildcard, single-segment
-        // repos) skip the gate and fall through to RBAC. `handle_of` erroring is
-        // treated as "no handle to gate on", not a hard failure, so the admin
-        // path and cross-namespace pulls keep working.
+        // Writes to `<handle>/...` require a live namespace claim before policy
+        // evaluation. Reads, reserved handles, the admin wildcard, and targets
+        // without a repository handle continue through Cedar with an unresolved
+        // repository resource.
         if let Ok(handle) = handle_of(repository)
             && !is_handle_reserved(handle)
         {
@@ -773,74 +625,39 @@ impl AuthService {
                 }
                 None => {}
                 Some(ns) => {
-                    expected_namespace =
-                        Some(crate::store::metadata::NamespaceEpoch::from_namespace(&ns));
+                    expected_namespace = Some(NamespaceEpoch::from_namespace(&ns));
                     resource = Some(RepositoryResource::from_repository(repository, &ns)?);
-                    if owner_grants(&ns.owner, identity) && !uses_explicit_scopes(identity) {
-                        return Ok(repository_authorization(
-                            repository,
-                            action,
-                            AuthzDecision::Allow,
-                            expected_namespace,
-                            resource,
-                        ));
-                    }
-                    let grants = namespaces.list_namespace_grants(handle).await?;
-                    if grants
-                        .iter()
-                        .any(|grant| namespace_grant_matches(grant, identity, action))
-                    {
-                        return Ok(repository_authorization(
-                            repository,
-                            action,
-                            AuthzDecision::Allow,
-                            expected_namespace,
-                            resource,
-                        ));
-                    }
                 }
             }
         }
 
-        // PATs and minted OCI bearer tokens carry explicit repository scopes.
-        if uses_explicit_scopes(identity) {
-            let decision = match permissions::matching_scope(&identity.scopes, repository, action) {
-                Some((repo_pattern, _))
-                    if scope_matches_namespace_epoch(
-                        identity,
-                        &repo_pattern,
-                        expected_namespace.as_ref(),
-                    ) =>
-                {
-                    AuthzDecision::Allow
-                }
-                Some(_) | None => AuthzDecision::Deny,
-            };
-            return Ok(repository_authorization(
-                repository,
-                action,
-                decision,
-                expected_namespace,
-                resource,
-            ));
-        }
+        Ok((expected_namespace, resource))
+    }
 
-        // OIDC tokens: map groups to permissions via config
-        let group_keys = authorization_group_keys(identity);
-        let decision = match self
-            .permission_resolver
-            .check(&group_keys, repository, action)
-        {
-            Ok(()) => Ok(AuthzDecision::Allow),
-            Err(LayerhouseError::Denied(_)) => Ok(AuthzDecision::Deny),
-            Err(error) => Err(error),
-        }?;
+    async fn authorize_repository(
+        &self,
+        identity: &AuthIdentity,
+        repository: &str,
+        action: permissions::OciAction,
+        namespaces: &dyn NamespaceStore,
+    ) -> Result<RepositoryAuthorization, LayerhouseError> {
+        let (expected_namespace, resource) = self
+            .repository_resource_context(repository, action, namespaces)
+            .await?;
+        let request = AuthzRequest {
+            actor: identity.actor(),
+            repository: repository.to_string(),
+            resource: resource.clone(),
+            action,
+        };
+        let decision = self
+            .cedar_authorization_decision(&request, namespaces)
+            .await;
         Ok(repository_authorization(
             repository,
             action,
             decision,
             expected_namespace,
-            resource,
         ))
     }
 
@@ -863,61 +680,33 @@ impl AuthService {
         repository: &str,
         namespaces: &dyn NamespaceStore,
     ) -> Result<(permissions::OciAction, permissions::GrantSource), LayerhouseError> {
-        use permissions::OciAction::*;
-
-        self.trace_cedar_shadow_max_grantable(identity, repository, namespaces)
-            .await;
-
-        // Personal namespace grants the full ladder.
-        if permissions::in_personal_namespace(identity.username.as_deref(), repository) {
-            return Ok((Delete, permissions::GrantSource::Personal));
-        }
-
-        let mut expected_namespace = None;
-
-        // Namespace owner via claim — full ladder.
-        if let Ok(handle) = handle_of(repository)
-            && !is_handle_reserved(handle)
-            && let Some(ns) = namespaces.get_namespace(handle).await?
+        let action = match cedar_authorizer::CedarRepositoryAuthorizer::new()
+            .max_grantable_action(self, &identity.actor(), repository, namespaces)
+            .await
         {
-            expected_namespace = Some(NamespaceEpoch::from_namespace(&ns));
-            if owner_grants(&ns.owner, identity) && !uses_explicit_scopes(identity) {
-                return Ok((Delete, permissions::GrantSource::Personal));
+            Ok(Some(action)) => action,
+            Ok(None) => {
+                return Err(LayerhouseError::Denied(format!(
+                    "access denied for repository {}",
+                    repository
+                )));
             }
-            let grants = namespaces.list_namespace_grants(handle).await?;
-            if let Some(action) = max_namespace_grant_action(&grants, identity) {
-                return Ok((action, permissions::GrantSource::GroupGrant));
+            Err(err) => {
+                tracing::warn!(
+                    repository,
+                    err = %err,
+                    "Cedar grantability failed closed"
+                );
+                return Err(LayerhouseError::Denied(format!(
+                    "access denied for repository {}",
+                    repository
+                )));
             }
-        }
-
-        // Check scopes (PAT or OCI bearer).
-        let scope_max =
-            max_scope_action_for_identity(identity, repository, expected_namespace.as_ref());
-
-        // Check OIDC group grants.
-        let group_keys = authorization_group_keys(identity);
-        let group_max = self
-            .permission_resolver
-            .max_action_from_groups(&group_keys, repository);
-
-        let max = match (scope_max, group_max) {
-            (Some(s), Some(g)) => Some(if action_rank(s) >= action_rank(g) {
-                s
-            } else {
-                g
-            }),
-            (Some(s), None) => Some(s),
-            (None, Some(g)) => Some(g),
-            (None, None) => None,
         };
-
-        match max {
-            Some(action) => Ok((action, permissions::GrantSource::GroupGrant)),
-            None => Err(LayerhouseError::Denied(format!(
-                "access denied for repository {}",
-                repository
-            ))),
-        }
+        let source = self
+            .grant_source_for_authorized_action(identity, repository, action, namespaces)
+            .await?;
+        Ok((action, source))
     }
 
     pub async fn check_public_pull(
@@ -925,25 +714,21 @@ impl AuthService {
         repository: &str,
         namespaces: &dyn NamespaceStore,
     ) -> Result<(), LayerhouseError> {
-        let handle = handle_of(repository)?;
-        if is_handle_reserved(handle) {
-            self.trace_cedar_shadow_public_pull(repository, namespaces, AuthzDecision::Deny)
-                .await;
-            return Err(LayerhouseError::Denied(format!(
-                "repository {repository:?} is not public"
-            )));
-        }
-        let grants = namespaces.list_namespace_grants(handle).await?;
-        let decision = if grants.iter().any(|grant| {
-            matches!(grant.grantee, NamespaceGrantGrantee::Public)
-                && permissions::action_matches(grant.action, permissions::OciAction::Pull)
-        }) {
-            AuthzDecision::Allow
-        } else {
-            AuthzDecision::Deny
+        let _ = handle_of(repository)?;
+        let decision = match cedar_authorizer::CedarRepositoryAuthorizer::new()
+            .authorize_public_pull(repository, namespaces)
+            .await
+        {
+            Ok(decision) => decision,
+            Err(err) => {
+                tracing::warn!(
+                    repository,
+                    err = %err,
+                    "Cedar public-pull authorization failed closed"
+                );
+                AuthzDecision::Deny
+            }
         };
-        self.trace_cedar_shadow_public_pull(repository, namespaces, decision)
-            .await;
         match decision {
             AuthzDecision::Allow => Ok(()),
             AuthzDecision::Deny => Err(LayerhouseError::Denied(format!(
@@ -952,115 +737,75 @@ impl AuthService {
         }
     }
 
-    async fn trace_cedar_shadow_decision(
+    async fn cedar_authorization_decision(
         &self,
         request: &AuthzRequest,
         namespaces: &dyn NamespaceStore,
-        compatibility: AuthzDecision,
-    ) {
-        match cedar_shadow::CedarShadowAuthorizer::new()
+    ) -> AuthzDecision {
+        let resource_id = request.resource.as_ref().map(RepositoryResource::entity_id);
+        tracing::trace!(
+            repository = %request.repository,
+            resource_id = resource_id.as_deref().unwrap_or("unresolved"),
+            action = ?request.action,
+            actor_subject = %request.actor.principal.local_id(),
+            actor_principal = %request.actor.principal,
+            actor_username = request.actor.username.as_deref().unwrap_or(""),
+            actor_display_name = request.actor.display_name.as_deref().unwrap_or(""),
+            actor_email = request.actor.email.as_deref().unwrap_or(""),
+            actor_group_count = request.actor.group_ids.len(),
+            actor_display_group_count = request.actor.display_groups.len(),
+            actor_scope_count = request.actor.scopes.len(),
+            actor_namespace_epoch_count = request.actor.namespace_epochs.len(),
+            actor_token_type = ?request.actor.token_type,
+            "Cedar authorizer evaluating request"
+        );
+        match cedar_authorizer::CedarRepositoryAuthorizer::new()
             .authorize(self, request, namespaces)
             .await
         {
-            Ok(shadow) if shadow != compatibility => {
-                tracing::warn!(
-                    repository = %request.repository,
-                    action = ?request.action,
-                    compatibility = ?compatibility,
-                    cedar_shadow = ?shadow,
-                    "Cedar shadow authorization mismatch"
-                );
-            }
-            Ok(shadow) => {
+            Ok(decision) => {
                 tracing::trace!(
                     repository = %request.repository,
                     action = ?request.action,
-                    cedar_shadow = ?shadow,
-                    "Cedar shadow authorization matched compatibility decision"
+                    cedar = ?decision,
+                    "Cedar authorization evaluated"
                 );
+                decision
             }
             Err(err) => {
                 tracing::warn!(
                     repository = %request.repository,
                     action = ?request.action,
                     err = %err,
-                    "Cedar shadow authorization failed closed"
+                    "Cedar authorization failed closed"
                 );
+                AuthzDecision::Deny
             }
         }
     }
 
-    async fn trace_cedar_shadow_public_pull(
-        &self,
-        repository: &str,
-        namespaces: &dyn NamespaceStore,
-        compatibility: AuthzDecision,
-    ) {
-        match cedar_shadow::CedarShadowAuthorizer::new()
-            .authorize_public_pull(repository, namespaces)
-            .await
-        {
-            Ok(shadow) if shadow != compatibility => {
-                tracing::warn!(
-                    repository,
-                    compatibility = ?compatibility,
-                    cedar_shadow = ?shadow,
-                    "Cedar shadow public-pull mismatch"
-                );
-            }
-            Ok(shadow) => {
-                tracing::trace!(
-                    repository,
-                    cedar_shadow = ?shadow,
-                    "Cedar shadow public-pull matched compatibility decision"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    repository,
-                    err = %err,
-                    "Cedar shadow public-pull failed closed"
-                );
-            }
-        }
-    }
-
-    async fn trace_cedar_shadow_max_grantable(
+    async fn grant_source_for_authorized_action(
         &self,
         identity: &AuthIdentity,
         repository: &str,
+        action: permissions::OciAction,
         namespaces: &dyn NamespaceStore,
-    ) {
-        match cedar_shadow::CedarShadowAuthorizer::new()
-            .max_grantable_action(self, &identity.actor(), repository, namespaces)
-            .await
+    ) -> Result<permissions::GrantSource, LayerhouseError> {
+        if action == permissions::OciAction::Delete
+            && permissions::in_personal_namespace(identity.username.as_deref(), repository)
         {
-            Ok(action) => {
-                tracing::trace!(
-                    repository,
-                    cedar_shadow_max_grantable = ?action,
-                    "Cedar shadow grantability evaluated"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    repository,
-                    err = %err,
-                    "Cedar shadow grantability failed closed"
-                );
-            }
+            return Ok(permissions::GrantSource::Personal);
         }
-    }
-
-    /// Maximum action granted by group mappings for a repository.
-    /// Delegates to the inner [`PermissionResolver`].
-    pub fn max_action_from_groups(
-        &self,
-        user_groups: &[String],
-        repository: &str,
-    ) -> Option<permissions::OciAction> {
-        self.permission_resolver
-            .max_action_from_groups(user_groups, repository)
+        if action == permissions::OciAction::Delete
+            && !uses_explicit_scopes(identity)
+            && let Ok(handle) = handle_of(repository)
+            && !is_handle_reserved(handle)
+            && let Some(ns) = namespaces.get_namespace(handle).await?
+            && matches!(&ns.owner, Owner::User(subject) if *subject == identity.subject)
+        {
+            return Ok(permissions::GrantSource::Personal);
+        }
+        Ok(permissions::GrantSource::GroupGrant)
     }
 
     pub fn mint_oci_token(
@@ -1133,7 +878,6 @@ impl AuthService {
             .decode(&config.session_encryption_key)
             .expect("valid session key");
         let session_key: [u8; 32] = session_key_bytes.try_into().expect("32-byte session key");
-        let permission_resolver = PermissionResolver::new(&config.permissions);
         Self {
             discovery: RwLock::new(OidcDiscovery {
                 authorization_endpoint: String::new(),
@@ -1143,7 +887,6 @@ impl AuthService {
             }),
             jwks_cache: Arc::new(RwLock::new(JwksCache::empty())),
             jwks_s3_cache: None,
-            permission_resolver,
             token_signing_key: jsonwebtoken::EncodingKey::from_secret(&signing_key_bytes),
             token_verification_key: jsonwebtoken::DecodingKey::from_secret(&signing_key_bytes),
             session_key,
@@ -1159,29 +902,7 @@ impl Authorizer for AuthService {
         request: &AuthzRequest,
         namespaces: &dyn NamespaceStore,
     ) -> Result<AuthzDecision, LayerhouseError> {
-        let resource_id = request.resource.as_ref().map(RepositoryResource::entity_id);
-        tracing::trace!(
-            repository = %request.repository,
-            resource_id = resource_id.as_deref().unwrap_or("unresolved"),
-            action = ?request.action,
-            "compatibility authorizer evaluating request"
-        );
-        let identity = AuthIdentity {
-            subject: Subject::new(request.actor.principal.local_id()),
-            principal: request.actor.principal.clone(),
-            username: request.actor.username.clone(),
-            display_name: request.actor.display_name.clone(),
-            email: request.actor.email.clone(),
-            groups: request.actor.display_groups.clone(),
-            group_ids: request.actor.group_ids.clone(),
-            scopes: request.actor.scopes.clone(),
-            namespace_epochs: request.actor.namespace_epochs.clone(),
-            token_type: request.actor.token_type.clone(),
-        };
-        Ok(self
-            .authorize_repository(&identity, &request.repository, request.action, namespaces)
-            .await?
-            .decision)
+        Ok(self.cedar_authorization_decision(request, namespaces).await)
     }
 }
 
@@ -1569,6 +1290,7 @@ mod tests {
             scopes: vec!["repository:acme/*:create".to_string()],
         }]);
         let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
         let ci = identity(
             "subject-ci",
             TokenType::OidcAccess,
@@ -1789,16 +1511,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pat_own_personal_namespace_allowed() {
+    async fn oidc_own_personal_namespace_allowed() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
 
-        // Alice with her own personal namespace — auto-grant.
-        let mut alice = identity("subject-alice", TokenType::PersonalAccess, &[], &[]);
+        // Alice with her own personal namespace gets the full ladder through
+        // the logged-in identity. Scoped credentials still need matching scope.
+        let mut alice = identity("subject-alice", TokenType::OidcAccess, &[], &[]);
         alice.username = Some("alice".to_string());
         auth.check_permission(&alice, "users/alice/app", OciAction::Create, &store)
             .await
             .expect("own personal namespace is allowed");
+    }
+
+    #[tokio::test]
+    async fn pat_own_personal_namespace_is_limited_by_scope() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+
+        let mut pat = identity(
+            "subject-alice",
+            TokenType::PersonalAccess,
+            &[],
+            &["repository:users/alice/app:pull"],
+        );
+        pat.username = Some("alice".to_string());
+
+        auth.check_permission(&pat, "users/alice/app", OciAction::Pull, &store)
+            .await
+            .expect("matching personal namespace PAT scope allows pull");
+        auth.check_permission(&pat, "users/alice/app", OciAction::Create, &store)
+            .await
+            .expect_err("personal namespace PAT scope does not imply create");
+        auth.check_permission(&pat, "users/alice/other", OciAction::Pull, &store)
+            .await
+            .expect_err("personal namespace PAT scope does not cover other repos");
+    }
+
+    #[tokio::test]
+    async fn oci_bearer_own_personal_namespace_is_limited_by_scope() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+
+        let mut bearer = identity(
+            "subject-alice",
+            TokenType::OciBearer,
+            &[],
+            &["repository:users/alice/app:pull"],
+        );
+        bearer.username = Some("alice".to_string());
+
+        auth.check_permission(&bearer, "users/alice/app", OciAction::Pull, &store)
+            .await
+            .expect("matching personal namespace bearer scope allows pull");
+        auth.check_permission(&bearer, "users/alice/app", OciAction::Create, &store)
+            .await
+            .expect_err("personal namespace bearer scope does not imply create");
+        auth.check_permission(&bearer, "users/alice/other", OciAction::Pull, &store)
+            .await
+            .expect_err("personal namespace bearer scope does not cover other repos");
     }
 
     #[tokio::test]

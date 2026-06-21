@@ -1411,7 +1411,7 @@ mod tests {
         req
     }
 
-    fn identity(scopes: Vec<String>) -> AuthIdentity {
+    fn scoped_identity(scopes: Vec<String>) -> AuthIdentity {
         let scope_refs = scopes.iter().map(String::as_str).collect::<Vec<_>>();
         let mut identity = AuthIdentity::for_test(
             "user-1",
@@ -1421,6 +1421,36 @@ mod tests {
         );
         identity.username = Some("alice".to_string());
         identity
+    }
+
+    fn session_identity() -> AuthIdentity {
+        let mut identity = AuthIdentity::for_test(
+            "user-1",
+            crate::auth::token::TokenType::OidcAccess,
+            &[],
+            &[],
+        );
+        identity.username = Some("alice".to_string());
+        identity
+    }
+
+    fn grouped_identity(groups: Vec<&str>) -> AuthIdentity {
+        let mut identity = AuthIdentity::for_test(
+            "user-1",
+            crate::auth::token::TokenType::OidcAccess,
+            &groups,
+            &[],
+        );
+        identity.username = Some("alice".to_string());
+        identity
+    }
+
+    fn team_worker_grant() -> crate::config::PermissionMapping {
+        crate::config::PermissionMapping {
+            name: "team-worker".to_string(),
+            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440040".to_string()],
+            scopes: vec!["repository:team-a/worker:pull".to_string()],
+        }
     }
 
     #[tokio::test]
@@ -1435,7 +1465,7 @@ mod tests {
                     "description": "my app",
                     "visibility": "public_pull"
                 }),
-                Some(identity(Vec::new())),
+                Some(session_identity()),
             ))
             .await
             .unwrap();
@@ -1468,7 +1498,9 @@ mod tests {
         let response = app
             .oneshot(post_repository(
                 serde_json::json!({ "name": "team-a/app" }),
-                Some(identity(vec!["repository:team-a/app:pull".to_string()])),
+                Some(scoped_identity(vec![
+                    "repository:team-a/app:pull".to_string(),
+                ])),
             ))
             .await
             .unwrap();
@@ -1485,7 +1517,7 @@ mod tests {
             .clone()
             .oneshot(post_repository(
                 serde_json::json!({ "name": "users/alice/app" }),
-                Some(identity(Vec::new())),
+                Some(session_identity()),
             ))
             .await
             .unwrap();
@@ -1494,7 +1526,7 @@ mod tests {
         let second = app
             .oneshot(post_repository(
                 serde_json::json!({ "name": "users/alice/app" }),
-                Some(identity(Vec::new())),
+                Some(session_identity()),
             ))
             .await
             .unwrap();
@@ -1604,7 +1636,9 @@ mod tests {
         let response = app
             .oneshot(get_repositories(
                 "",
-                Some(identity(vec!["repository:team-a/*:pull".to_string()])),
+                Some(scoped_identity(vec![
+                    "repository:team-a/*:pull".to_string(),
+                ])),
             ))
             .await
             .unwrap();
@@ -1627,7 +1661,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_repositories_excludes_cross_user_personal() {
-        let state = test_state_with_auth(vec![]);
+        let state = test_state_with_auth(vec![team_worker_grant()]);
         seed_manifest(&state, "users/alice/app", "latest").await;
         seed_manifest(&state, "users/bob/app", "latest").await;
         seed_manifest(&state, "team-a/worker", "latest").await;
@@ -1637,7 +1671,9 @@ mod tests {
         let response = app
             .oneshot(get_repositories(
                 "",
-                Some(identity(vec!["repository:team-a/worker:pull".to_string()])),
+                Some(grouped_identity(vec![
+                    "550e8400-e29b-41d4-a716-446655440040",
+                ])),
             ))
             .await
             .unwrap();
@@ -1667,10 +1703,7 @@ mod tests {
 
         // `mine` filter: only personal namespace repos.
         let response = app
-            .oneshot(get_repositories(
-                "filter=mine",
-                Some(identity(vec!["repository:team-a/worker:*".to_string()])),
-            ))
+            .oneshot(get_repositories("filter=mine", Some(session_identity())))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1695,7 +1728,7 @@ mod tests {
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
 
         let response = app
-            .oneshot(get_repositories("", Some(identity(Vec::new()))))
+            .oneshot(get_repositories("", Some(session_identity())))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1715,7 +1748,7 @@ mod tests {
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
 
         let response = app
-            .oneshot(get_repositories("", Some(identity(vec![]))))
+            .oneshot(get_repositories("", Some(session_identity())))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1732,7 +1765,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_repositories_shared_filter() {
-        let state = test_state_with_auth(vec![]);
+        let state = test_state_with_auth(vec![team_worker_grant()]);
         seed_manifest(&state, "users/alice/app", "latest").await;
         seed_manifest(&state, "team-a/worker", "latest").await;
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
@@ -1740,7 +1773,9 @@ mod tests {
         let response = app
             .oneshot(get_repositories(
                 "filter=shared",
-                Some(identity(vec!["repository:team-a/worker:pull".to_string()])),
+                Some(grouped_identity(vec![
+                    "550e8400-e29b-41d4-a716-446655440040",
+                ])),
             ))
             .await
             .unwrap();
