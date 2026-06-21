@@ -19,6 +19,7 @@ data_dir = "/tmp/raft"
 discovery_dns = "layerhouse"
 
 [auth]
+provider_name = "oidc"
 issuer_url = "https://idp.example.com/realms/your-realm"
 issuer_internal_url = "https://idp.internal:8443/realms/your-realm"
 client_id = "layerhouse"
@@ -33,15 +34,15 @@ session_encryption_key = "<base64-encoded-32-byte-key>"
 
 [[auth.permissions]]
 name = "admin-access"
-groups = ["registry_admins"]
+groups = ["oidc:group:00000000-0000-0000-0000-000000000001"]
 scopes = ["repository:*:*"]
 
 [[auth.permissions]]
 name = "developer-access"
-groups = ["registry_developers"]
+groups = ["oidc:group:00000000-0000-0000-0000-000000000002"]
 scopes = ["repository:dev/*:pull,create,update", "repository:dev/*:pull"]
 
 [[auth.permissions]]
 name = "read-only"
-groups = ["registry_readers"]
+groups = ["oidc:group:00000000-0000-0000-0000-000000000003"]
 scopes = ["repository:*:pull"]

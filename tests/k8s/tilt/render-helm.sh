@@ -7,6 +7,8 @@ RELEASE="${RELEASE:-layerhouse}"
 CHART="${CHART:-deploy/kubernetes/helm}"
 REGISTRY_ENDPOINT="${REGISTRY_ENDPOINT:-localhost:32050}"
 KANIDM_HOST_PORT="${KANIDM_HOST_PORT:-8443}"
+KANIDM_ADMIN_GROUP_ID="${KANIDM_ADMIN_GROUP_ID:-00000000-0000-0000-0000-000000000001}"
+KANIDM_DEVELOPER_GROUP_ID="${KANIDM_DEVELOPER_GROUP_ID:-00000000-0000-0000-0000-000000000002}"
 S3_BUCKET="${S3_BUCKET:-layerhouse}"
 S3_ACCESS_KEY="${S3_ACCESS_KEY:-rustfsadmin}"
 S3_SECRET_KEY="${S3_SECRET_KEY:-rustfsadmin}"
@@ -46,6 +48,7 @@ raft:
 
 auth:
   enabled: true
+  providerName: kanidm
   issuerUrl: https://localhost:$KANIDM_HOST_PORT/oauth2/openid/layerhouse
   issuerInternalUrl: https://kanidm.kanidm.svc.cluster.local:8443/oauth2/openid/layerhouse
   issuerInternalUrls:
@@ -57,11 +60,11 @@ auth:
   existingSecret: layerhouse-auth
   permissions:
     - name: admin-full-access
-      groups: ["registry_admins"]
+      groups: ["kanidm:group:$KANIDM_ADMIN_GROUP_ID"]
       scopes: ["repository:*:*"]
     - name: developer-access
-      groups: ["registry_developers"]
-      scopes: ["repository:dev/*:push", "repository:dev/*:pull"]
+      groups: ["kanidm:group:$KANIDM_DEVELOPER_GROUP_ID"]
+      scopes: ["repository:dev/*:pull,create,update", "repository:dev/*:pull"]
 
 certManager:
   server:

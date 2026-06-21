@@ -125,7 +125,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 1. Create a PAT via the API (requires dashboard session cookie — use direct API with admin PAT for now):
    ```
    POST /api/v1/tokens
-   {"name": "test-token", "scopes": ["repository:qa/auth-test/*:push", "repository:qa/auth-test/*:pull"]}
+   {"name": "test-token", "scopes": ["repository:qa/auth-test/*:pull,create,update"]}
    ```
 2. List PATs: `GET /api/v1/tokens`
 3. Verify PAT appears in list with prefix visible but not full token
@@ -148,7 +148,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 
 ### AUTH5. Docker Push With PAT (Authorized)
 
-**Precondition**: PAT with `repository:qa/auth-test/*:push` scope.
+**Precondition**: PAT with `repository:qa/auth-test/*:pull,create,update` scope.
 
 **Steps**:
 1. `docker login localhost:5050 -u developer -p <PAT>`
@@ -254,7 +254,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 
 **Expected**:
 - Wildcard `repository:*:*` grants access to any repository
-- Prefix wildcard `repository:qa/auth-test/*:push` grants push to `qa/auth-test/any-sub`
+- Prefix wildcard `repository:qa/auth-test/*:pull,create,update` grants push to `qa/auth-test/any-sub`
 
 ### AUTH13. Follower Node Auth Enforcement
 

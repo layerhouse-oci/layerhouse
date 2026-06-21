@@ -31,8 +31,8 @@ The setup script (`tests/compose/kanidm/kanidm-setup.sh`) creates:
 - `ci-bot` — service account (CI pipeline automation)
 
 **Groups:**
-- `registry_admins` — mapped to `oci_admin` scope
-- `registry_developers` — mapped to `oci_push`, `oci_pull` scopes
+- `registry_admins` — display label for the admin group; Layerhouse permissions use the group's stable UUID
+- `registry_developers` — display label for the developer group; Layerhouse permissions use the group's stable UUID
 
 **OAuth2 Client:**
 - Name: `layerhouse`
@@ -82,8 +82,9 @@ For production deployments, create the kanidm configuration manually:
    kanidm oauth2 set-scopemap layerhouse registry_developers oci_push oci_pull
    ```
 4. Add users to groups
-5. Generate signing and encryption keys for Layerhouse's config
-6. Add the `[auth]` section to `config.toml`
+5. Find the stable group UUIDs emitted in the OAuth2 `groups` claim
+6. Generate signing and encryption keys for Layerhouse's config
+7. Add the `[auth]` section to `config.toml`, using `kanidm:group:<uuid>` entries in `[[auth.permissions]].groups`
 
 ## TLS
 

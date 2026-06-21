@@ -105,7 +105,7 @@ echo "--- PAT Flow ---"
 # We use the admin user which is in registry_admins group.
 # For now, we check if we can reach the token endpoint.
 TOKEN_RESP=$(curl -s -o "$EVIDENCE_ROOT/token-noauth.json" -w "%{http_code}" \
-    "$SCHEME://$REGISTRY/v2/token?service=layerhouse&scope=repository:$REPO_PREFIX/*:push")
+    "$SCHEME://$REGISTRY/v2/token?service=layerhouse&scope=repository:$REPO_PREFIX/*:pull,create,update")
 if [ "$TOKEN_RESP" -eq 401 ]; then
     pass AUTH-TK1 "token endpoint returns 401 without credentials"
 else
