@@ -1122,6 +1122,17 @@ mod tests {
         identity
     }
 
+    fn personal_identity() -> AuthIdentity {
+        let mut identity = AuthIdentity::for_test(
+            "user-1",
+            crate::auth::token::TokenType::OidcAccess,
+            &[],
+            &[],
+        );
+        identity.username = Some("alice".to_string());
+        identity
+    }
+
     // Claim `handle` for an org owner unrelated to the test identity, so the
     // namespace gate is satisfied (the handle is live) but ownership grants
     // nothing implicitly — the write decision falls through to the RBAC scope
@@ -1216,7 +1227,7 @@ mod tests {
     #[tokio::test]
     async fn put_manifest_overwrite_allowed_in_personal_namespace() {
         let state = test_state_with_auth(vec![]);
-        let owner = identity_with_scopes(Vec::new());
+        let owner = personal_identity();
 
         for _ in 0..2 {
             let response = dispatch(

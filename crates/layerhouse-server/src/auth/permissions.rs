@@ -1,4 +1,3 @@
-use crate::config::PermissionMapping;
 use crate::error::LayerhouseError;
 
 /// Where a permission grant came from. Used by the dashboard to explain
@@ -70,97 +69,6 @@ impl OciAction {
             OciAction::Delete => "delete",
         }
     }
-}
-
-pub struct PermissionResolver {
-    mappings: Vec<CompiledMapping>,
-}
-
-struct CompiledMapping {
-    groups: Vec<String>,
-    rules: Vec<(String, OciAction)>,
-}
-
-impl PermissionResolver {
-    pub fn new(mappings: &[PermissionMapping]) -> Self {
-        let compiled = mappings
-            .iter()
-            .map(|m| {
-                let rules: Vec<(String, OciAction)> = m
-                    .scopes
-                    .iter()
-                    .filter_map(|scope| parse_scope(scope))
-                    .collect();
-                CompiledMapping {
-                    groups: m.groups.clone(),
-                    rules,
-                }
-            })
-            .collect();
-        Self { mappings: compiled }
-    }
-
-    /// Check permissions using group membership (for OIDC tokens).
-    pub fn check(
-        &self,
-        user_groups: &[String],
-        repository: &str,
-        action: OciAction,
-    ) -> Result<(), LayerhouseError> {
-        for mapping in &self.mappings {
-            if mapping.groups.iter().any(|group| {
-                user_groups
-                    .iter()
-                    .any(|user_group| group_matches(group, user_group))
-            }) && mapping.rules.iter().any(|(repo_pattern, allowed_action)| {
-                match_repository(repo_pattern, repository)
-                    && action_matches(*allowed_action, action)
-            }) {
-                return Ok(());
-            }
-        }
-        Err(LayerhouseError::Denied(format!(
-            "access denied for repository {}",
-            repository
-        )))
-    }
-
-    /// Maximum action granted by group mappings for a repository.
-    /// Returns `None` when no group grant covers the repository.
-    pub fn max_action_from_groups(
-        &self,
-        user_groups: &[String],
-        repository: &str,
-    ) -> Option<OciAction> {
-        let mut best: Option<OciAction> = None;
-        for mapping in &self.mappings {
-            if !mapping
-                .groups
-                .iter()
-                .any(|group| user_groups.iter().any(|ug| group_matches(group, ug)))
-            {
-                continue;
-            }
-            for (repo_pattern, allowed_action) in &mapping.rules {
-                if match_repository(repo_pattern, repository)
-                    && action_matches(*allowed_action, OciAction::Pull)
-                {
-                    best = match best {
-                        Some(current) if action_rank(*allowed_action) > action_rank(current) => {
-                            Some(*allowed_action)
-                        }
-                        None => Some(*allowed_action),
-                        _ => best,
-                    };
-                }
-            }
-        }
-        best
-    }
-}
-
-pub(crate) fn group_matches(configured: &str, user_group: &str) -> bool {
-    configured == user_group
 }
 
 pub(crate) fn parse_scope(scope: &str) -> Option<(String, OciAction)> {
@@ -287,27 +195,6 @@ pub fn pat_scope_allowed_for_identity(
     Ok(())
 }
 
-/// Maximum action an actor can perform on `repository` based solely on their
-/// explicit scopes (PAT or OCI bearer). Returns `None` when no scope matches.
-/// The caller is responsible for also checking personal-namespace and
-/// namespace-claim owner grants.
-pub fn max_action_from_scopes(scopes: &[String], repository: &str) -> Option<OciAction> {
-    scopes
-        .iter()
-        .filter_map(|scope| parse_scope(scope))
-        .filter(|(pattern, _)| match_repository(pattern, repository))
-        .map(|(_, action)| action)
-        .max_by_key(|a| action_rank(*a))
-}
-
-/// Check whether `identity` holds a grant pattern that would cover a
-/// namespace-pattern scope like `repository:<prefix>/*`. Returns the
-/// maximum grantable action for that pattern, if any.
-pub fn max_action_for_namespace_pattern(scopes: &[String], prefix: &str) -> Option<OciAction> {
-    let pattern_repo = format!("{prefix}/*");
-    max_action_from_scopes(scopes, &pattern_repo)
-}
-
 /// Derive candidate namespace patterns from an identity's scopes for a given
 /// search prefix. Returns patterns the actor can grant (e.g., `team-a/*` from
 /// an RBAC mapping or PAT scope).
@@ -422,46 +309,6 @@ mod tests {
         assert!(match_repository("platform/*", "platform"));
         assert!(match_repository("platform/*", "platform/backend"));
         assert!(!match_repository("platform/*", "other"));
-    }
-
-    #[test]
-    fn group_matching_is_exact_only() {
-        let resolver = PermissionResolver::new(&[PermissionMapping {
-            name: "admins".to_string(),
-            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440010".to_string()],
-            scopes: vec!["repository:*:*".to_string()],
-        }]);
-
-        assert!(
-            resolver
-                .check(
-                    &["test:group:550e8400-e29b-41d4-a716-446655440010".to_string()],
-                    "qa/test",
-                    OciAction::Create
-                )
-                .is_ok()
-        );
-        assert!(
-            resolver
-                .check(
-                    &["registry_admins@localhost".to_string()],
-                    "qa/test",
-                    OciAction::Create
-                )
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn exact_group_id_does_not_match_other_ids() {
-        assert!(group_matches(
-            "test:group:550e8400-e29b-41d4-a716-446655440010",
-            "test:group:550e8400-e29b-41d4-a716-446655440010"
-        ));
-        assert!(!group_matches(
-            "test:group:550e8400-e29b-41d4-a716-446655440010",
-            "test:group:550e8400-e29b-41d4-a716-446655440011"
-        ));
     }
 
     #[test]

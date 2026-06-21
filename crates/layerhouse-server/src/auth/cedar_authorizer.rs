@@ -1,6 +1,6 @@
 use cedar_policy::{
-    Authorizer as CedarAuthorizer, Context, Decision, Entities, EntityUid, PolicySet, Request,
-    Schema, ValidationMode, Validator,
+    Authorizer as CedarPolicyAuthorizer, Context, Decision, Entities, EntityUid, PolicySet,
+    Request, Schema, ValidationMode, Validator,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -16,7 +16,7 @@ use crate::store::metadata::{
 use super::AuthService;
 use super::principal::{PrincipalKind, ProviderQualifiedId};
 
-const SHADOW_SCHEMA: CedarSchemaSource<'static> = CedarSchemaSource(
+const AUTHORIZATION_SCHEMA: CedarSchemaSource<'static> = CedarSchemaSource(
     r#"
 entity Group;
 entity User in [Group];
@@ -49,13 +49,13 @@ struct CedarSchemaSource<'a>(&'a str);
 impl CedarSchemaSource<'_> {
     fn parse(self) -> Result<Schema, String> {
         let (schema, warnings) = Schema::from_cedarschema_str(self.0)
-            .map_err(|err| format!("invalid Cedar shadow schema: {err}"))?;
+            .map_err(|err| format!("invalid Cedar authorization schema: {err}"))?;
         let warnings = warnings.collect::<Vec<_>>();
         if warnings.is_empty() {
             Ok(schema)
         } else {
             Err(format!(
-                "invalid Cedar shadow schema: {} warning(s)",
+                "invalid Cedar authorization schema: {} warning(s)",
                 warnings.len()
             ))
         }
@@ -70,13 +70,13 @@ impl CedarPolicySource<'_> {
         let policy_set = self
             .0
             .parse::<PolicySet>()
-            .map_err(|err| format!("invalid Cedar shadow policy: {err}"))?;
+            .map_err(|err| format!("invalid Cedar authorization policy: {err}"))?;
         let validation =
             Validator::new(schema.clone()).validate(&policy_set, ValidationMode::Strict);
         if validation.validation_passed() {
             Ok(policy_set)
         } else {
-            Err(format!("invalid Cedar shadow policy: {validation}"))
+            Err(format!("invalid Cedar authorization policy: {validation}"))
         }
     }
 }
@@ -462,7 +462,7 @@ impl CedarEntitySet {
         }
 
         Entities::from_json_value(Value::Array(entities), Some(schema))
-            .map_err(|err| format!("invalid Cedar shadow entities: {err}"))
+            .map_err(|err| format!("invalid Cedar authorization entities: {err}"))
     }
 }
 
@@ -470,9 +470,9 @@ fn anonymous_entity_set(resource: CedarResource) -> CedarEntitySet {
     CedarEntitySet::new(CedarPrincipal::anonymous()).with_resource(resource)
 }
 
-pub(crate) struct CedarShadowAuthorizer;
+pub(crate) struct CedarRepositoryAuthorizer;
 
-impl CedarShadowAuthorizer {
+impl CedarRepositoryAuthorizer {
     pub(crate) fn new() -> Self {
         Self
     }
@@ -483,8 +483,8 @@ impl CedarShadowAuthorizer {
         request: &AuthzRequest,
         namespaces: &dyn NamespaceStore,
     ) -> Result<AuthzDecision, String> {
-        let policy = shadow_policy_for_request(auth, request, namespaces).await?;
-        Ok(to_authz_decision(shadow_decision(
+        let policy = policy_for_request(auth, request, namespaces).await?;
+        Ok(to_authz_decision(cedar_decision(
             CedarPolicySource(&policy),
             request,
         )))
@@ -523,7 +523,7 @@ impl CedarShadowAuthorizer {
             }
         }
 
-        Ok(to_authz_decision(public_shadow_decision(
+        Ok(to_authz_decision(public_cedar_decision(
             CedarPolicySource(&policy),
             OciAction::Pull,
             &resource,
@@ -538,7 +538,7 @@ impl CedarShadowAuthorizer {
         repository: &str,
         namespaces: &dyn NamespaceStore,
     ) -> Result<Option<OciAction>, String> {
-        let resource = repository_resource_for_shadow(repository, namespaces).await?;
+        let resource = repository_resource_for_authorization(repository, namespaces).await?;
         let mut max = None;
         for action in [
             OciAction::Pull,
@@ -560,7 +560,7 @@ impl CedarShadowAuthorizer {
     }
 }
 
-async fn repository_resource_for_shadow(
+async fn repository_resource_for_authorization(
     repository: &str,
     namespaces: &dyn NamespaceStore,
 ) -> Result<Option<RepositoryResource>, String> {
@@ -586,21 +586,27 @@ fn to_authz_decision(decision: Decision) -> AuthzDecision {
     }
 }
 
-fn shadow_decision(policy_src: CedarPolicySource<'_>, request: &AuthzRequest) -> Decision {
-    shadow_decision_with_schema(SHADOW_SCHEMA, policy_src, request).unwrap_or(Decision::Deny)
+fn cedar_decision(policy_src: CedarPolicySource<'_>, request: &AuthzRequest) -> Decision {
+    cedar_decision_with_schema(AUTHORIZATION_SCHEMA, policy_src, request).unwrap_or(Decision::Deny)
 }
 
-fn public_shadow_decision(
+fn public_cedar_decision(
     policy_src: CedarPolicySource<'_>,
     action: OciAction,
     resource: &CedarResource,
     repository: &str,
 ) -> Decision {
-    public_shadow_decision_with_schema(SHADOW_SCHEMA, policy_src, action, resource, repository)
-        .unwrap_or(Decision::Deny)
+    public_cedar_decision_with_schema(
+        AUTHORIZATION_SCHEMA,
+        policy_src,
+        action,
+        resource,
+        repository,
+    )
+    .unwrap_or(Decision::Deny)
 }
 
-fn public_shadow_decision_with_schema(
+fn public_cedar_decision_with_schema(
     schema_src: CedarSchemaSource<'_>,
     policy_src: CedarPolicySource<'_>,
     action: OciAction,
@@ -627,7 +633,7 @@ fn public_shadow_decision_with_schema(
         ),
         Some((&schema, &action_uid)),
     )
-    .map_err(|err| format!("invalid Cedar shadow context: {err}"))?;
+    .map_err(|err| format!("invalid Cedar authorization context: {err}"))?;
     let request = Request::new(
         principal_uid,
         action_uid,
@@ -635,14 +641,14 @@ fn public_shadow_decision_with_schema(
         context,
         Some(&schema),
     )
-    .map_err(|err| format!("invalid Cedar shadow request: {err}"))?;
+    .map_err(|err| format!("invalid Cedar authorization request: {err}"))?;
 
-    Ok(CedarAuthorizer::new()
+    Ok(CedarPolicyAuthorizer::new()
         .is_authorized(&request, &policy_set, &entities)
         .decision())
 }
 
-fn shadow_decision_with_schema(
+fn cedar_decision_with_schema(
     schema_src: CedarSchemaSource<'_>,
     policy_src: CedarPolicySource<'_>,
     request: &AuthzRequest,
@@ -656,11 +662,11 @@ fn shadow_decision_with_schema(
     if unclaimed_write(request) {
         return Ok(Decision::Deny);
     }
-    if permissions::in_personal_namespace(request.actor.username.as_deref(), &request.repository) {
-        return Ok(Decision::Allow);
-    }
     if !explicit_scope_guard_allows(request) {
         return Ok(Decision::Deny);
+    }
+    if permissions::in_personal_namespace(request.actor.username.as_deref(), &request.repository) {
+        return Ok(Decision::Allow);
     }
 
     let resource = CedarResource::from_request(request);
@@ -669,7 +675,7 @@ fn shadow_decision_with_schema(
     let action_uid = CedarAction::from_oci(request.action).entity_uid()?;
     let resource_uid = resource.entity_uid()?;
     let context = Context::from_json_value(context_json(request), Some((&schema, &action_uid)))
-        .map_err(|err| format!("invalid Cedar shadow context: {err}"))?;
+        .map_err(|err| format!("invalid Cedar authorization context: {err}"))?;
     let request = Request::new(
         principal_uid,
         action_uid,
@@ -677,14 +683,14 @@ fn shadow_decision_with_schema(
         context,
         Some(&schema),
     )
-    .map_err(|err| format!("invalid Cedar shadow request: {err}"))?;
+    .map_err(|err| format!("invalid Cedar authorization request: {err}"))?;
 
-    Ok(CedarAuthorizer::new()
+    Ok(CedarPolicyAuthorizer::new()
         .is_authorized(&request, &policy_set, &entities)
         .decision())
 }
 
-async fn shadow_policy_for_request(
+async fn policy_for_request(
     auth: &AuthService,
     request: &AuthzRequest,
     namespaces: &dyn NamespaceStore,
@@ -1016,7 +1022,7 @@ mod tests {
     const BUILDER_GROUP_ID: &str = "550e8400-e29b-41d4-a716-446655440001";
     const CI_GROUP_ID: &str = "550e8400-e29b-41d4-a716-446655440002";
 
-    const SHADOW_POLICY: CedarPolicySource<'static> = CedarPolicySource(
+    const TEST_POLICY: CedarPolicySource<'static> = CedarPolicySource(
         r#"
 permit(
     principal == User::"test:user:subject-owner",
@@ -1098,35 +1104,36 @@ permit(
             .expect("grant should persist");
     }
 
-    async fn parity_decision(
+    async fn enforced_decision(
         auth: &AuthService,
         identity: &AuthIdentity,
         repository: &str,
         action: OciAction,
         store: &InMemoryMetadataStore,
-    ) -> (AuthzDecision, AuthzDecision) {
-        let authorization = auth
-            .authorize_repository(identity, repository, action, store)
+    ) -> AuthzDecision {
+        let (_, resource) = auth
+            .repository_resource_context(repository, action, store)
             .await
-            .expect("compatibility authorization should evaluate");
+            .expect("authorization context should evaluate");
         let request = AuthzRequest {
             actor: identity.actor(),
             repository: repository.to_string(),
-            resource: authorization.resource,
+            resource,
             action,
         };
-        let compat = auth
+        let service = auth
             .authorize(&request, store)
             .await
-            .expect("compatibility authorizer should evaluate request");
-        let cedar = CedarShadowAuthorizer::new()
+            .expect("AuthService should evaluate request");
+        let cedar = CedarRepositoryAuthorizer::new()
             .authorize(auth, &request, store)
             .await
-            .expect("Cedar shadow authorizer should evaluate request");
-        (compat, cedar)
+            .expect("Cedar authorizer should evaluate request");
+        assert_eq!(service, cedar);
+        service
     }
 
-    async fn assert_parity(
+    async fn assert_enforced(
         auth: &AuthService,
         identity: &AuthIdentity,
         repository: &str,
@@ -1134,9 +1141,8 @@ permit(
         store: &InMemoryMetadataStore,
         expected: AuthzDecision,
     ) {
-        let (compat, cedar) = parity_decision(auth, identity, repository, action, store).await;
-        assert_eq!(compat, expected);
-        assert_eq!(cedar, expected);
+        let actual = enforced_decision(auth, identity, repository, action, store).await;
+        assert_eq!(actual, expected);
     }
 
     fn request_for_fixture(
@@ -1212,11 +1218,11 @@ permit(
     }
 
     #[test]
-    fn cedar_schema_validates_shadow_policy() {
-        let schema = SHADOW_SCHEMA.parse().expect("schema should parse");
-        SHADOW_POLICY
+    fn cedar_schema_validates_authorization_policy() {
+        let schema = AUTHORIZATION_SCHEMA.parse().expect("schema should parse");
+        TEST_POLICY
             .parse(&schema)
-            .expect("shadow policy should validate against schema");
+            .expect("policy should validate against schema");
     }
 
     #[test]
@@ -1243,7 +1249,7 @@ permit(
     }
 
     #[test]
-    fn cedar_shadow_inputs_exclude_display_group_names() {
+    fn cedar_authorizer_inputs_exclude_display_group_names() {
         let groups = vec![
             STABLE_GROUP_ID.to_string(),
             "registry_admins".to_string(),
@@ -1261,7 +1267,7 @@ permit(
     }
 
     #[test]
-    fn cedar_shadow_authorizes_owner_and_stable_group_grants() {
+    fn cedar_authorizer_authorizes_owner_and_stable_group_grants() {
         let epoch = NamespaceEpoch::new("acme", 1);
         let repository = CedarRepository::new(&epoch, "app");
         let owner = CedarPrincipal::user("test", "subject-owner").unwrap();
@@ -1270,10 +1276,7 @@ permit(
 
         let owner_request =
             request_for_fixture(owner, Vec::new(), repository.clone(), OciAction::Delete);
-        assert_eq!(
-            shadow_decision(SHADOW_POLICY, &owner_request),
-            Decision::Allow
-        );
+        assert_eq!(cedar_decision(TEST_POLICY, &owner_request), Decision::Allow);
 
         let builder_pull = request_for_fixture(
             builder.clone(),
@@ -1289,32 +1292,26 @@ permit(
         );
         let builder_update =
             request_for_fixture(builder, vec![group], repository.clone(), OciAction::Update);
+        assert_eq!(cedar_decision(TEST_POLICY, &builder_pull), Decision::Allow);
         assert_eq!(
-            shadow_decision(SHADOW_POLICY, &builder_pull),
+            cedar_decision(TEST_POLICY, &builder_create),
             Decision::Allow
         );
-        assert_eq!(
-            shadow_decision(SHADOW_POLICY, &builder_create),
-            Decision::Allow
-        );
-        assert_eq!(
-            shadow_decision(SHADOW_POLICY, &builder_update),
-            Decision::Deny
-        );
+        assert_eq!(cedar_decision(TEST_POLICY, &builder_update), Decision::Deny);
     }
 
     #[test]
-    fn cedar_shadow_denies_display_group_name_without_stable_group_parent() {
+    fn cedar_authorizer_denies_display_group_name_without_stable_group_parent() {
         let epoch = NamespaceEpoch::new("acme", 1);
         let repository = CedarRepository::new(&epoch, "app");
         let actor = CedarPrincipal::user("test", "subject-display-only").unwrap();
         let request = request_for_fixture(actor, Vec::new(), repository, OciAction::Create);
 
-        assert_eq!(shadow_decision(SHADOW_POLICY, &request), Decision::Deny);
+        assert_eq!(cedar_decision(TEST_POLICY, &request), Decision::Deny);
     }
 
     #[test]
-    fn cedar_shadow_repository_ids_are_namespace_generation_aware() {
+    fn cedar_authorizer_repository_ids_are_namespace_generation_aware() {
         let old_epoch = NamespaceEpoch::new("acme", 1);
         let new_epoch = NamespaceEpoch::new("acme", 2);
         let old_repository = CedarRepository::new(&old_epoch, "app");
@@ -1324,28 +1321,25 @@ permit(
             request_for_fixture(owner.clone(), Vec::new(), old_repository, OciAction::Create);
         let new_request = request_for_fixture(owner, Vec::new(), new_repository, OciAction::Create);
 
-        assert_eq!(
-            shadow_decision(SHADOW_POLICY, &old_request),
-            Decision::Allow
-        );
-        assert_eq!(shadow_decision(SHADOW_POLICY, &new_request), Decision::Deny);
+        assert_eq!(cedar_decision(TEST_POLICY, &old_request), Decision::Allow);
+        assert_eq!(cedar_decision(TEST_POLICY, &new_request), Decision::Deny);
     }
 
     #[test]
-    fn cedar_shadow_setup_failures_fail_closed() {
+    fn cedar_authorizer_setup_failures_fail_closed() {
         let epoch = NamespaceEpoch::new("acme", 1);
         let repository = CedarRepository::new(&epoch, "app");
         let owner = CedarPrincipal::user("test", "subject-owner").unwrap();
         let request = request_for_fixture(owner, Vec::new(), repository, OciAction::Create);
 
         assert_eq!(
-            shadow_decision(CedarPolicySource("not cedar policy"), &request),
+            cedar_decision(CedarPolicySource("not cedar policy"), &request),
             Decision::Deny
         );
         assert_eq!(
-            shadow_decision_with_schema(
+            cedar_decision_with_schema(
                 CedarSchemaSource("not cedar schema"),
-                SHADOW_POLICY,
+                TEST_POLICY,
                 &request,
             )
             .unwrap_or(Decision::Deny),
@@ -1354,13 +1348,13 @@ permit(
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_owner_allows_and_non_owner_denies() {
+    async fn cedar_enforcement_owner_allows_and_non_owner_denies() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-alice"))).await;
 
         let alice = identity("subject-alice", TokenType::OidcAccess, &[], &[]);
-        assert_parity(
+        assert_enforced(
             &auth,
             &alice,
             "acme/app",
@@ -1371,7 +1365,7 @@ permit(
         .await;
 
         let bob = identity("subject-bob", TokenType::OidcAccess, &[], &[]);
-        assert_parity(
+        assert_enforced(
             &auth,
             &bob,
             "acme/app",
@@ -1383,7 +1377,7 @@ permit(
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_namespace_group_grant_ladder() {
+    async fn cedar_enforcement_namespace_group_grant_ladder() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
@@ -1404,7 +1398,7 @@ permit(
             &[BUILDER_GROUP_ID],
             &[],
         );
-        assert_parity(
+        assert_enforced(
             &auth,
             &builder,
             "acme/app",
@@ -1413,7 +1407,7 @@ permit(
             AuthzDecision::Allow,
         )
         .await;
-        assert_parity(
+        assert_enforced(
             &auth,
             &builder,
             "acme/app",
@@ -1422,7 +1416,7 @@ permit(
             AuthzDecision::Allow,
         )
         .await;
-        assert_parity(
+        assert_enforced(
             &auth,
             &builder,
             "acme/app",
@@ -1434,7 +1428,7 @@ permit(
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_display_group_labels_deny() {
+    async fn cedar_enforcement_display_group_labels_deny() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
@@ -1455,7 +1449,7 @@ permit(
             &["registry_builders"],
             &[],
         );
-        assert_parity(
+        assert_enforced(
             &auth,
             &display_only,
             "acme/app",
@@ -1467,7 +1461,7 @@ permit(
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_config_rbac_stable_group_allows() {
+    async fn cedar_enforcement_config_rbac_stable_group_allows() {
         let auth = AuthService::for_test(vec![PermissionMapping {
             name: "ci".to_string(),
             groups: vec![format!("test:group:{CI_GROUP_ID}")],
@@ -1477,7 +1471,7 @@ permit(
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
 
         let ci = identity("subject-ci", TokenType::OidcAccess, &[CI_GROUP_ID], &[]);
-        assert_parity(
+        assert_enforced(
             &auth,
             &ci,
             "acme/app",
@@ -1489,7 +1483,7 @@ permit(
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_config_rbac_display_mapping_denies() {
+    async fn cedar_enforcement_config_rbac_display_mapping_denies() {
         let auth = AuthService::for_test(vec![PermissionMapping {
             name: "admins".to_string(),
             groups: vec!["registry_admins".to_string()],
@@ -1504,7 +1498,7 @@ permit(
             &["registry_admins"],
             &[],
         );
-        assert_parity(
+        assert_enforced(
             &auth,
             &admin,
             "acme/app",
@@ -1516,7 +1510,7 @@ permit(
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_admin_global_access_uses_registry_resource() {
+    async fn cedar_enforcement_admin_global_access_uses_registry_resource() {
         let auth = AuthService::for_test(vec![PermissionMapping {
             name: "admin".to_string(),
             groups: vec![format!("test:group:{CI_GROUP_ID}")],
@@ -1527,22 +1521,22 @@ permit(
 
         auth.check_admin_access(&admin, &store)
             .await
-            .expect("compatibility authorizer allows admin access");
+            .expect("Cedar authorizer allows admin access");
         let request = AuthzRequest {
             actor: admin.actor(),
             repository: "*".to_string(),
             resource: None,
             action: OciAction::Delete,
         };
-        let cedar = CedarShadowAuthorizer::new()
+        let cedar = CedarRepositoryAuthorizer::new()
             .authorize(&auth, &request, &store)
             .await
-            .expect("Cedar shadow authorizer should evaluate admin request");
+            .expect("Cedar authorizer should evaluate admin request");
         assert_eq!(cedar, AuthzDecision::Allow);
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_unclaimed_pull_allowed_but_write_guarded() {
+    async fn cedar_enforcement_unclaimed_pull_allowed_but_write_guarded() {
         let auth = AuthService::for_test(vec![PermissionMapping {
             name: "ci".to_string(),
             groups: vec![format!("test:group:{CI_GROUP_ID}")],
@@ -1551,7 +1545,7 @@ permit(
         let store = InMemoryMetadataStore::default();
         let ci = identity("subject-ci", TokenType::OidcAccess, &[CI_GROUP_ID], &[]);
 
-        assert_parity(
+        assert_enforced(
             &auth,
             &ci,
             "acme/app",
@@ -1563,22 +1557,22 @@ permit(
 
         auth.check_permission(&ci, "acme/app", OciAction::Create, &store)
             .await
-            .expect_err("compatibility authorizer denies unclaimed writes before RBAC");
+            .expect_err("Cedar authorizer denies unclaimed writes before policy");
         let request = AuthzRequest {
             actor: ci.actor(),
             repository: "acme/app".to_string(),
             resource: None,
             action: OciAction::Create,
         };
-        let cedar = CedarShadowAuthorizer::new()
+        let cedar = CedarRepositoryAuthorizer::new()
             .authorize(&auth, &request, &store)
             .await
-            .expect("Cedar shadow authorizer should evaluate unclaimed write");
+            .expect("Cedar authorizer should evaluate unclaimed write");
         assert_eq!(cedar, AuthzDecision::Deny);
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_scope_epoch_ceiling_denies_overbroad_policy() {
+    async fn cedar_enforcement_scope_epoch_ceiling_denies_overbroad_policy() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
@@ -1590,7 +1584,7 @@ permit(
             &["repository:acme/app:pull"],
         );
         pat.namespace_epochs = vec![NamespaceEpoch::new("acme", 1)];
-        assert_parity(
+        assert_enforced(
             &auth,
             &pat,
             "acme/app",
@@ -1617,7 +1611,7 @@ permit(
             &["repository:acme/app:create"],
         );
         stale_bearer.namespace_epochs = vec![NamespaceEpoch::new("acme", 1)];
-        assert_parity(
+        assert_enforced(
             &auth,
             &stale_bearer,
             "acme/app",
@@ -1629,7 +1623,65 @@ permit(
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_public_grant_is_pull_only() {
+    async fn cedar_enforcement_scoped_tokens_do_not_escape_own_personal_namespace() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+
+        let mut pat = identity(
+            "subject-alice",
+            TokenType::PersonalAccess,
+            &[],
+            &["repository:users/alice/app:pull"],
+        );
+        pat.username = Some("alice".to_string());
+        assert_enforced(
+            &auth,
+            &pat,
+            "users/alice/app",
+            OciAction::Pull,
+            &store,
+            AuthzDecision::Allow,
+        )
+        .await;
+        assert_enforced(
+            &auth,
+            &pat,
+            "users/alice/app",
+            OciAction::Create,
+            &store,
+            AuthzDecision::Deny,
+        )
+        .await;
+        assert_enforced(
+            &auth,
+            &pat,
+            "users/alice/other",
+            OciAction::Pull,
+            &store,
+            AuthzDecision::Deny,
+        )
+        .await;
+
+        let mut bearer = identity(
+            "subject-alice",
+            TokenType::OciBearer,
+            &[],
+            &["repository:users/alice/app:pull"],
+        );
+        bearer.username = Some("alice".to_string());
+        assert_enforced(
+            &auth,
+            &bearer,
+            "users/alice/app",
+            OciAction::Create,
+            &store,
+            AuthzDecision::Deny,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cedar_enforcement_public_grant_is_pull_only() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
@@ -1643,7 +1695,7 @@ permit(
         .await;
 
         let bob = identity("subject-bob", TokenType::OidcAccess, &[], &[]);
-        assert_parity(
+        assert_enforced(
             &auth,
             &bob,
             "acme/app",
@@ -1652,7 +1704,7 @@ permit(
             AuthzDecision::Allow,
         )
         .await;
-        assert_parity(
+        assert_enforced(
             &auth,
             &bob,
             "acme/app",
@@ -1664,11 +1716,11 @@ permit(
 
         auth.check_public_pull("acme/app", &store)
             .await
-            .expect("compatibility authorizer allows anonymous public pull");
-        let cedar_public = CedarShadowAuthorizer::new()
+            .expect("Cedar authorizer allows anonymous public pull");
+        let cedar_public = CedarRepositoryAuthorizer::new()
             .authorize_public_pull("acme/app", &store)
             .await
-            .expect("Cedar shadow authorizer should evaluate public pull");
+            .expect("Cedar authorizer should evaluate public pull");
         assert_eq!(cedar_public, AuthzDecision::Allow);
 
         let private_store = InMemoryMetadataStore::default();
@@ -1678,15 +1730,15 @@ permit(
             Owner::User(Subject::new("subject-owner")),
         )
         .await;
-        let cedar_private = CedarShadowAuthorizer::new()
+        let cedar_private = CedarRepositoryAuthorizer::new()
             .authorize_public_pull("private/app", &private_store)
             .await
-            .expect("Cedar shadow authorizer should evaluate private pull");
+            .expect("Cedar authorizer should evaluate private pull");
         assert_eq!(cedar_private, AuthzDecision::Deny);
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_max_grantable_action_matches_compatibility() {
+    async fn cedar_enforcement_max_grantable_action_matches_direct_cedar() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
@@ -1707,26 +1759,26 @@ permit(
             &[BUILDER_GROUP_ID],
             &[],
         );
-        let (compat, _) = auth
+        let (service_action, _) = auth
             .max_grantable_action(&builder, "acme/app", &store)
             .await
-            .expect("compatibility authorizer should derive max grantable action");
-        let cedar = CedarShadowAuthorizer::new()
+            .expect("AuthService should derive max grantable action");
+        let cedar = CedarRepositoryAuthorizer::new()
             .max_grantable_action(&auth, &builder.actor(), "acme/app", &store)
             .await
-            .expect("Cedar shadow authorizer should derive max grantable action");
-        assert_eq!(compat, OciAction::Create);
-        assert_eq!(cedar, Some(compat));
+            .expect("Cedar authorizer should derive max grantable action");
+        assert_eq!(service_action, OciAction::Create);
+        assert_eq!(cedar, Some(service_action));
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_unclaimed_namespace_write_denied_before_policy() {
+    async fn cedar_enforcement_unclaimed_namespace_write_denied_before_policy() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
         let actor = identity("subject-owner", TokenType::OidcAccess, &[], &[]);
         auth.check_permission(&actor, "acme/app", OciAction::Create, &store)
             .await
-            .expect_err("compatibility authorizer denies unclaimed writes");
+            .expect_err("Cedar authorizer denies unclaimed writes");
 
         let request = AuthzRequest {
             actor: actor.actor(),
@@ -1734,17 +1786,17 @@ permit(
             resource: None,
             action: OciAction::Create,
         };
-        assert_eq!(shadow_decision(SHADOW_POLICY, &request), Decision::Deny);
+        assert_eq!(cedar_decision(TEST_POLICY, &request), Decision::Deny);
     }
 
     #[tokio::test]
-    async fn cedar_shadow_parity_org_owner_does_not_implicitly_allow() {
+    async fn cedar_enforcement_org_owner_does_not_implicitly_allow() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::Org(OrgId::generate())).await;
 
         let actor = identity("subject-owner", TokenType::OidcAccess, &[], &[]);
-        assert_parity(
+        assert_enforced(
             &auth,
             &actor,
             "acme/app",
