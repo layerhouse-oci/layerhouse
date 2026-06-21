@@ -167,14 +167,6 @@ where
             ));
         }
 
-        // Determine the best action for the scope string.
-        let best_action = selection
-            .actions
-            .iter()
-            .max_by_key(|a| permissions::action_rank(**a))
-            .copied()
-            .unwrap_or(OciAction::Pull);
-
         let scope_str = format!(
             "repository:{}:{}",
             repo,
@@ -205,40 +197,6 @@ where
                 }
             }
             record_scope_namespace_epoch(repo, &state.core.metadata, &mut namespace_epochs).await?;
-            // 3. Namespace-pattern ceiling: a namespace pattern scope
-            //    (e.g. "repository:team-a/*") requires a matching grant.
-            if repo.ends_with("/*") {
-                let prefix = repo.strip_suffix("/*").unwrap();
-                if !prefix.is_empty() && prefix != "*" {
-                    let pattern_max =
-                        permissions::max_action_for_namespace_pattern(&identity.scopes, prefix);
-                    match pattern_max {
-                        Some(pm) if permissions::action_matches(pm, best_action) => {
-                            // Actor has a matching grant pattern.
-                        }
-                        _ => {
-                            // Check OIDC group grants too.
-                            let group_ids = identity
-                                .group_ids
-                                .iter()
-                                .map(ToString::to_string)
-                                .collect::<Vec<_>>();
-                            let group_max = state.auth.as_ref().and_then(|a| {
-                                a.max_action_from_groups(&group_ids, &format!("{prefix}/*"))
-                            });
-                            match group_max {
-                                Some(gm) if permissions::action_matches(gm, best_action) => {}
-                                _ => {
-                                    return Err(LayerhouseError::Denied(format!(
-                                        "cannot grant namespace-pattern scope \
-                                         {repo:?}: no matching grant pattern found"
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
 
         scope_strings.push(scope_str);
@@ -451,12 +409,15 @@ async fn record_scope_namespace_epoch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::identity::Subject;
     use crate::auth::token::AuthIdentity;
     use crate::auth::token::TokenType;
     use crate::config::PermissionMapping;
     use crate::routes::test_state_with_auth;
     use crate::store::blob::InMemoryBlobStore;
-    use crate::store::metadata::{InMemoryMetadataStore, ManifestEntry, ManifestStore};
+    use crate::store::metadata::{
+        InMemoryMetadataStore, ManifestEntry, ManifestStore, NamespaceEpoch, NamespaceStore, Owner,
+    };
     use axum::body::Body;
     use axum::http::{Method, Request};
     use tower::ServiceExt;
@@ -464,6 +425,12 @@ mod tests {
     fn identity_with(scopes: Vec<&str>) -> AuthIdentity {
         let mut identity =
             AuthIdentity::for_test("user-1", TokenType::PersonalAccess, &[], &scopes);
+        identity.username = Some("alice".to_string());
+        identity
+    }
+
+    fn session_identity() -> AuthIdentity {
+        let mut identity = AuthIdentity::for_test("user-1", TokenType::OidcAccess, &[], &[]);
         identity.username = Some("alice".to_string());
         identity
     }
@@ -547,9 +514,25 @@ mod tests {
     #[tokio::test]
     async fn create_pat_allows_exact_ceiling() {
         let state = test_state_with_auth(vec![]);
+        state
+            .core
+            .metadata
+            .claim_namespace(
+                "team-a",
+                Owner::User(Subject::new("subject-owner")),
+                "team-a",
+                Subject::new("subject-owner"),
+                true,
+                100,
+            )
+            .await
+            .expect("namespace claim should succeed");
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
 
         // Actor has pull+create; grants exactly create.
+        let mut identity = identity_with(vec!["repository:team-a/worker:pull,create"]);
+        identity.namespace_epochs = vec![NamespaceEpoch::new("team-a", 1)];
+
         let response = app
             .oneshot(post_tokens(
                 serde_json::json!({
@@ -558,7 +541,7 @@ mod tests {
                         {"repository": "team-a/worker", "actions": ["create"]}
                     ]
                 }),
-                Some(identity_with(vec!["repository:team-a/worker:pull,create"])),
+                Some(identity),
             ))
             .await
             .unwrap();
@@ -695,7 +678,7 @@ mod tests {
                         {"repository": "users/alice/app", "actions": ["pull"]}
                     ]
                 }),
-                Some(identity_with(vec![])),
+                Some(session_identity()),
             ))
             .await
             .unwrap();
@@ -915,7 +898,7 @@ mod tests {
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
 
         let response = app
-            .oneshot(get_grantable_scopes("q=users", Some(identity_with(vec![]))))
+            .oneshot(get_grantable_scopes("q=users", Some(session_identity())))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -935,7 +918,11 @@ mod tests {
 
     #[tokio::test]
     async fn grantable_scopes_excludes_cross_user_personal() {
-        let state = test_state_with_auth(vec![]);
+        let state = test_state_with_auth(vec![PermissionMapping {
+            name: "shared-worker".to_string(),
+            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440032".to_string()],
+            scopes: vec!["repository:team-a/worker:*".to_string()],
+        }]);
         seed_repos(
             &state,
             &["users/alice/app", "users/bob/app", "team-a/worker"],
@@ -947,7 +934,10 @@ mod tests {
         let response = app
             .oneshot(get_grantable_scopes(
                 "",
-                Some(identity_with(vec!["repository:team-a/worker:*"])),
+                Some(identity_with_groups(
+                    Vec::new(),
+                    vec!["550e8400-e29b-41d4-a716-446655440032"],
+                )),
             ))
             .await
             .unwrap();

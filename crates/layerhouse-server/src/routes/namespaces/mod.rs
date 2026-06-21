@@ -79,7 +79,7 @@ mod tests {
     fn user_identity() -> AuthIdentity {
         let mut identity = AuthIdentity::for_test(
             "user-1",
-            crate::auth::token::TokenType::PersonalAccess,
+            crate::auth::token::TokenType::OidcAccess,
             &[],
             &[],
         );
@@ -101,7 +101,7 @@ mod tests {
     fn other_user_identity() -> AuthIdentity {
         let mut identity = AuthIdentity::for_test(
             "user-2",
-            crate::auth::token::TokenType::PersonalAccess,
+            crate::auth::token::TokenType::OidcAccess,
             &[],
             &[],
         );
