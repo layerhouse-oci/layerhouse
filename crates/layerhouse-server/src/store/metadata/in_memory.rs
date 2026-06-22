@@ -28,6 +28,7 @@ struct InMemoryState {
     sync_jobs: BTreeMap<String, SyncJob>,
     sync_job_runs: BTreeMap<String, Vec<SyncJobRun>>,
     personal_access_tokens: BTreeMap<String, PersonalAccessToken>,
+    policy_sets: BTreeMap<String, PolicySet>,
     repositories: BTreeMap<String, Repository>,
     namespaces: BTreeMap<String, Namespace>,
     released_handles: BTreeMap<String, ReleasedHandle>,
@@ -806,6 +807,33 @@ impl TokenStore for InMemoryMetadataStore {
             state.personal_access_tokens.remove(id);
         }
         Ok(should_delete)
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl PolicyStore for InMemoryMetadataStore {
+    async fn list_policy_sets(&self) -> Result<Vec<PolicySet>, LayerhouseError> {
+        let state = self.inner.read().await;
+        Ok(state.policy_sets.values().cloned().collect())
+    }
+
+    async fn get_policy_set(&self, id: &str) -> Result<Option<PolicySet>, LayerhouseError> {
+        let state = self.inner.read().await;
+        Ok(state.policy_sets.get(id).cloned())
+    }
+
+    async fn put_policy_set(&self, policy: PolicySet) -> Result<(), LayerhouseError> {
+        crate::auth::cedar_authorizer::validate_policy_text(&policy.cedar_text)
+            .map_err(LayerhouseError::NameInvalid)?;
+        let mut state = self.inner.write().await;
+        state.policy_sets.insert(policy.id.clone(), policy);
+        Ok(())
+    }
+
+    async fn delete_policy_set(&self, id: &str) -> Result<bool, LayerhouseError> {
+        let mut state = self.inner.write().await;
+        Ok(state.policy_sets.remove(id).is_some())
     }
 }
 

@@ -20,7 +20,9 @@ use axum::http::HeaderMap;
 use crate::config::{AuthConfig, CookieSecureMode, S3Config};
 use crate::error::LayerhouseError;
 use crate::store::metadata::handle::{handle_of, is_handle_reserved};
-use crate::store::metadata::{NamespaceEpoch, NamespaceStore, Owner, TokenStore};
+use crate::store::metadata::{
+    AuthorizationStore, NamespaceEpoch, NamespaceStore, Owner, TokenStore,
+};
 
 use self::authorization::{
     AuthorizedRepositoryAccess, Authorizer, AuthzDecision, AuthzRequest, RepositoryResource,
@@ -587,10 +589,10 @@ impl AuthService {
         identity: &AuthIdentity,
         repository: &str,
         action: permissions::OciAction,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<AuthorizedRepositoryAccess, LayerhouseError> {
         let authorization = self
-            .authorize_repository(identity, repository, action, namespaces)
+            .authorize_repository(identity, repository, action, store)
             .await?;
         match authorization.decision {
             AuthzDecision::Allow => Ok(authorization.access),
@@ -639,10 +641,10 @@ impl AuthService {
         identity: &AuthIdentity,
         repository: &str,
         action: permissions::OciAction,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<RepositoryAuthorization, LayerhouseError> {
         let (expected_namespace, resource) = self
-            .repository_resource_context(repository, action, namespaces)
+            .repository_resource_context(repository, action, store)
             .await?;
         let request = AuthzRequest {
             actor: identity.actor(),
@@ -650,9 +652,7 @@ impl AuthService {
             resource: resource.clone(),
             action,
         };
-        let decision = self
-            .cedar_authorization_decision(&request, namespaces)
-            .await;
+        let decision = self.cedar_authorization_decision(&request, store).await;
         Ok(repository_authorization(
             repository,
             action,
@@ -664,9 +664,9 @@ impl AuthService {
     pub async fn check_admin_access(
         &self,
         identity: &AuthIdentity,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<(), LayerhouseError> {
-        self.check_permission(identity, "*", permissions::OciAction::Delete, namespaces)
+        self.check_permission(identity, "*", permissions::OciAction::Delete, store)
             .await?;
         Ok(())
     }
@@ -678,10 +678,10 @@ impl AuthService {
         &self,
         identity: &AuthIdentity,
         repository: &str,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<(permissions::OciAction, permissions::GrantSource), LayerhouseError> {
         let action = match cedar_authorizer::CedarRepositoryAuthorizer::new()
-            .max_grantable_action(self, &identity.actor(), repository, namespaces)
+            .max_grantable_action(self, &identity.actor(), repository, store)
             .await
         {
             Ok(Some(action)) => action,
@@ -704,7 +704,7 @@ impl AuthService {
             }
         };
         let source = self
-            .grant_source_for_authorized_action(identity, repository, action, namespaces)
+            .grant_source_for_authorized_action(identity, repository, action, store)
             .await?;
         Ok((action, source))
     }
@@ -712,11 +712,11 @@ impl AuthService {
     pub async fn check_public_pull(
         &self,
         repository: &str,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<(), LayerhouseError> {
         let _ = handle_of(repository)?;
         let decision = match cedar_authorizer::CedarRepositoryAuthorizer::new()
-            .authorize_public_pull(repository, namespaces)
+            .authorize_public_pull(repository, store)
             .await
         {
             Ok(decision) => decision,
@@ -740,7 +740,7 @@ impl AuthService {
     async fn cedar_authorization_decision(
         &self,
         request: &AuthzRequest,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> AuthzDecision {
         let resource_id = request.resource.as_ref().map(RepositoryResource::entity_id);
         tracing::trace!(
@@ -760,7 +760,7 @@ impl AuthService {
             "Cedar authorizer evaluating request"
         );
         match cedar_authorizer::CedarRepositoryAuthorizer::new()
-            .authorize(self, request, namespaces)
+            .authorize(self, request, store)
             .await
         {
             Ok(decision) => {
@@ -900,9 +900,9 @@ impl Authorizer for AuthService {
     async fn authorize(
         &self,
         request: &AuthzRequest,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<AuthzDecision, LayerhouseError> {
-        Ok(self.cedar_authorization_decision(request, namespaces).await)
+        Ok(self.cedar_authorization_decision(request, store).await)
     }
 }
 

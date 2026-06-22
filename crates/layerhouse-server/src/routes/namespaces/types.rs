@@ -8,8 +8,8 @@ use crate::auth::token::AuthIdentity;
 use crate::error::LayerhouseError;
 use crate::routes::AppState;
 use crate::store::metadata::{
-    NamespaceGrant, NamespaceGrantAuditEvent, NamespaceGrantAuditOperation, NamespaceGrantGrantee,
-    NamespaceStore, ObservedIdentity, Owner,
+    AuthorizationStore, NamespaceGrant, NamespaceGrantAuditEvent, NamespaceGrantAuditOperation,
+    NamespaceGrantGrantee, ObservedIdentity, Owner,
 };
 
 #[derive(Debug, Deserialize)]
@@ -219,7 +219,7 @@ pub(crate) fn observed_identity_response(identity: &ObservedIdentity) -> Observe
     }
 }
 
-pub(crate) async fn require_admin<M: NamespaceStore, B>(
+pub(crate) async fn require_admin<M: AuthorizationStore, B>(
     state: &Arc<AppState<M, B>>,
     identity: &AuthIdentity,
 ) -> Result<(), LayerhouseError> {

@@ -44,6 +44,8 @@ plus additional admin and dashboard APIs.
 | `POST` | `/api/v1/admin/cluster/leave` | Leave cluster |
 | `DELETE` | `/api/v1/admin/cluster/members/<id>` | Remove member |
 | `GET` | `/api/v1/admin/gc/status` | GC status |
+| `GET` | `/api/v1/admin/policies` | List Cedar policy sets |
+| `GET/PUT/DELETE` | `/api/v1/admin/policies/<id>` | Cedar policy set CRUD |
 | `GET/PUT/DELETE` | `/api/v1/admin/mirror/rules/*` | Mirror rule CRUD |
 | `GET/PUT/DELETE` | `/api/v1/admin/proxy-cache/*` | Proxy cache CRUD |
 | `GET/PUT/DELETE` | `/api/v1/admin/mirror/warm/*` | Warm image CRUD |

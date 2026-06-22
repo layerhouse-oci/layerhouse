@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::LayerhouseError;
-use crate::store::metadata::NamespaceStore;
+use crate::store::metadata::AuthorizationStore;
 use crate::store::metadata::handle::handle_of;
 use crate::store::metadata::{Namespace, NamespaceEpoch};
 
@@ -112,7 +112,7 @@ pub trait Authorizer {
     async fn authorize(
         &self,
         request: &AuthzRequest,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<AuthzDecision, LayerhouseError>;
 }
 

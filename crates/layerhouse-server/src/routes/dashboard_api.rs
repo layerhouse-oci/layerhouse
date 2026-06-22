@@ -15,7 +15,7 @@ use crate::oci::digest::Digest;
 use crate::raft::membership;
 use crate::store::blob::BlobStore;
 use crate::store::metadata::{
-    DeleteCounts, ManifestStore, ManifestSummary, NamespaceEpoch, NamespaceStore, Repository,
+    AuthorizationStore, DeleteCounts, ManifestStore, ManifestSummary, NamespaceEpoch, Repository,
     RepositoryStore, Visibility,
 };
 
@@ -24,7 +24,7 @@ use super::{AppState, percent_decode};
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 200;
 
-pub fn routes<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>()
+pub fn routes<M: ManifestStore + RepositoryStore + AuthorizationStore, B: BlobStore>()
 -> Router<Arc<AppState<M, B>>> {
     Router::new()
         .route(
@@ -203,7 +203,10 @@ fn parse_rfc3339_epoch(value: &str, field: &str) -> Result<u64, LayerhouseError>
         .map_err(|_| LayerhouseError::NameInvalid(format!("{} must be after 1970-01-01", field)))
 }
 
-async fn repository_dispatch<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
+async fn repository_dispatch<
+    M: ManifestStore + RepositoryStore + AuthorizationStore,
+    B: BlobStore,
+>(
     State(state): State<Arc<AppState<M, B>>>,
     Path(path): Path<String>,
     req: Request<Body>,
@@ -215,7 +218,7 @@ async fn repository_dispatch<M: ManifestStore + RepositoryStore + NamespaceStore
 }
 
 async fn repository_dispatch_result<
-    M: ManifestStore + RepositoryStore + NamespaceStore,
+    M: ManifestStore + RepositoryStore + AuthorizationStore,
     B: BlobStore,
 >(
     state: Arc<AppState<M, B>>,
@@ -316,7 +319,7 @@ async fn repository_dispatch_result<
     }
 }
 
-async fn list_repositories<M: ManifestStore + NamespaceStore, B: BlobStore>(
+async fn list_repositories<M: ManifestStore + AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Query(query): Query<RepositoryQuery>,
@@ -450,7 +453,10 @@ struct CreateRepositoryRequest {
 /// pushed. Requires `Create` permission on the target path; the personal
 /// namespace (`users/<username>/*`) grants this implicitly. The caller subject
 /// is recorded as `created_by`.
-async fn create_repository<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
+async fn create_repository<
+    M: ManifestStore + RepositoryStore + AuthorizationStore,
+    B: BlobStore,
+>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Json(req): Json<CreateRepositoryRequest>,
@@ -513,7 +519,7 @@ async fn require_delete_permission(
     auth: &Option<Arc<crate::auth::AuthService>>,
     identity: Option<&Extension<crate::auth::token::AuthIdentity>>,
     name: &str,
-    namespaces: &dyn NamespaceStore,
+    namespaces: &dyn AuthorizationStore,
 ) -> Result<Option<NamespaceEpoch>, LayerhouseError> {
     let Some(auth) = auth.as_ref() else {
         return Ok(None);
@@ -735,7 +741,7 @@ async fn list_manifests<M: ManifestStore, B: BlobStore>(
     )
 }
 
-async fn get_manifest<M: ManifestStore + NamespaceStore, B: BlobStore>(
+async fn get_manifest<M: ManifestStore + AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     Path((name, digest)): Path<(String, String)>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
@@ -797,7 +803,7 @@ async fn get_raw_manifest<M: ManifestStore, B: BlobStore>(
     Ok(Json(body))
 }
 
-async fn delete_tag<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
+async fn delete_tag<M: ManifestStore + RepositoryStore + AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path((name, digest, tag)): Path<(String, String, String)>,
@@ -823,7 +829,7 @@ async fn delete_tag<M: ManifestStore + RepositoryStore + NamespaceStore, B: Blob
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn delete_manifest<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
+async fn delete_manifest<M: ManifestStore + RepositoryStore + AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path((name, digest)): Path<(String, String)>,
@@ -851,7 +857,7 @@ async fn delete_manifest<M: ManifestStore + RepositoryStore + NamespaceStore, B:
 }
 
 async fn batch_delete_manifests<
-    M: ManifestStore + RepositoryStore + NamespaceStore,
+    M: ManifestStore + RepositoryStore + AuthorizationStore,
     B: BlobStore,
 >(
     State(state): State<Arc<AppState<M, B>>>,
@@ -888,7 +894,10 @@ async fn batch_delete_manifests<
     Ok(Json(counts))
 }
 
-async fn delete_repository<M: ManifestStore + RepositoryStore + NamespaceStore, B: BlobStore>(
+async fn delete_repository<
+    M: ManifestStore + RepositoryStore + AuthorizationStore,
+    B: BlobStore,
+>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<crate::auth::token::AuthIdentity>>,
     Path(name): Path<String>,

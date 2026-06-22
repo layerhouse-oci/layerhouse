@@ -361,7 +361,7 @@ impl NamespaceGrantGrantee {
 }
 
 /// Namespace-scoped permission grant. These grants are owner/admin-managed and
-/// separate from global config/Raft `PermissionRule` RBAC mappings.
+/// separate from global config/Raft Cedar policy sets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceGrant {
     pub id: String,
@@ -520,38 +520,32 @@ pub struct Repository {
     pub created_at: u64,
 }
 
-/// Where a permission rule came from. `Config` rules are loaded from
-/// `[[auth.permissions]]` at startup and are read-only at runtime; `Raft`
-/// rules are created through the dashboard and persisted via consensus, so
-/// they are editable. OIDC-sourced bindings (Phase 3) are also read-only.
+/// Where a Cedar policy set came from. Builtin/config policies are
+/// operator-controlled; Raft policies are editable through Layerhouse APIs and
+/// replicated by consensus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum RuleSource {
-    #[default]
+pub enum PolicySource {
+    Builtin,
     Config,
+    #[default]
     Raft,
-    Oidc,
 }
 
-/// A path-based permission grant binding groups to an action on a repository
-/// path pattern. First-class so admins can edit Raft-sourced rules through the
-/// dashboard. Phase 1 defines the shape and persists an empty collection; the
-/// editing flow and enforcement-from-Raft land in Phase 3.
+/// A Cedar policy document persisted as metadata. Authorization evaluates all
+/// enabled policy sets together with builtin namespace/grant/scope policies;
+/// invalid Cedar is rejected before it can be committed to Raft.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PermissionRule {
+pub struct PolicySet {
     pub id: String,
-    #[serde(default)]
     pub name: String,
-    #[serde(default)]
-    pub groups: Vec<String>,
-    /// Scope strings (`repository:<pattern>:<action>`), same vocabulary as
-    /// `[[auth.permissions]]` config and PAT scopes.
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    #[serde(default)]
-    pub source: RuleSource,
-    #[serde(default)]
+    pub source: PolicySource,
+    pub cedar_text: String,
+    pub enabled: bool,
+    pub created_by: Subject,
+    pub updated_by: Subject,
     pub created_at: u64,
+    pub updated_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

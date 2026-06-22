@@ -1,19 +1,22 @@
 use std::sync::Arc;
 
 use aioduct::ProxyConfig;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use crate::auth::identity::Subject;
+use crate::auth::token::AuthIdentity;
 use crate::error::LayerhouseError;
 use crate::store::blob::BlobStore;
 #[allow(unused_imports)]
 use crate::store::metadata::{
     AdminStore, HelmStore, JobStore, MirrorConfigStore, MirrorRule, MirrorRulePublic,
-    MirrorStrategy, OutboundProxy, OutboundProxyProtocol, ProxyCache, ProxyCachePublic, WarmFilter,
-    WarmImage,
+    MirrorStrategy, OutboundProxy, OutboundProxyProtocol, PolicySet, PolicySource, ProxyCache,
+    ProxyCachePublic, WarmFilter, WarmImage,
 };
 
 use super::AppState;
@@ -26,6 +29,13 @@ struct ListRulesQuery {
 #[derive(Deserialize)]
 struct GetRuleQuery {
     include_secrets: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct PutPolicySetRequest {
+    name: String,
+    cedar_text: String,
+    enabled: Option<bool>,
 }
 
 fn required(value: &str, field: &str) -> Result<(), LayerhouseError> {
@@ -190,8 +200,29 @@ fn validate_proxy_cache(cache: &mut ProxyCache) -> Result<(), LayerhouseError> {
     validate_outbound_proxy(&mut cache.outbound_proxy)
 }
 
+fn policy_actor(identity: Option<Extension<AuthIdentity>>) -> Subject {
+    identity
+        .map(|Extension(identity)| identity.subject)
+        .unwrap_or_else(|| Subject::new("admin-api"))
+}
+
+fn validate_policy_fields(id: &str, req: &PutPolicySetRequest) -> Result<(), LayerhouseError> {
+    required(id, "id")?;
+    required(&req.name, "name")?;
+    required(&req.cedar_text, "cedar_text")?;
+    crate::auth::cedar_authorizer::validate_policy_text(&req.cedar_text)
+        .map_err(LayerhouseError::NameInvalid)
+}
+
 pub fn routes<M: AdminStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
     Router::new()
+        .route("/api/v1/admin/policies", get(list_policy_sets::<M, B>))
+        .route(
+            "/api/v1/admin/policies/{id}",
+            get(get_policy_set::<M, B>)
+                .put(put_policy_set::<M, B>)
+                .delete(delete_policy_set::<M, B>),
+        )
         .route("/api/v1/admin/mirror/rules", get(list_rules::<M, B>))
         .route(
             "/api/v1/admin/mirror/rules/{id}",
@@ -236,6 +267,61 @@ pub fn routes<M: AdminStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
             "/api/v1/admin/helm/charts/{name}/versions",
             get(list_helm_versions::<M, B>),
         )
+}
+
+async fn list_policy_sets<M: AdminStore, B: BlobStore>(
+    State(state): State<Arc<AppState<M, B>>>,
+) -> Result<impl IntoResponse, LayerhouseError> {
+    Ok(Json(state.core.metadata.list_policy_sets().await?))
+}
+
+async fn get_policy_set<M: AdminStore, B: BlobStore>(
+    State(state): State<Arc<AppState<M, B>>>,
+    Path(id): Path<String>,
+) -> Result<Response, LayerhouseError> {
+    match state.core.metadata.get_policy_set(&id).await? {
+        Some(policy) => Ok(Json(policy).into_response()),
+        None => Err(LayerhouseError::NameUnknown(id)),
+    }
+}
+
+async fn put_policy_set<M: AdminStore, B: BlobStore>(
+    State(state): State<Arc<AppState<M, B>>>,
+    identity: Option<Extension<AuthIdentity>>,
+    Path(id): Path<String>,
+    Json(req): Json<PutPolicySetRequest>,
+) -> Result<impl IntoResponse, LayerhouseError> {
+    validate_policy_fields(&id, &req)?;
+    let actor = policy_actor(identity);
+    let existing = state.core.metadata.get_policy_set(&id).await?;
+    let now = crate::store::metadata::now_epoch();
+    let policy = PolicySet {
+        id,
+        name: req.name.trim().to_string(),
+        source: PolicySource::Raft,
+        cedar_text: req.cedar_text,
+        enabled: req.enabled.unwrap_or(true),
+        created_by: existing
+            .as_ref()
+            .map(|policy| policy.created_by.clone())
+            .unwrap_or_else(|| actor.clone()),
+        updated_by: actor,
+        created_at: existing
+            .as_ref()
+            .map(|policy| policy.created_at)
+            .unwrap_or(now),
+        updated_at: now,
+    };
+    state.core.metadata.put_policy_set(policy).await?;
+    Ok(StatusCode::OK)
+}
+
+async fn delete_policy_set<M: AdminStore, B: BlobStore>(
+    State(state): State<Arc<AppState<M, B>>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, LayerhouseError> {
+    state.core.metadata.delete_policy_set(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_rules<M: AdminStore, B: BlobStore>(
@@ -465,8 +551,8 @@ mod tests {
     use crate::store::blob::InMemoryBlobStore;
     use crate::store::metadata::{
         InMemoryMetadataStore, JobStore, MirrorConfigStore, MirrorRule, MirrorStrategy,
-        OutboundProxy, OutboundProxyProtocol, ProxyCache, SyncJob, SyncJobKind, SyncJobRun,
-        SyncRunEventKind, SyncRunStatus,
+        OutboundProxy, OutboundProxyProtocol, PolicyStore, ProxyCache, SyncJob, SyncJobKind,
+        SyncJobRun, SyncRunEventKind, SyncRunStatus,
     };
     use axum::body::Body;
     use std::sync::Arc;
@@ -499,6 +585,136 @@ mod tests {
 
     fn router(state: Arc<AppState<InMemoryMetadataStore, InMemoryBlobStore>>) -> axum::Router {
         routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state)
+    }
+
+    #[tokio::test]
+    async fn put_policy_set_validates_and_persists_raft_policy() {
+        let state = test_state();
+        let app = router(state.clone());
+        let policy = serde_json::json!({
+            "name": "acme readers",
+            "enabled": true,
+            "cedar_text": r#"permit(
+    principal == User::"test:user:subject-alice",
+    action == Action::"pull",
+    resource in Namespace::"acme#1"
+);"#
+        });
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/admin/policies/acme-readers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(policy.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = state
+            .core
+            .metadata
+            .get_policy_set("acme-readers")
+            .await
+            .unwrap()
+            .expect("policy should be saved");
+        assert_eq!(saved.name, "acme readers");
+        assert!(saved.enabled);
+        assert_eq!(saved.source, PolicySource::Raft);
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/admin/policies/acme-readers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["id"], "acme-readers");
+        assert_eq!(value["source"], "raft");
+    }
+
+    #[tokio::test]
+    async fn put_policy_set_rejects_invalid_cedar() {
+        let state = test_state();
+        let app = router(state);
+        let policy = serde_json::json!({
+            "name": "broken",
+            "cedar_text": "not cedar policy"
+        });
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/admin/policies/broken")
+                    .header("content-type", "application/json")
+                    .body(Body::from(policy.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn delete_policy_set_removes_policy() {
+        let state = test_state();
+        state
+            .core
+            .metadata
+            .put_policy_set(PolicySet {
+                id: "old-policy".to_string(),
+                name: "old".to_string(),
+                source: PolicySource::Raft,
+                cedar_text: r#"permit(
+    principal == User::"test:user:subject-alice",
+    action == Action::"pull",
+    resource == Repository::"acme#1/app"
+);"#
+                .to_string(),
+                enabled: true,
+                created_by: Subject::new("subject-admin"),
+                updated_by: Subject::new("subject-admin"),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+        let app = router(state.clone());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/admin/policies/old-policy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            state
+                .core
+                .metadata
+                .get_policy_set("old-policy")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
