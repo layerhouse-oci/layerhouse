@@ -1,8 +1,9 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
-use crate::auth::principal::{PrincipalKind, ProviderId, ProviderQualifiedId};
+use crate::auth::principal::ProviderId;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -57,7 +58,8 @@ pub struct AuthConfig {
     pub jwks_max_stale_seconds: u64,
     pub token_signing_keys: Vec<String>,
     pub session_encryption_key: String,
-    pub permissions: Vec<PermissionMapping>,
+    #[serde(default)]
+    pub policy_sets: Vec<ConfigPolicySet>,
     #[serde(default = "default_cookie_secure_mode")]
     pub cookie_secure_mode: CookieSecureMode,
     #[serde(default = "default_group_claim")]
@@ -135,10 +137,16 @@ impl AuthConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PermissionMapping {
+pub struct ConfigPolicySet {
+    pub id: String,
     pub name: String,
-    pub groups: Vec<String>,
-    pub scopes: Vec<String>,
+    #[serde(default = "default_policy_set_enabled")]
+    pub enabled: bool,
+    pub cedar_text: String,
+}
+
+fn default_policy_set_enabled() -> bool {
+    true
 }
 
 fn default_jwks_refresh_seconds() -> u64 {
@@ -544,33 +552,43 @@ fn validate_auth_config(auth: &AuthConfig) -> Result<(), ConfigError> {
             "auth.group_claim must not be empty".to_string(),
         ));
     }
-    let auth_provider = ProviderId::new(&auth.provider_name)
+    ProviderId::new(&auth.provider_name)
         .map_err(|err| ConfigError::Invalid(format!("auth.provider_name is invalid: {err}")))?;
-    for (mapping_index, mapping) in auth.permissions.iter().enumerate() {
-        for (group_index, group) in mapping.groups.iter().enumerate() {
-            let group_id = ProviderQualifiedId::parse(group).map_err(|err| {
-                ConfigError::Invalid(format!(
-                    "auth.permissions[{mapping_index}].groups[{group_index}] must be a provider-qualified stable group id: {err}"
-                ))
-            })?;
-            if group.as_str() != group_id.as_str() {
-                return Err(ConfigError::Invalid(format!(
-                    "auth.permissions[{mapping_index}].groups[{group_index}] must use canonical provider-qualified form {:?}",
-                    group_id.as_str()
-                )));
-            }
-            if group_id.kind() != PrincipalKind::Group {
-                return Err(ConfigError::Invalid(format!(
-                    "auth.permissions[{mapping_index}].groups[{group_index}] must use principal kind group"
-                )));
-            }
-            if group_id.provider() != auth_provider.as_str() {
-                return Err(ConfigError::Invalid(format!(
-                    "auth.permissions[{mapping_index}].groups[{group_index}] provider must match auth.provider_name {:?}",
-                    auth_provider.as_str()
-                )));
-            }
+    let mut policy_ids = BTreeSet::new();
+    for (policy_index, policy_set) in auth.policy_sets.iter().enumerate() {
+        if policy_set.id.trim().is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "auth.policy_sets[{policy_index}].id must not be empty"
+            )));
         }
+        if policy_set.id != policy_set.id.trim() {
+            return Err(ConfigError::Invalid(format!(
+                "auth.policy_sets[{policy_index}].id must not have surrounding whitespace"
+            )));
+        }
+        if !policy_ids.insert(policy_set.id.as_str()) {
+            return Err(ConfigError::Invalid(format!(
+                "auth.policy_sets[{policy_index}].id {:?} is duplicated",
+                policy_set.id
+            )));
+        }
+        if policy_set.name.trim().is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "auth.policy_sets[{policy_index}].name must not be empty"
+            )));
+        }
+        if policy_set.cedar_text.trim().is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "auth.policy_sets[{policy_index}].cedar_text must not be empty"
+            )));
+        }
+        crate::auth::cedar_authorizer::validate_policy_text(&policy_set.cedar_text).map_err(
+            |err| {
+                ConfigError::Invalid(format!(
+                    "auth.policy_sets[{policy_index}].cedar_text is invalid: {err}"
+                ))
+            },
+        )?;
     }
     if auth.login_scopes.trim().is_empty() {
         return Err(ConfigError::Invalid(
@@ -633,7 +651,7 @@ mod tests {
             jwks_max_stale_seconds: 86_400,
             token_signing_keys: vec![base64::engine::general_purpose::STANDARD.encode(b"signing")],
             session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
-            permissions: Vec::new(),
+            policy_sets: Vec::new(),
             cookie_secure_mode: CookieSecureMode::Auto,
             group_claim: "groups".to_string(),
             login_scopes: "openid profile email groups".to_string(),
@@ -721,7 +739,7 @@ mod tests {
             jwks_max_stale_seconds: 86_400,
             token_signing_keys: vec![base64::engine::general_purpose::STANDARD.encode(b"signing")],
             session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
-            permissions: Vec::new(),
+            policy_sets: Vec::new(),
             cookie_secure_mode: CookieSecureMode::Auto,
             group_claim: "groups".to_string(),
             login_scopes: "openid profile email groups".to_string(),
@@ -761,30 +779,32 @@ mod tests {
     }
 
     #[test]
-    fn auth_permission_groups_must_be_provider_qualified_group_ids() {
+    fn auth_policy_sets_validate_cedar_text() {
         let mut config = base_config();
         let mut auth = base_auth_config();
-        auth.permissions = vec![PermissionMapping {
-            name: "admins".to_string(),
-            groups: vec!["kanidm:group:550e8400-e29b-41d4-a716-446655440000".to_string()],
-            scopes: vec!["repository:*:*".to_string()],
+        auth.policy_sets = vec![ConfigPolicySet {
+            id: "bootstrap-admin".to_string(),
+            name: "Bootstrap admins".to_string(),
+            enabled: true,
+            cedar_text: r#"permit(
+    principal in Group::"kanidm:group:550e8400-e29b-41d4-a716-446655440000",
+    action == Action::"admin",
+    resource == Registry::"root"
+);"#
+            .to_string(),
         }];
         config.auth = Some(auth);
         assert!(config.validate().is_ok());
 
-        config.auth.as_mut().unwrap().permissions[0].groups = vec!["registry_admins".to_string()];
+        config.auth.as_mut().unwrap().policy_sets[0].id = "".to_string();
         assert!(config.validate().is_err());
 
-        config.auth.as_mut().unwrap().permissions[0].groups =
-            vec!["kanidm:user:subject-admin".to_string()];
+        config.auth.as_mut().unwrap().policy_sets[0].id = "bootstrap-admin".to_string();
+        config.auth.as_mut().unwrap().policy_sets[0].cedar_text = "not cedar policy".to_string();
         assert!(config.validate().is_err());
 
-        config.auth.as_mut().unwrap().permissions[0].groups =
-            vec!["other:group:550e8400-e29b-41d4-a716-446655440000".to_string()];
-        assert!(config.validate().is_err());
-
-        config.auth.as_mut().unwrap().permissions[0].groups =
-            vec![" kanidm:group:550e8400-e29b-41d4-a716-446655440000".to_string()];
+        let first = config.auth.as_ref().unwrap().policy_sets[0].clone();
+        config.auth.as_mut().unwrap().policy_sets = vec![first.clone(), first];
         assert!(config.validate().is_err());
     }
 
@@ -809,7 +829,7 @@ mod tests {
             jwks_max_stale_seconds: 86_400,
             token_signing_keys: vec![base64::engine::general_purpose::STANDARD.encode(b"signing")],
             session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
-            permissions: Vec::new(),
+            policy_sets: Vec::new(),
             cookie_secure_mode: CookieSecureMode::Auto,
             group_claim: "groups".to_string(),
             login_scopes: "openid profile email groups".to_string(),

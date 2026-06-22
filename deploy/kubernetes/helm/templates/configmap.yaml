@@ -70,11 +70,14 @@ data:
     {{- if .Values.auth.accessTokenAudience }}
     access_token_audience = {{ .Values.auth.accessTokenAudience | quote }}
     {{- end }}
-    {{- range .Values.auth.permissions }}
+    {{- range .Values.auth.policySets }}
 
-    [[auth.permissions]]
+    [[auth.policy_sets]]
+    id = {{ .id | quote }}
     name = {{ .name | quote }}
-    groups = {{ toJson .groups }}
-    scopes = {{ toJson .scopes }}
+    enabled = {{ default true .enabled }}
+    cedar_text = '''
+{{ .cedarText | indent 4 }}
+    '''
     {{- end }}
     {{- end }}

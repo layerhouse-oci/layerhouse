@@ -76,6 +76,8 @@ mod tests {
     use serde::Serialize;
     use tower::ServiceExt;
 
+    const ADMIN_GROUP_ID: &str = "550e8400-e29b-41d4-a716-446655440099";
+
     fn user_identity() -> AuthIdentity {
         let mut identity = AuthIdentity::for_test(
             "user-1",
@@ -90,12 +92,27 @@ mod tests {
     fn admin_identity() -> AuthIdentity {
         let mut identity = AuthIdentity::for_test(
             "admin-1",
-            crate::auth::token::TokenType::PersonalAccess,
-            &["registry_admins"],
-            &["repository:*:*"],
+            crate::auth::token::TokenType::OidcAccess,
+            &[ADMIN_GROUP_ID],
+            &[],
         );
         identity.username = Some("admin".to_string());
         identity
+    }
+
+    fn admin_policy() -> crate::config::ConfigPolicySet {
+        crate::config::ConfigPolicySet {
+            id: "admin".to_string(),
+            name: "admin".to_string(),
+            enabled: true,
+            cedar_text: format!(
+                r#"permit(
+    principal in Group::"test:group:{ADMIN_GROUP_ID}",
+    action == Action::"admin",
+    resource == Registry::"root"
+);"#
+            ),
+        }
     }
 
     fn other_user_identity() -> AuthIdentity {
@@ -211,7 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_namespaces_requires_admin() {
-        let state = test_state_with_auth(vec![]);
+        let state = test_state_with_auth(vec![admin_policy()]);
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
 
         // Regular user cannot list
@@ -352,6 +369,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn namespace_grants_reject_admin_action() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        app.clone()
+            .oneshot(post_json(
+                "/api/v1/admin/namespaces/acme/claim",
+                &serde_json::json!({}),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(post_json(
+                "/api/v1/account/namespaces/acme/grants",
+                &serde_json::json!({
+                    "grantee": {"kind": "group", "id": "test:group:550e8400-e29b-41d4-a716-446655440020"},
+                    "action": "admin"
+                }),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn non_owner_cannot_manage_account_namespace_grants() {
         let state = test_state_with_auth(vec![]);
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
@@ -381,7 +426,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_grant_mutations_require_reason_and_write_audit() {
-        let state = test_state_with_auth(vec![]);
+        let state = test_state_with_auth(vec![admin_policy()]);
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
 
         app.clone()
@@ -437,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn release_and_revoke_namespace() {
-        let state = test_state_with_auth(vec![]);
+        let state = test_state_with_auth(vec![admin_policy()]);
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
 
         // Claim as user

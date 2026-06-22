@@ -32,17 +32,14 @@ session_encryption_key = "<base64-encoded-32-byte-key>"
 # login_scopes = "openid profile email groups"  # default
 # access_token_audience = "<audience>"  # default: uses client_id
 
-[[auth.permissions]]
-name = "admin-access"
-groups = ["oidc:group:00000000-0000-0000-0000-000000000001"]
-scopes = ["repository:*:*"]
-
-[[auth.permissions]]
-name = "developer-access"
-groups = ["oidc:group:00000000-0000-0000-0000-000000000002"]
-scopes = ["repository:dev/*:pull,create,update", "repository:dev/*:pull"]
-
-[[auth.permissions]]
-name = "read-only"
-groups = ["oidc:group:00000000-0000-0000-0000-000000000003"]
-scopes = ["repository:*:pull"]
+[[auth.policy_sets]]
+id = "bootstrap-admin"
+name = "Bootstrap registry administrators"
+enabled = true
+cedar_text = '''
+permit(
+    principal in Group::"oidc:group:00000000-0000-0000-0000-000000000001",
+    action == Action::"admin",
+    resource == Registry::"root"
+);
+'''

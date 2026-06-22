@@ -36,12 +36,14 @@ jwks_refresh_seconds = 300
 token_signing_keys = ["PLACEHOLDER_SIGNING_KEY"]
 session_encryption_key = "PLACEHOLDER_ENCRYPTION_KEY"
 
-[[auth.permissions]]
-name = "admin-full-access"
-groups = ["kanidm:group:PLACEHOLDER_ADMIN_GROUP_ID"]
-scopes = ["repository:*:*"]
-
-[[auth.permissions]]
-name = "developer-access"
-groups = ["kanidm:group:PLACEHOLDER_DEVELOPER_GROUP_ID"]
-scopes = ["repository:dev/*:pull,create,update", "repository:dev/*:pull"]
+[[auth.policy_sets]]
+id = "bootstrap-admin"
+name = "Bootstrap registry administrators"
+enabled = true
+cedar_text = '''
+permit(
+    principal in Group::"kanidm:group:PLACEHOLDER_ADMIN_GROUP_ID",
+    action == Action::"admin",
+    resource == Registry::"root"
+);
+'''

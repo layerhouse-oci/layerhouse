@@ -613,7 +613,7 @@ impl AuthService {
         let mut resource = None;
 
         // Writes to `<handle>/...` require a live namespace claim before policy
-        // evaluation. Reads, reserved handles, the admin wildcard, and targets
+        // evaluation. Reads, reserved handles, the admin root request, and targets
         // without a repository handle continue through Cedar with an unresolved
         // repository resource.
         if let Ok(handle) = handle_of(repository)
@@ -666,7 +666,7 @@ impl AuthService {
         identity: &AuthIdentity,
         store: &dyn AuthorizationStore,
     ) -> Result<(), LayerhouseError> {
-        self.check_permission(identity, "*", permissions::OciAction::Delete, store)
+        self.check_permission(identity, "*", permissions::OciAction::Admin, store)
             .await?;
         Ok(())
     }
@@ -716,7 +716,7 @@ impl AuthService {
     ) -> Result<(), LayerhouseError> {
         let _ = handle_of(repository)?;
         let decision = match cedar_authorizer::CedarRepositoryAuthorizer::new()
-            .authorize_public_pull(repository, store)
+            .authorize_public_pull(self, repository, store)
             .await
         {
             Ok(decision) => decision,
@@ -863,14 +863,14 @@ impl AuthService {
         self.jwks_cache.read().await.metrics()
     }
 
-    /// Build an `AuthService` offline, with the given permission mappings and
+    /// Build an `AuthService` offline, with the given config policy sets and
     /// no live OIDC discovery/JWKS. For tests that need a real `AuthService`
     /// instance (e.g. route-level permission enforcement) without network/S3.
     #[cfg(test)]
-    pub(crate) fn for_test(permissions: Vec<crate::config::PermissionMapping>) -> Self {
+    pub(crate) fn for_test(policy_sets: Vec<crate::config::ConfigPolicySet>) -> Self {
         use base64::Engine as _;
         let mut config = tests::auth_config();
-        config.permissions = permissions;
+        config.policy_sets = policy_sets;
         let signing_key_bytes = base64::engine::general_purpose::STANDARD
             .decode(&config.token_signing_keys[0])
             .expect("valid signing key");
@@ -981,7 +981,7 @@ mod tests {
     use crate::auth::permissions::{self, OciAction};
     use crate::auth::principal::{PrincipalKind, ProviderQualifiedId};
     use crate::auth::token::{AuthIdentity, TokenType};
-    use crate::config::{AuthConfig, PermissionMapping};
+    use crate::config::{AuthConfig, ConfigPolicySet};
     use crate::store::metadata::typed_id::OrgId;
     use crate::store::metadata::{
         InMemoryMetadataStore, NamespaceEpoch, NamespaceGrant, NamespaceGrantGrantee,
@@ -1005,11 +1005,7 @@ mod tests {
             jwks_max_stale_seconds: 24 * 60 * 60,
             token_signing_keys: vec![base64::engine::general_purpose::STANDARD.encode(b"signing")],
             session_encryption_key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
-            permissions: vec![PermissionMapping {
-                name: "admin".to_string(),
-                groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440000".to_string()],
-                scopes: vec!["repository:*:*".to_string()],
-            }],
+            policy_sets: Vec::new(),
             cookie_secure_mode: super::CookieSecureMode::Auto,
             group_claim: "groups".to_string(),
             login_scopes: "openid profile email groups".to_string(),
@@ -1101,6 +1097,51 @@ mod tests {
 
     fn group_id(id: &str) -> ProviderQualifiedId {
         ProviderQualifiedId::new("test", PrincipalKind::Group, id).unwrap()
+    }
+
+    fn config_policy_set(id: &str, cedar_text: impl Into<String>) -> ConfigPolicySet {
+        ConfigPolicySet {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            cedar_text: cedar_text.into(),
+        }
+    }
+
+    fn group_repository_policy(
+        id: &str,
+        group: &str,
+        allowed: OciAction,
+        resource_expr: &str,
+    ) -> ConfigPolicySet {
+        let mut cedar_text = String::new();
+        for action in [
+            OciAction::Pull,
+            OciAction::Create,
+            OciAction::Update,
+            OciAction::Delete,
+        ] {
+            if permissions::action_matches(allowed, action) {
+                cedar_text.push_str(&format!(
+                    "permit(principal in Group::\"test:group:{group}\", action == Action::\"{}\", {resource_expr});\n",
+                    action.scope_token()
+                ));
+            }
+        }
+        config_policy_set(id, cedar_text)
+    }
+
+    fn admin_policy(id: &str, group: &str) -> ConfigPolicySet {
+        config_policy_set(
+            id,
+            format!(
+                r#"permit(
+    principal in Group::"test:group:{group}",
+    action == Action::"admin",
+    resource == Registry::"root"
+);"#
+            ),
+        )
     }
 
     async fn claim(store: &InMemoryMetadataStore, handle: &str, owner: Owner) {
@@ -1263,11 +1304,12 @@ mod tests {
 
     #[tokio::test]
     async fn delegated_rbac_grant_authorizes_non_owner_write() {
-        let auth = AuthService::for_test(vec![PermissionMapping {
-            name: "ci".to_string(),
-            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440002".to_string()],
-            scopes: vec!["repository:acme/*:create".to_string()],
-        }]);
+        let auth = AuthService::for_test(vec![group_repository_policy(
+            "ci",
+            "550e8400-e29b-41d4-a716-446655440002",
+            OciAction::Create,
+            "resource in Namespace::\"acme#1\"",
+        )]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
 
@@ -1284,11 +1326,12 @@ mod tests {
 
     #[tokio::test]
     async fn grantable_action_uses_stable_group_ids() {
-        let auth = AuthService::for_test(vec![PermissionMapping {
-            name: "ci".to_string(),
-            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440002".to_string()],
-            scopes: vec!["repository:acme/*:create".to_string()],
-        }]);
+        let auth = AuthService::for_test(vec![group_repository_policy(
+            "ci",
+            "550e8400-e29b-41d4-a716-446655440002",
+            OciAction::Create,
+            "resource in Namespace::\"acme#1\"",
+        )]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
         let ci = identity(
@@ -1308,11 +1351,14 @@ mod tests {
 
     #[tokio::test]
     async fn grantable_action_ignores_display_group_mappings() {
-        let auth = AuthService::for_test(vec![PermissionMapping {
-            name: "admins".to_string(),
-            groups: vec!["registry_admins".to_string()],
-            scopes: vec!["repository:acme/*:create".to_string()],
-        }]);
+        let auth = AuthService::for_test(vec![config_policy_set(
+            "display-label",
+            r#"permit(
+    principal in Group::"registry_admins",
+    action == Action::"create",
+    resource == Repository::"acme/app"
+);"#,
+        )]);
         let store = InMemoryMetadataStore::default();
         let admin = identity(
             "subject-admin",
@@ -1413,11 +1459,12 @@ mod tests {
 
     #[tokio::test]
     async fn reads_are_ungated_by_namespace_claim() {
-        let auth = AuthService::for_test(vec![PermissionMapping {
-            name: "readers".to_string(),
-            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440003".to_string()],
-            scopes: vec!["repository:acme/*:pull".to_string()],
-        }]);
+        let auth = AuthService::for_test(vec![group_repository_policy(
+            "readers",
+            "550e8400-e29b-41d4-a716-446655440003",
+            OciAction::Pull,
+            "resource == Repository::\"acme/app\"",
+        )]);
         let store = InMemoryMetadataStore::default();
 
         // No claim for "acme"; a Pull still resolves via RBAC.
@@ -1434,11 +1481,10 @@ mod tests {
 
     #[tokio::test]
     async fn admin_access_bypasses_namespace_gate() {
-        let auth = AuthService::for_test(vec![PermissionMapping {
-            name: "admin".to_string(),
-            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440004".to_string()],
-            scopes: vec!["repository:*:*".to_string()],
-        }]);
+        let auth = AuthService::for_test(vec![admin_policy(
+            "admin",
+            "550e8400-e29b-41d4-a716-446655440004",
+        )]);
         let store = InMemoryMetadataStore::default();
 
         let admin = identity(
@@ -1449,7 +1495,7 @@ mod tests {
         );
         auth.check_admin_access(&admin, &store)
             .await
-            .expect("admin `*` grant authorizes regardless of claims");
+            .expect("admin policy authorizes regardless of claims");
     }
 
     #[tokio::test]
@@ -1576,14 +1622,20 @@ mod tests {
     async fn oidc_cross_user_personal_namespace_denied_despite_rbac() {
         // Even with an RBAC grant matching `users/bob/*`, Alice cannot access
         // Bob's personal namespace via OIDC — personal namespaces are private.
-        let auth = AuthService::for_test(vec![PermissionMapping {
-            name: "cross-ns".to_string(),
-            groups: vec!["ci".to_string()],
-            scopes: vec!["repository:users/bob/*:create".to_string()],
-        }]);
+        let auth = AuthService::for_test(vec![group_repository_policy(
+            "cross-ns",
+            "550e8400-e29b-41d4-a716-446655440005",
+            OciAction::Create,
+            "resource == Repository::\"users/bob/app\"",
+        )]);
         let store = InMemoryMetadataStore::default();
 
-        let alice = identity("subject-alice", TokenType::OidcAccess, &["ci"], &[]);
+        let alice = identity(
+            "subject-alice",
+            TokenType::OidcAccess,
+            &["550e8400-e29b-41d4-a716-446655440005"],
+            &[],
+        );
         let err = auth
             .check_permission(&alice, "users/bob/app", OciAction::Create, &store)
             .await

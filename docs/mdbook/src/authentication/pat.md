@@ -59,7 +59,7 @@ PATs carry explicit OCI scope strings that define what the token can do:
 |-------|--------|
 | `repository:foo/*:pull,create,update` | Pull, create, or update manifests under `foo` and all sub-repositories |
 | `repository:foo:pull` | Pull from `foo` |
-| `repository:*:*` | All repositories, all actions (admin) |
+| `repository:*:*` | All repository actions; does not grant admin API access |
 
 ## Expiry
 

@@ -84,7 +84,7 @@ For production deployments, create the kanidm configuration manually:
 4. Add users to groups
 5. Find the stable group UUIDs emitted in the OAuth2 `groups` claim
 6. Generate signing and encryption keys for Layerhouse's config
-7. Add the `[auth]` section to `config.toml`, using `kanidm:group:<uuid>` entries in `[[auth.permissions]].groups`
+7. Add the `[auth]` section to `config.toml`, using `Group::"kanidm:group:<uuid>"` principals in `[[auth.policy_sets]].cedar_text` for bootstrap admin access
 
 ## TLS
 
