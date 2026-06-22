@@ -167,6 +167,15 @@ where
                 "scope repository is required".to_string(),
             ));
         }
+        if selection
+            .actions
+            .iter()
+            .any(|action| !permissions::is_repository_action(*action))
+        {
+            return Err(LayerhouseError::NameInvalid(
+                "PAT scopes only support repository actions".to_string(),
+            ));
+        }
 
         let scope_str = format!(
             "repository:{}:{}",
@@ -413,7 +422,7 @@ mod tests {
     use crate::auth::identity::Subject;
     use crate::auth::token::AuthIdentity;
     use crate::auth::token::TokenType;
-    use crate::config::PermissionMapping;
+    use crate::config::ConfigPolicySet;
     use crate::routes::test_state_with_auth;
     use crate::store::blob::InMemoryBlobStore;
     use crate::store::metadata::{
@@ -441,6 +450,38 @@ mod tests {
             AuthIdentity::for_test("user-1", TokenType::OidcAccess, &groups, &scopes);
         identity.username = Some("alice".to_string());
         identity
+    }
+
+    fn config_policy_set(id: &str, cedar_text: impl Into<String>) -> ConfigPolicySet {
+        ConfigPolicySet {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            cedar_text: cedar_text.into(),
+        }
+    }
+
+    fn group_repository_policy(
+        id: &str,
+        group: &str,
+        allowed: OciAction,
+        resource_expr: &str,
+    ) -> ConfigPolicySet {
+        let mut cedar_text = String::new();
+        for action in [
+            OciAction::Pull,
+            OciAction::Create,
+            OciAction::Update,
+            OciAction::Delete,
+        ] {
+            if permissions::action_matches(allowed, action) {
+                cedar_text.push_str(&format!(
+                    "permit(principal in Group::\"test:group:{group}\", action == Action::\"{}\", {resource_expr});\n",
+                    action.scope_token()
+                ));
+            }
+        }
+        config_policy_set(id, cedar_text)
     }
 
     fn post_tokens(body: serde_json::Value, identity: Option<AuthIdentity>) -> Request<Body> {
@@ -618,11 +659,12 @@ mod tests {
 
     #[tokio::test]
     async fn create_pat_allows_namespace_pattern_via_group_grant() {
-        let state = test_state_with_auth(vec![PermissionMapping {
-            name: "ci-team".to_string(),
-            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440030".to_string()],
-            scopes: vec!["repository:team-a/*:*".to_string()],
-        }]);
+        let state = test_state_with_auth(vec![group_repository_policy(
+            "ci-team",
+            "550e8400-e29b-41d4-a716-446655440030",
+            OciAction::Delete,
+            "resource == Repository::\"team-a/*\"",
+        )]);
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
 
         // Actor has no explicit scope but is in the stable CI group.
@@ -722,6 +764,27 @@ mod tests {
                     ]
                 }),
                 Some(identity_with(vec!["repository:team-a/worker:*"])),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_pat_rejects_admin_action() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(post_tokens(
+                serde_json::json!({
+                    "name": "not-admin",
+                    "scopes": [
+                        {"repository": "team-a/worker", "actions": ["admin"]}
+                    ]
+                }),
+                Some(identity_with(vec!["repository:*:*"])),
             ))
             .await
             .unwrap();
@@ -919,11 +982,12 @@ mod tests {
 
     #[tokio::test]
     async fn grantable_scopes_excludes_cross_user_personal() {
-        let state = test_state_with_auth(vec![PermissionMapping {
-            name: "shared-worker".to_string(),
-            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440032".to_string()],
-            scopes: vec!["repository:team-a/worker:*".to_string()],
-        }]);
+        let state = test_state_with_auth(vec![group_repository_policy(
+            "shared-worker",
+            "550e8400-e29b-41d4-a716-446655440032",
+            OciAction::Delete,
+            "resource == Repository::\"team-a/worker\"",
+        )]);
         seed_repos(
             &state,
             &["users/alice/app", "users/bob/app", "team-a/worker"],
@@ -962,11 +1026,20 @@ mod tests {
 
     #[tokio::test]
     async fn grantable_scopes_includes_group_grant_repos() {
-        let state = test_state_with_auth(vec![PermissionMapping {
-            name: "ci-team".to_string(),
-            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440031".to_string()],
-            scopes: vec!["repository:team-a/*:pull,create".to_string()],
-        }]);
+        let state = test_state_with_auth(vec![
+            group_repository_policy(
+                "ci-team-worker",
+                "550e8400-e29b-41d4-a716-446655440031",
+                OciAction::Create,
+                "resource == Repository::\"team-a/worker\"",
+            ),
+            group_repository_policy(
+                "ci-team-frontend",
+                "550e8400-e29b-41d4-a716-446655440031",
+                OciAction::Create,
+                "resource == Repository::\"team-a/frontend\"",
+            ),
+        ]);
         seed_repos(&state, &["team-a/worker", "team-a/frontend"]).await;
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
 

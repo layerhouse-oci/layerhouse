@@ -72,7 +72,7 @@ pub(crate) fn test_state() -> Arc<
 
 #[cfg(test)]
 pub(crate) fn test_state_with_auth(
-    permissions: Vec<crate::config::PermissionMapping>,
+    policy_sets: Vec<crate::config::ConfigPolicySet>,
 ) -> Arc<
     AppState<crate::store::metadata::InMemoryMetadataStore, crate::store::blob::InMemoryBlobStore>,
 > {
@@ -87,7 +87,7 @@ pub(crate) fn test_state_with_auth(
         gc_status: Arc::new(tokio::sync::RwLock::new(crate::gc::GcStatus::default())),
         raft: None,
         raft_tls: None,
-        auth: Some(Arc::new(crate::auth::AuthService::for_test(permissions))),
+        auth: Some(Arc::new(crate::auth::AuthService::for_test(policy_sets))),
         server_tls_enabled: false,
         cookie_secure_mode: CookieSecureMode::Disabled,
     })

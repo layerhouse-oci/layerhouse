@@ -76,10 +76,16 @@ auth:
   groupClaim: groups
   loginScopes: "openid profile email groups"
   accessTokenAudience: ""
-  permissions:
-    - name: admin-full-access
-      groups: ["oidc:group:00000000-0000-0000-0000-000000000001"]
-      scopes: ["repository:*:*"]
+  policySets:
+    - id: bootstrap-admin
+      name: Bootstrap registry administrators
+      enabled: true
+      cedarText: |-
+        permit(
+            principal in Group::"oidc:group:00000000-0000-0000-0000-000000000001",
+            action == Action::"admin",
+            resource == Registry::"root"
+        );
 
 certManager:
   server:

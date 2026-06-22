@@ -1454,11 +1454,17 @@ mod tests {
         identity
     }
 
-    fn team_worker_grant() -> crate::config::PermissionMapping {
-        crate::config::PermissionMapping {
+    fn team_worker_grant() -> crate::config::ConfigPolicySet {
+        crate::config::ConfigPolicySet {
+            id: "team-worker".to_string(),
             name: "team-worker".to_string(),
-            groups: vec!["test:group:550e8400-e29b-41d4-a716-446655440040".to_string()],
-            scopes: vec!["repository:team-a/worker:pull".to_string()],
+            enabled: true,
+            cedar_text: r#"permit(
+    principal in Group::"test:group:550e8400-e29b-41d4-a716-446655440040",
+    action == Action::"pull",
+    resource == Repository::"team-a/worker"
+);"#
+            .to_string(),
         }
     }
 

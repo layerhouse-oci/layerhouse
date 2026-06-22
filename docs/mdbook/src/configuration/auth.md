@@ -21,10 +21,17 @@ jwks_max_stale_seconds = 86400
 token_signing_keys = ["<base64-encoded-key>"]
 session_encryption_key = "<base64-encoded-key>"
 
-[[auth.permissions]]
-name = "admin-access"
-groups = ["kanidm:group:00000000-0000-0000-0000-000000000001"]
-scopes = ["repository:*:*"]
+[[auth.policy_sets]]
+id = "bootstrap-admin"
+name = "Bootstrap registry administrators"
+enabled = true
+cedar_text = '''
+permit(
+    principal in Group::"kanidm:group:00000000-0000-0000-0000-000000000001",
+    action == Action::"admin",
+    resource == Registry::"root"
+);
+'''
 ```
 
 | Key | Type | Default | Description |
@@ -48,17 +55,27 @@ scopes = ["repository:*:*"]
 | `login_scopes` | string | `"openid profile email groups"` | OAuth2 scopes requested during dashboard login |
 | `access_token_audience` | string | (client_id) | Expected `aud` claim in access tokens; defaults to `client_id` if unset |
 
-## Permission Mappings
+## Config Policy Sets
 
-Each `[[auth.permissions]]` entry maps stable provider-qualified group IDs to OCI scopes. Display names, SPNs, emails, and local group labels are not authorization keys.
+Each `[[auth.policy_sets]]` entry is static Cedar policy text loaded from config and validated at startup. Use this for bootstrap access to the admin APIs, then manage normal repository grants through the dashboard or `/api/v1/admin/policies`.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `name` | string | Human-readable name for this rule |
-| `groups` | []string | Provider-qualified stable group IDs, e.g. `kanidm:group:<uuid>` |
-| `scopes` | []string | OCI scope patterns (e.g., `repository:foo/*:pull,create,update`) |
+| `id` | string | Stable policy set ID |
+| `name` | string | Human-readable policy set name |
+| `enabled` | bool | Whether this policy set is evaluated; defaults to `true` |
+| `cedar_text` | string | Cedar policy text |
 
-Scope patterns use wildcards:
-- `repository:*:*` — all repositories, all actions
-- `repository:foo/*:pull,create,update` — pull, create, or update any sub-repository of `foo`
-- `repository:bar:pull` — pull only from `bar`
+Stable provider-qualified IDs authorize. Display names, SPNs, emails, and local group labels explain identity to humans but are not authorization keys.
+
+Control-plane admin is separate from repository access:
+
+```cedar
+permit(
+    principal in Group::"kanidm:group:<admin-group-uuid>",
+    action == Action::"admin",
+    resource == Registry::"root"
+);
+```
+
+`Action::"admin"` lets the principal use admin APIs such as policy editing. It does not imply `pull`, `create`, `update`, or `delete` on repositories.

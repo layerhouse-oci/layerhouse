@@ -26,11 +26,9 @@ pub enum RepoKind {
     Unknown,
 }
 
-/// Action ladder for repository access. Higher tiers imply all lower ones:
-/// `Pull < Create < Update < Delete`. `Create` is "add a manifest/tag that
-/// does not yet exist"; `Update` additionally allows overwriting an existing
-/// tag. This is the single source of truth for the action model — verb
-/// derivation, scope-string tokens, and the implication ladder all live here.
+/// Action model for authorization. Repository actions use the ladder
+/// `Pull < Create < Update < Delete`. `Admin` is control-plane only and does
+/// not imply, or get implied by, any repository action.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -40,6 +38,7 @@ pub enum OciAction {
     Create,
     Update,
     Delete,
+    Admin,
 }
 
 impl OciAction {
@@ -67,6 +66,7 @@ impl OciAction {
             OciAction::Create => "create",
             OciAction::Update => "update",
             OciAction::Delete => "delete",
+            OciAction::Admin => "admin",
         }
     }
 }
@@ -120,6 +120,7 @@ pub fn action_rank(action: OciAction) -> u8 {
         OciAction::Create => 1,
         OciAction::Update => 2,
         OciAction::Delete => 3,
+        OciAction::Admin => 4,
     }
 }
 
@@ -136,7 +137,14 @@ fn match_repository(pattern: &str, repo: &str) -> bool {
 /// A grant for `allowed` covers a request for `requested` when it sits at or
 /// above the requested tier: `Delete ⊇ Update ⊇ Create ⊇ Pull`.
 pub fn action_matches(allowed: OciAction, requested: OciAction) -> bool {
+    if allowed == OciAction::Admin || requested == OciAction::Admin {
+        return allowed == requested;
+    }
     action_rank(allowed) >= action_rank(requested)
+}
+
+pub fn is_repository_action(action: OciAction) -> bool {
+    action != OciAction::Admin
 }
 
 /// Personal-namespace auto-grant: every authenticated user has full access
@@ -288,6 +296,10 @@ mod tests {
         assert!(!action_matches(Pull, Create));
         assert!(!action_matches(Pull, Update));
         assert!(!action_matches(Pull, Delete));
+        // Admin is a control-plane action, not a repository ladder tier.
+        assert!(action_matches(Admin, Admin));
+        assert!(!action_matches(Admin, Delete));
+        assert!(!action_matches(Delete, Admin));
     }
 
     #[test]
@@ -297,6 +309,7 @@ mod tests {
             let scope = format!("repository:foo:{}", action.scope_token());
             assert_eq!(parse_scope(&scope), Some(("foo".to_string(), action)));
         }
+        assert_eq!(parse_scope("repository:foo:admin"), None);
     }
 
     #[test]

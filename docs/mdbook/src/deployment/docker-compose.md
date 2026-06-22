@@ -97,15 +97,17 @@ redirect_uri = "https://layerhouse.example.com/oauth2/callback"
 token_signing_keys = ["<base64-32-byte-key>"]
 session_encryption_key = "<base64-32-byte-key>"
 
-[[auth.permissions]]
-name = "admin-full-access"
-groups = ["kanidm:group:00000000-0000-0000-0000-000000000001"]
-scopes = ["repository:*:*"]
-
-[[auth.permissions]]
-name = "developer-access"
-groups = ["kanidm:group:00000000-0000-0000-0000-000000000002"]
-scopes = ["repository:dev/*:pull,create,update", "repository:dev/*:pull"]
+[[auth.policy_sets]]
+id = "bootstrap-admin"
+name = "Bootstrap registry administrators"
+enabled = true
+cedar_text = '''
+permit(
+    principal in Group::"kanidm:group:00000000-0000-0000-0000-000000000001",
+    action == Action::"admin",
+    resource == Registry::"root"
+);
+'''
 ```
 
 Generate signing and encryption keys:
@@ -152,9 +154,7 @@ default, so it must be included.
 
 ### 4. Add users to groups
 
-Add users who need registry access to the appropriate group. Users in
-`layerhouse_admins` get full `repository:*:*` access. Users in
-`layerhouse_developers` get push/pull on `dev/*` repositories.
+Add users who need registry administration to `layerhouse_admins`. That group gets control-plane admin access through the bootstrap Cedar policy. After sign-in, use the dashboard policy editor to grant repository pull/create/update/delete access for teams and namespaces.
 
 ## Operations
 

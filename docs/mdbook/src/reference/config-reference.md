@@ -74,11 +74,15 @@ and descriptions.
 | `group_claim` | string | `"groups"` | Claim path for group extraction |
 | `login_scopes` | string | `"openid profile email groups"` | OAuth2 scopes for dashboard login |
 | `access_token_audience` | string | — | Expected `aud` claim; defaults to `client_id` |
+| `policy_sets` | array | `[]` | Static Cedar policy sets evaluated with built-in and Raft policy sets |
 
-### `[[auth.permissions]]`
+### `[[auth.policy_sets]]`
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `name` | string | Rule name |
-| `groups` | []string | Provider-qualified stable group IDs, e.g. `kanidm:group:<uuid>` |
-| `scopes` | []string | OCI scope patterns using `pull`, `create`, `update`, and `delete` |
+| `id` | string | Stable policy set ID |
+| `name` | string | Human-readable policy set name |
+| `enabled` | bool | Whether this policy set is evaluated; defaults to `true` |
+| `cedar_text` | string | Cedar policy text validated at startup |
+
+Use config policy sets for bootstrap control-plane access. The registry control-plane resource is `Registry::"root"`, and admin APIs require `Action::"admin"`.
