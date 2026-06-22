@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use crate::auth::identity::Subject;
 use crate::store::metadata::{
     BlobDeleteStatus, DeleteCounts, MirrorRule, NamespaceEpoch, NamespaceGrant, ObservedIdentity,
-    Owner, PersonalAccessToken, ProxyCache, ProxyCacheTagValidation, ReleaseReason, Repository,
-    SyncJob, SyncJobRun, WarmImage,
+    Owner, PersonalAccessToken, PolicySet, ProxyCache, ProxyCacheTagValidation, ReleaseReason,
+    Repository, SyncJob, SyncJobRun, WarmImage,
 };
 
 openraft::declare_raft_types!(
@@ -152,6 +152,20 @@ pub enum TokenResponse {
     Bool(bool),
 }
 
+// ── Cedar policy domain ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PolicyRequest {
+    PutPolicySet(PolicySet),
+    DeletePolicySet { id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PolicyResponse {
+    Ok,
+    Bool(bool),
+}
+
 // ── Repository domain ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +247,7 @@ pub enum Request {
     MirrorConfig(MirrorConfigRequest),
     Job(JobRequest),
     Token(TokenRequest),
+    Policy(PolicyRequest),
     Repository(RepositoryRequest),
     Namespace(NamespaceRequest),
 }
@@ -243,6 +258,7 @@ pub enum Response {
     MirrorConfig(MirrorConfigResponse),
     Job(JobResponse),
     Token(TokenResponse),
+    Policy(PolicyResponse),
     Repository(RepositoryResponse),
     Namespace(NamespaceResponse),
     /// Apply-time error — handle is not claimed / doesn't exist.

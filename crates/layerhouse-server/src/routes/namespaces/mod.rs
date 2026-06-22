@@ -7,9 +7,9 @@ use axum::Router;
 
 use crate::routes::AppState;
 use crate::store::blob::BlobStore;
-use crate::store::metadata::NamespaceStore;
+use crate::store::metadata::AuthorizationStore;
 
-pub fn routes<M: NamespaceStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
+pub fn routes<M: AuthorizationStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
     Router::new()
         .route(
             "/api/v1/account/namespaces",

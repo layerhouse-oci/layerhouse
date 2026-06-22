@@ -11,8 +11,9 @@ use tokio::sync::RwLock;
 
 use super::{
     JobRequest, JobResponse, ManifestRequest, ManifestResponse, MirrorConfigRequest,
-    MirrorConfigResponse, NamespaceRequest, NamespaceResponse, RepositoryRequest,
-    RepositoryResponse, Request, Response, TokenRequest, TokenResponse, TypeConfig,
+    MirrorConfigResponse, NamespaceRequest, NamespaceResponse, PolicyRequest, PolicyResponse,
+    RepositoryRequest, RepositoryResponse, Request, Response, TokenRequest, TokenResponse,
+    TypeConfig,
 };
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
@@ -22,9 +23,9 @@ use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion,
     ManifestEntry, ManifestSummary, MirrorRule, Namespace, NamespaceEpoch, NamespaceGrant,
     NamespaceGrantAuditEvent, NamespaceGrantAuditOperation, NamespaceGrantGrantee,
-    ObservedIdentity, PermissionRule, PersonalAccessToken, ProxyCache, ReferrerEntry,
-    ReleaseReason, ReleasedHandle, Repository, RepositorySummary, SyncJob, SyncJobKind, SyncJobRun,
-    SyncJobStatus, WarmImage, clear_proxy_cache_tag_validations_for_cache,
+    ObservedIdentity, PersonalAccessToken, PolicySet, ProxyCache, ReferrerEntry, ReleaseReason,
+    ReleasedHandle, Repository, RepositorySummary, SyncJob, SyncJobKind, SyncJobRun, SyncJobStatus,
+    WarmImage, clear_proxy_cache_tag_validations_for_cache,
     clear_proxy_cache_tag_validations_for_repository, clear_proxy_cache_tag_validations_for_tag,
     get_proxy_cache_tag_validation, mirror_rule_job, now_epoch, proxy_cache_warm_job,
     put_proxy_cache_tag_validation, repository_manifest_size_bytes, repository_stored_size_bytes,
@@ -74,10 +75,9 @@ pub struct StateMachineData {
     /// name. Empty in Phase 1; populated by the creation flow in Phase 2.
     #[serde(default)]
     pub repositories: BTreeMap<String, Repository>,
-    /// Raft-sourced permission rules, keyed by rule id. Empty in Phase 1;
-    /// the dashboard editing flow lands in Phase 3.
+    /// Raft-sourced Cedar policy sets, keyed by policy id.
     #[serde(default)]
-    pub permission_rules: BTreeMap<String, PermissionRule>,
+    pub policy_sets: BTreeMap<String, PolicySet>,
     /// Live first-segment claims. The presence of `namespaces[handle]` is the
     /// apply-time precondition for any write that creates content under that
     /// handle (manifest push, repository create, blob mount).
@@ -132,6 +132,10 @@ impl StateMachine {
             Request::MirrorConfig(r) => Response::MirrorConfig(Self::apply_mirror_config(data, r)),
             Request::Job(r) => Response::Job(Self::apply_job(data, r)),
             Request::Token(r) => Response::Token(Self::apply_token(data, r)),
+            Request::Policy(r) => match Self::apply_policy(data, r) {
+                Ok(r) => Response::Policy(r),
+                Err(e) => Self::error_to_response(e),
+            },
             Request::Repository(r) => match Self::apply_repository(data, r) {
                 Ok(r) => Response::Repository(r),
                 Err(e) => Self::error_to_response(e),
@@ -564,6 +568,22 @@ impl StateMachine {
         }
     }
 
+    fn apply_policy(
+        data: &mut StateMachineData,
+        req: PolicyRequest,
+    ) -> Result<PolicyResponse, LayerhouseError> {
+        match req {
+            PolicyRequest::PutPolicySet(policy) => {
+                validate_policy_set(&policy)?;
+                data.policy_sets.insert(policy.id.clone(), policy);
+                Ok(PolicyResponse::Ok)
+            }
+            PolicyRequest::DeletePolicySet { id } => {
+                Ok(PolicyResponse::Bool(data.policy_sets.remove(&id).is_some()))
+            }
+        }
+    }
+
     fn apply_repository(
         data: &mut StateMachineData,
         req: RepositoryRequest,
@@ -588,6 +608,26 @@ impl StateMachine {
             }
         }
     }
+}
+
+fn validate_policy_set(policy: &PolicySet) -> Result<(), LayerhouseError> {
+    if policy.id.trim().is_empty() {
+        return Err(LayerhouseError::NameInvalid(
+            "policy id is required".to_string(),
+        ));
+    }
+    if policy.name.trim().is_empty() {
+        return Err(LayerhouseError::NameInvalid(
+            "policy name is required".to_string(),
+        ));
+    }
+    if policy.cedar_text.trim().is_empty() {
+        return Err(LayerhouseError::NameInvalid(
+            "policy cedar_text is required".to_string(),
+        ));
+    }
+    crate::auth::cedar_authorizer::validate_policy_text(&policy.cedar_text)
+        .map_err(LayerhouseError::NameInvalid)
 }
 
 /// Apply a namespace mutation against the full state machine data. Thin wrapper
@@ -1323,6 +1363,14 @@ impl StateMachineData {
         self.repositories.get(name).cloned()
     }
 
+    pub fn list_policy_sets(&self) -> Vec<PolicySet> {
+        self.policy_sets.values().cloned().collect()
+    }
+
+    pub fn get_policy_set(&self, id: &str) -> Option<PolicySet> {
+        self.policy_sets.get(id).cloned()
+    }
+
     pub fn get_namespace(&self, handle: &str) -> Option<Namespace> {
         self.namespaces.get(handle).cloned()
     }
@@ -1914,15 +1962,23 @@ mod tests {
                 created_at: 7,
             },
         );
-        data.permission_rules.insert(
-            "rule-1".to_string(),
-            PermissionRule {
-                id: "rule-1".to_string(),
+        data.policy_sets.insert(
+            "policy-1".to_string(),
+            PolicySet {
+                id: "policy-1".to_string(),
                 name: "team-a-devs".to_string(),
-                groups: vec!["team-a".to_string()],
-                scopes: vec!["repository:team-a/*:pull,create".to_string()],
-                source: crate::store::metadata::RuleSource::Raft,
+                source: crate::store::metadata::PolicySource::Raft,
+                cedar_text: r#"permit(
+    principal in Group::"test:group:550e8400-e29b-41d4-a716-446655440000",
+    action == Action::"pull",
+    resource in Namespace::"alice#3"
+);"#
+                .to_string(),
+                enabled: true,
+                created_by: Subject::new("subject-admin"),
+                updated_by: Subject::new("subject-admin"),
                 created_at: 9,
+                updated_at: 10,
             },
         );
         data.namespaces.insert(
@@ -2046,12 +2102,12 @@ mod tests {
             crate::store::metadata::Visibility::PublicPull
         );
 
-        let rule = restored
-            .permission_rules
-            .get("rule-1")
-            .expect("permission rule preserved");
-        assert_eq!(rule.groups, vec!["team-a".to_string()]);
-        assert_eq!(rule.source, crate::store::metadata::RuleSource::Raft);
+        let policy = restored
+            .policy_sets
+            .get("policy-1")
+            .expect("policy set preserved");
+        assert!(policy.enabled);
+        assert_eq!(policy.source, crate::store::metadata::PolicySource::Raft);
 
         let ns = restored
             .namespaces

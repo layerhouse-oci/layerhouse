@@ -14,7 +14,8 @@ use crate::routes::AppState;
 use crate::store::blob::BlobStore;
 use crate::store::metadata::handle::{handle_of, is_handle_reserved};
 use crate::store::metadata::{
-    ManifestStore, NamespaceEpoch, NamespaceStore, PersonalAccessToken, TokenStore,
+    AuthorizationStore, ManifestStore, NamespaceEpoch, NamespaceStore, PersonalAccessToken,
+    TokenStore,
 };
 
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -94,7 +95,7 @@ struct NamespacePatternScope {
 
 pub fn routes<M, B>() -> Router<Arc<AppState<M, B>>>
 where
-    M: TokenStore + ManifestStore + NamespaceStore,
+    M: TokenStore + ManifestStore + AuthorizationStore,
     B: BlobStore,
 {
     Router::new()
@@ -145,7 +146,7 @@ async fn create_token<M, B>(
     Json(req): Json<CreatePatRequest>,
 ) -> Result<impl IntoResponse, LayerhouseError>
 where
-    M: TokenStore + NamespaceStore,
+    M: TokenStore + AuthorizationStore,
     B: BlobStore,
 {
     let identity = required_identity(identity)?;
@@ -277,7 +278,7 @@ async fn grantable_scopes<M, B>(
     Query(query): Query<GrantableScopeQuery>,
 ) -> Result<impl IntoResponse, LayerhouseError>
 where
-    M: ManifestStore + NamespaceStore,
+    M: ManifestStore + AuthorizationStore,
     B: BlobStore,
 {
     let identity = required_identity(identity)?;

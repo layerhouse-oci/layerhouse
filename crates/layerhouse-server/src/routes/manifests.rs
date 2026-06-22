@@ -14,7 +14,7 @@ use crate::oci::manifest;
 use crate::store::blob::BlobStore;
 #[allow(unused_imports)]
 use crate::store::metadata::{
-    ManifestEntry, ManifestStore, NamespaceStore, RegistryStore, now_epoch,
+    AuthorizationStore, ManifestEntry, ManifestStore, RegistryStore, now_epoch,
 };
 
 use super::AppState;
@@ -55,7 +55,7 @@ fn oci_subject_header() -> HeaderName {
     HeaderName::from_static("oci-subject")
 }
 
-pub async fn dispatch<M: RegistryStore + NamespaceStore, B: BlobStore>(
+pub async fn dispatch<M: RegistryStore + AuthorizationStore, B: BlobStore>(
     state: Arc<AppState<M, B>>,
     method: &Method,
     name: &str,
@@ -161,7 +161,7 @@ async fn respond_manifest<M: RegistryStore, B: BlobStore>(
     Ok(response)
 }
 
-async fn put_manifest<M: RegistryStore + NamespaceStore, B: BlobStore>(
+async fn put_manifest<M: RegistryStore + AuthorizationStore, B: BlobStore>(
     state: &AppState<M, B>,
     name: &str,
     reference: &str,
@@ -323,7 +323,8 @@ mod tests {
     use super::*;
     use crate::routes::{test_state, test_state_with_auth};
     use crate::store::metadata::{
-        MirrorConfigStore, OutboundProxy, ProxyCache, ProxyCacheTagValidation, WarmFilter,
+        MirrorConfigStore, NamespaceStore, OutboundProxy, ProxyCache, ProxyCacheTagValidation,
+        WarmFilter,
     };
     use axum::body::Body;
     use axum::extract::State;

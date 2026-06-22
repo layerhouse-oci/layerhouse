@@ -8,8 +8,9 @@ use tracing::{debug, warn};
 use super::state_machine::StateMachineData;
 use super::{
     JobRequest, JobResponse, ManifestRequest, ManifestResponse, MirrorConfigRequest,
-    MirrorConfigResponse, NamespaceRequest, NamespaceResponse, RaftInstance, RepositoryRequest,
-    RepositoryResponse, Request, Response, TokenRequest, TokenResponse,
+    MirrorConfigResponse, NamespaceRequest, NamespaceResponse, PolicyRequest, PolicyResponse,
+    RaftInstance, RepositoryRequest, RepositoryResponse, Request, Response, TokenRequest,
+    TokenResponse,
 };
 use crate::auth::identity::Subject;
 use crate::config::RaftTlsConfig;
@@ -21,9 +22,9 @@ use crate::store::metadata::{
     BlobDeleteStatus, BlobLifecycleStatus, DeleteCounts, HelmChart, HelmChartVersion, HelmStore,
     JobStore, ManifestEntry, ManifestStore, ManifestSummary, MirrorConfigStore, MirrorRule,
     Namespace, NamespaceEpoch, NamespaceGrant, NamespaceGrantAuditEvent, NamespaceStore,
-    ObservedIdentity, Owner, PersonalAccessToken, ProxyCache, ProxyCacheTagValidation,
-    ReferrerEntry, ReleaseReason, ReleasedHandle, Repository, RepositoryStore, RepositorySummary,
-    SyncJob, SyncJobRun, TokenStore, WarmImage,
+    ObservedIdentity, Owner, PersonalAccessToken, PolicySet, PolicyStore, ProxyCache,
+    ProxyCacheTagValidation, ReferrerEntry, ReleaseReason, ReleasedHandle, Repository,
+    RepositoryStore, RepositorySummary, SyncJob, SyncJobRun, TokenStore, WarmImage,
 };
 
 const FOLLOWER_READ_LAG_THRESHOLD: u64 = 100;
@@ -158,6 +159,16 @@ impl RaftMetadataStore {
             Response::Token(r) => Ok(r),
             other => Err(LayerhouseError::Internal(format!(
                 "unexpected token response: {:?}",
+                other
+            ))),
+        }
+    }
+
+    async fn write_policy(&self, req: PolicyRequest) -> Result<PolicyResponse, LayerhouseError> {
+        match self.write(Request::Policy(req)).await? {
+            Response::Policy(r) => Ok(r),
+            other => Err(LayerhouseError::Internal(format!(
+                "unexpected policy response: {:?}",
                 other
             ))),
         }
@@ -776,6 +787,39 @@ impl TokenStore for RaftMetadataStore {
             TokenResponse::Bool(deleted) => Ok(deleted),
             TokenResponse::Ok => Err(LayerhouseError::Internal(
                 "unexpected response for delete_personal_access_token".to_string(),
+            )),
+        }
+    }
+}
+
+#[async_trait]
+impl PolicyStore for RaftMetadataStore {
+    async fn list_policy_sets(&self) -> Result<Vec<PolicySet>, LayerhouseError> {
+        self.emit_read_metrics("list_policy_sets");
+        let state = self.state.read().await;
+        Ok(state.list_policy_sets())
+    }
+
+    async fn get_policy_set(&self, id: &str) -> Result<Option<PolicySet>, LayerhouseError> {
+        self.emit_read_metrics("get_policy_set");
+        let state = self.state.read().await;
+        Ok(state.get_policy_set(id))
+    }
+
+    async fn put_policy_set(&self, policy: PolicySet) -> Result<(), LayerhouseError> {
+        self.write_policy(PolicyRequest::PutPolicySet(policy))
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_policy_set(&self, id: &str) -> Result<bool, LayerhouseError> {
+        let resp = self
+            .write_policy(PolicyRequest::DeletePolicySet { id: id.to_string() })
+            .await?;
+        match resp {
+            PolicyResponse::Bool(deleted) => Ok(deleted),
+            PolicyResponse::Ok => Err(LayerhouseError::Internal(
+                "unexpected response for delete_policy_set".to_string(),
             )),
         }
     }
