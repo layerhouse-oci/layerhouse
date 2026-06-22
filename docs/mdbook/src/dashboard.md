@@ -9,6 +9,7 @@ into the binary via `rust-embed`.
 - **Manifest viewer** — inspect manifest details, digests, tags, annotations
 - **Tag management** — delete tags, delete manifests, batch delete
 - **Cluster status** — view Raft leader, voters, membership
+- **Policy management** — create, validate, enable, disable, and delete Cedar policy sets
 - **Mirror management** — create and manage mirror rules and proxy caches
 - **Helm chart browser** — browse OCI-based Helm charts
 

@@ -275,6 +275,28 @@ export interface ObservedIdentityListResponse {
   users: ObservedIdentity[];
 }
 
+// ---- Cedar Policy Sets ----
+
+export type PolicySource = "builtin" | "config" | "raft";
+
+export interface PolicySet {
+  id: string;
+  name: string;
+  source: PolicySource;
+  cedar_text: string;
+  enabled: boolean;
+  created_by: string;
+  updated_by: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface PutPolicySetRequest {
+  name: string;
+  cedar_text: string;
+  enabled?: boolean;
+}
+
 // ---- Mirror Rules ----
 
 export type MirrorDirection = "pull" | "push";
