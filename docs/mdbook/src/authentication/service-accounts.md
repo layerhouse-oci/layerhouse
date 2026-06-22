@@ -26,7 +26,7 @@ echo "<api-token>" | docker login localhost:5050 --username ci-bot --password-st
 
 1. CI pipeline authenticates with the IdP access token
 2. Layerhouse's `/v2/token` endpoint validates the token via the JWKS endpoint
-3. Stable provider-qualified group IDs are mapped to OCI scopes through the config's `[[auth.permissions]]`
+3. Cedar policy sets grant repository access to stable provider-qualified user or group IDs
 4. A short-lived OCI bearer token is issued for the session
 
 ## Token Validation

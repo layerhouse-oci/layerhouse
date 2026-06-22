@@ -246,7 +246,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 
 ### AUTH12. Permission Wildcard Matching
 
-**Precondition**: Admin user with `repository:*:*` scope.
+**Precondition**: User with repository policy access equivalent to `repository:*:*`.
 
 **Steps**:
 1. Create PAT for admin user with wildcard scope
@@ -254,7 +254,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 3. Verify all succeed
 
 **Expected**:
-- Wildcard `repository:*:*` grants access to any repository
+- Wildcard `repository:*:*` grants repository access to any repository but does not grant admin API access
 - Prefix wildcard `repository:qa/auth-test/*:pull,create,update` grants push to `qa/auth-test/any-sub`
 
 ### AUTH13. Follower Node Auth Enforcement

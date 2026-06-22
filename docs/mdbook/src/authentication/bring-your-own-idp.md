@@ -13,7 +13,7 @@ layerhouse uses standard OIDC flows. Your IdP must provide:
 |------------|----------|
 | `/.well-known/openid-configuration` | OIDC discovery (endpoints, JWKS URI) |
 | JWKS endpoint | Public key set for JWT signature verification |
-| `groups` claim (or configurable path) | Group-based RBAC mapping |
+| `groups` claim (or configurable path) | Stable group IDs for Cedar authorization |
 | OAuth2 Authorization Code + PKCE | Dashboard browser login |
 | Client credentials grant (optional) | CI pipeline service accounts |
 
@@ -40,10 +40,17 @@ redirect_uri = "https://registry.example.com/oauth2/callback"
 token_signing_keys = ["<base64-encoded-key>"]
 session_encryption_key = "<base64-encoded-32-byte-key>"
 
-[[auth.permissions]]
-name = "admin-access"
-groups = ["oidc:group:00000000-0000-0000-0000-000000000001"]
-scopes = ["repository:*:*"]
+[[auth.policy_sets]]
+id = "bootstrap-admin"
+name = "Bootstrap registry administrators"
+enabled = true
+cedar_text = '''
+permit(
+    principal in Group::"oidc:group:00000000-0000-0000-0000-000000000001",
+    action == Action::"admin",
+    resource == Registry::"root"
+);
+'''
 ```
 
 ### Step 3: Set `group_claim` if needed
@@ -103,8 +110,8 @@ access_token_audience = "https://api.example.com"
 If using realm roles instead of groups for RBAC, set `group_claim = "realm_access.roles"` and assign stable role IDs to users.
 
 > **Stable group IDs**: Layerhouse does not authorize with Keycloak display paths like `/registry_admins`.
-> Configure a mapper that emits stable IDs, and use provider-qualified config entries like
-> `groups = ["oidc:group:<stable-id>"]`.
+> Configure a mapper that emits stable IDs, and use provider-qualified Cedar principals like
+> `Group::"oidc:group:<stable-id>"`.
 
 ### Azure AD
 

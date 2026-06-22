@@ -28,7 +28,23 @@ entity Registry;
 
 action "pull", "create", "update", "delete" appliesTo {
     principal: [User, Anonymous],
-    resource: [Repository, Registry],
+    resource: [Repository],
+    context: {
+        "repository": String,
+        "resource_id": String,
+        "namespace_id": String,
+        "token_type": String,
+        "username": String,
+        "display_name": String,
+        "email": String,
+        "scope_count": Long,
+        "namespace_epoch_count": Long
+    }
+};
+
+action "admin" appliesTo {
+    principal: [User],
+    resource: [Registry],
     context: {
         "repository": String,
         "resource_id": String,
@@ -118,6 +134,7 @@ enum CedarAction {
     Create,
     Update,
     Delete,
+    Admin,
 }
 
 impl CedarAction {
@@ -127,6 +144,7 @@ impl CedarAction {
             OciAction::Create => Self::Create,
             OciAction::Update => Self::Update,
             OciAction::Delete => Self::Delete,
+            OciAction::Admin => Self::Admin,
         }
     }
 
@@ -136,6 +154,7 @@ impl CedarAction {
             Self::Create => "create",
             Self::Update => "update",
             Self::Delete => "delete",
+            Self::Admin => "admin",
         }
     }
 
@@ -317,9 +336,9 @@ struct CedarRegistry {
 }
 
 impl CedarRegistry {
-    fn global() -> Self {
+    fn root() -> Self {
         Self {
-            entity: CedarEntityId::new(CedarEntityType::Registry, "global"),
+            entity: CedarEntityId::new(CedarEntityType::Registry, "root"),
         }
     }
 
@@ -345,7 +364,7 @@ enum CedarResource {
 impl CedarResource {
     fn from_request(request: &AuthzRequest) -> Self {
         if request.repository == "*" && request.resource.is_none() {
-            return Self::Registry(CedarRegistry::global());
+            return Self::Registry(CedarRegistry::root());
         }
         match request.resource.as_ref() {
             Some(resource) => Self::Repository(CedarRepository::from_resource(resource)),
@@ -498,6 +517,7 @@ impl CedarRepositoryAuthorizer {
 
     pub(crate) async fn authorize_public_pull(
         &self,
+        auth: &AuthService,
         repository: &str,
         store: &dyn AuthorizationStore,
     ) -> Result<AuthzDecision, String> {
@@ -528,7 +548,8 @@ impl CedarRepositoryAuthorizer {
                 append_namespace_grant_policies(&mut policy, &grant, &epoch)?;
             }
         }
-        append_enabled_policy_sets(
+        append_enabled_config_policy_sets(&mut policy, &auth.config.policy_sets);
+        append_enabled_metadata_policy_sets(
             &mut policy,
             &store
                 .list_policy_sets()
@@ -733,9 +754,9 @@ async fn policy_for_request(
             }
         }
     }
-    append_config_permission_policies(&mut policy, auth, request, &resource)?;
+    append_enabled_config_policy_sets(&mut policy, &auth.config.policy_sets);
     append_explicit_scope_policies(&mut policy, request, &resource)?;
-    append_enabled_policy_sets(
+    append_enabled_metadata_policy_sets(
         &mut policy,
         &store
             .list_policy_sets()
@@ -745,16 +766,42 @@ async fn policy_for_request(
     Ok(policy)
 }
 
-fn append_enabled_policy_sets(policy: &mut String, policy_sets: &[MetadataPolicySet]) {
-    for policy_set in policy_sets.iter().filter(|policy_set| policy_set.enabled) {
+fn append_enabled_policy_texts<'a>(
+    policy: &mut String,
+    policy_sets: impl IntoIterator<Item = &'a str>,
+) {
+    for cedar_text in policy_sets {
         if !policy.ends_with('\n') {
             policy.push('\n');
         }
-        policy.push_str(&policy_set.cedar_text);
+        policy.push_str(cedar_text);
         if !policy.ends_with('\n') {
             policy.push('\n');
         }
     }
+}
+
+fn append_enabled_config_policy_sets(
+    policy: &mut String,
+    policy_sets: &[crate::config::ConfigPolicySet],
+) {
+    append_enabled_policy_texts(
+        policy,
+        policy_sets
+            .iter()
+            .filter(|policy_set| policy_set.enabled)
+            .map(|policy_set| policy_set.cedar_text.as_str()),
+    );
+}
+
+fn append_enabled_metadata_policy_sets(policy: &mut String, policy_sets: &[MetadataPolicySet]) {
+    append_enabled_policy_texts(
+        policy,
+        policy_sets
+            .iter()
+            .filter(|policy_set| policy_set.enabled)
+            .map(|policy_set| policy_set.cedar_text.as_str()),
+    );
 }
 
 fn append_namespace_owner_policies(
@@ -806,39 +853,6 @@ fn append_namespace_grant_policies(
             Ok(())
         }
     }
-}
-
-fn append_config_permission_policies(
-    policy: &mut String,
-    auth: &AuthService,
-    request: &AuthzRequest,
-    resource: &CedarResource,
-) -> Result<(), String> {
-    let resource = resource.exact_policy_expr()?;
-    for mapping in &auth.config.permissions {
-        for group in &mapping.groups {
-            let Ok(group_id) = ProviderQualifiedId::parse(group) else {
-                continue;
-            };
-            if group_id.kind() != PrincipalKind::Group {
-                continue;
-            }
-            let principal = format!(
-                "principal in {}",
-                CedarEntityId::from_principal(&group_id).policy_ref()?
-            );
-            for scope in &mapping.scopes {
-                if let Some((_, allowed_action)) = permissions::matching_scope(
-                    std::slice::from_ref(scope),
-                    &request.repository,
-                    OciAction::Pull,
-                ) {
-                    append_permits_for_actions(policy, &principal, allowed_action, &resource)?;
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 fn append_explicit_scope_policies(
@@ -1047,7 +1061,7 @@ mod tests {
     use crate::auth::identity::Subject;
     use crate::auth::principal::stable_group_ids;
     use crate::auth::token::AuthIdentity;
-    use crate::config::PermissionMapping;
+    use crate::config::ConfigPolicySet;
     use crate::store::metadata::{
         InMemoryMetadataStore, PolicySet as MetadataPolicySet, PolicySource, PolicyStore,
         ReleaseReason, typed_id::OrgId,
@@ -1103,6 +1117,51 @@ permit(
 
     fn group_id(id: &str) -> ProviderQualifiedId {
         ProviderQualifiedId::new("test", PrincipalKind::Group, id).unwrap()
+    }
+
+    fn config_policy_set(id: &str, cedar_text: impl Into<String>) -> ConfigPolicySet {
+        ConfigPolicySet {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            cedar_text: cedar_text.into(),
+        }
+    }
+
+    fn group_repository_policy(
+        id: &str,
+        group: &str,
+        allowed: OciAction,
+        resource_expr: &str,
+    ) -> ConfigPolicySet {
+        let mut cedar_text = String::new();
+        for action in [
+            OciAction::Pull,
+            OciAction::Create,
+            OciAction::Update,
+            OciAction::Delete,
+        ] {
+            if permissions::action_matches(allowed, action) {
+                cedar_text.push_str(&format!(
+                    "permit(principal in Group::\"test:group:{group}\", action == Action::\"{}\", {resource_expr});\n",
+                    action.scope_token()
+                ));
+            }
+        }
+        config_policy_set(id, cedar_text)
+    }
+
+    fn admin_policy(id: &str, group: &str) -> ConfigPolicySet {
+        config_policy_set(
+            id,
+            format!(
+                r#"permit(
+    principal in Group::"test:group:{group}",
+    action == Action::"admin",
+    resource == Registry::"root"
+);"#
+            ),
+        )
     }
 
     async fn claim(store: &InMemoryMetadataStore, handle: &str, owner: Owner) {
@@ -1497,11 +1556,12 @@ permit(
 
     #[tokio::test]
     async fn cedar_enforcement_config_rbac_stable_group_allows() {
-        let auth = AuthService::for_test(vec![PermissionMapping {
-            name: "ci".to_string(),
-            groups: vec![format!("test:group:{CI_GROUP_ID}")],
-            scopes: vec!["repository:acme/*:create".to_string()],
-        }]);
+        let auth = AuthService::for_test(vec![group_repository_policy(
+            "ci",
+            CI_GROUP_ID,
+            OciAction::Create,
+            "resource in Namespace::\"acme#1\"",
+        )]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
 
@@ -1519,11 +1579,14 @@ permit(
 
     #[tokio::test]
     async fn cedar_enforcement_config_rbac_display_mapping_denies() {
-        let auth = AuthService::for_test(vec![PermissionMapping {
-            name: "admins".to_string(),
-            groups: vec!["registry_admins".to_string()],
-            scopes: vec!["repository:acme/*:create".to_string()],
-        }]);
+        let auth = AuthService::for_test(vec![config_policy_set(
+            "display-label",
+            r#"permit(
+    principal in Group::"registry_admins",
+    action == Action::"create",
+    resource in Namespace::"acme#1"
+);"#,
+        )]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
 
@@ -1593,12 +1656,8 @@ permit(
     }
 
     #[tokio::test]
-    async fn cedar_enforcement_admin_global_access_uses_registry_resource() {
-        let auth = AuthService::for_test(vec![PermissionMapping {
-            name: "admin".to_string(),
-            groups: vec![format!("test:group:{CI_GROUP_ID}")],
-            scopes: vec!["repository:*:*".to_string()],
-        }]);
+    async fn cedar_enforcement_admin_access_uses_registry_root_resource() {
+        let auth = AuthService::for_test(vec![admin_policy("admin", CI_GROUP_ID)]);
         let store = InMemoryMetadataStore::default();
         let admin = identity("subject-admin", TokenType::OidcAccess, &[CI_GROUP_ID], &[]);
 
@@ -1609,22 +1668,28 @@ permit(
             actor: admin.actor(),
             repository: "*".to_string(),
             resource: None,
-            action: OciAction::Delete,
+            action: OciAction::Admin,
         };
         let cedar = CedarRepositoryAuthorizer::new()
             .authorize(&auth, &request, &store)
             .await
             .expect("Cedar authorizer should evaluate admin request");
         assert_eq!(cedar, AuthzDecision::Allow);
+
+        claim(&store, "acme", Owner::Org(OrgId::generate())).await;
+        auth.check_permission(&admin, "acme/app", OciAction::Delete, &store)
+            .await
+            .expect_err("control-plane admin does not imply repository delete");
     }
 
     #[tokio::test]
     async fn cedar_enforcement_unclaimed_pull_allowed_but_write_guarded() {
-        let auth = AuthService::for_test(vec![PermissionMapping {
-            name: "ci".to_string(),
-            groups: vec![format!("test:group:{CI_GROUP_ID}")],
-            scopes: vec!["repository:acme/*:create".to_string()],
-        }]);
+        let auth = AuthService::for_test(vec![group_repository_policy(
+            "ci",
+            CI_GROUP_ID,
+            OciAction::Create,
+            "resource == Repository::\"acme/app\"",
+        )]);
         let store = InMemoryMetadataStore::default();
         let ci = identity("subject-ci", TokenType::OidcAccess, &[CI_GROUP_ID], &[]);
 
@@ -1801,7 +1866,7 @@ permit(
             .await
             .expect("Cedar authorizer allows anonymous public pull");
         let cedar_public = CedarRepositoryAuthorizer::new()
-            .authorize_public_pull("acme/app", &store)
+            .authorize_public_pull(&auth, "acme/app", &store)
             .await
             .expect("Cedar authorizer should evaluate public pull");
         assert_eq!(cedar_public, AuthzDecision::Allow);
@@ -1814,7 +1879,7 @@ permit(
         )
         .await;
         let cedar_private = CedarRepositoryAuthorizer::new()
-            .authorize_public_pull("private/app", &private_store)
+            .authorize_public_pull(&auth, "private/app", &private_store)
             .await
             .expect("Cedar authorizer should evaluate private pull");
         assert_eq!(cedar_private, AuthzDecision::Deny);

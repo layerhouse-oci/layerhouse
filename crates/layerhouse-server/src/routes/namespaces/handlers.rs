@@ -327,7 +327,7 @@ async fn put_namespace_grant_response<M: NamespaceStore, B: BlobStore>(
     let grantee = req.grantee.into_grantee()?;
     let existing = matching_grant(state, handle, &grantee).await?;
     let now = crate::store::metadata::now_epoch();
-    let action = public_safe_action(&grantee, req.action);
+    let action = public_safe_action(&grantee, req.action)?;
     let label = req
         .label
         .as_deref()
@@ -377,7 +377,7 @@ async fn patch_namespace_grant_response<M: NamespaceStore, B: BlobStore>(
             "namespace grant {grant_id:?} not found"
         )));
     };
-    grant.action = public_safe_action(&grant.grantee, req.action);
+    grant.action = public_safe_action(&grant.grantee, req.action)?;
     if let Some(label) = req
         .label
         .as_deref()
@@ -470,11 +470,16 @@ async fn ensure_namespace_exists<M: NamespaceStore, B: BlobStore>(
 fn public_safe_action(
     grantee: &NamespaceGrantGrantee,
     action: crate::auth::permissions::OciAction,
-) -> crate::auth::permissions::OciAction {
+) -> Result<crate::auth::permissions::OciAction, LayerhouseError> {
+    if !crate::auth::permissions::is_repository_action(action) {
+        return Err(LayerhouseError::NameInvalid(
+            "namespace grants only support repository actions".to_string(),
+        ));
+    }
     if matches!(grantee, NamespaceGrantGrantee::Public) {
-        crate::auth::permissions::OciAction::Pull
+        Ok(crate::auth::permissions::OciAction::Pull)
     } else {
-        action
+        Ok(action)
     }
 }
 
