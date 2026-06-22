@@ -1,6 +1,6 @@
 use cedar_policy::{
-    Authorizer as CedarPolicyAuthorizer, Context, Decision, Entities, EntityUid, PolicySet,
-    Request, Schema, ValidationMode, Validator,
+    Authorizer as CedarPolicyAuthorizer, Context, Decision, Entities, EntityUid,
+    PolicySet as CedarPolicySet, Request, Schema, ValidationMode, Validator,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -10,7 +10,8 @@ use crate::auth::permissions::{self, OciAction};
 use crate::auth::token::TokenType;
 use crate::store::metadata::handle::{handle_of, is_handle_reserved};
 use crate::store::metadata::{
-    NamespaceEpoch, NamespaceGrant, NamespaceGrantGrantee, NamespaceStore, Owner,
+    AuthorizationStore, NamespaceEpoch, NamespaceGrant, NamespaceGrantGrantee, NamespaceStore,
+    Owner, PolicySet as MetadataPolicySet,
 };
 
 use super::AuthService;
@@ -66,10 +67,10 @@ impl CedarSchemaSource<'_> {
 struct CedarPolicySource<'a>(&'a str);
 
 impl CedarPolicySource<'_> {
-    fn parse(self, schema: &Schema) -> Result<PolicySet, String> {
+    fn parse(self, schema: &Schema) -> Result<CedarPolicySet, String> {
         let policy_set = self
             .0
-            .parse::<PolicySet>()
+            .parse::<CedarPolicySet>()
             .map_err(|err| format!("invalid Cedar authorization policy: {err}"))?;
         let validation =
             Validator::new(schema.clone()).validate(&policy_set, ValidationMode::Strict);
@@ -79,6 +80,11 @@ impl CedarPolicySource<'_> {
             Err(format!("invalid Cedar authorization policy: {validation}"))
         }
     }
+}
+
+pub(crate) fn validate_policy_text(policy: &str) -> Result<(), String> {
+    let schema = AUTHORIZATION_SCHEMA.parse()?;
+    CedarPolicySource(policy).parse(&schema).map(|_| ())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -481,9 +487,9 @@ impl CedarRepositoryAuthorizer {
         &self,
         auth: &AuthService,
         request: &AuthzRequest,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<AuthzDecision, String> {
-        let policy = policy_for_request(auth, request, namespaces).await?;
+        let policy = policy_for_request(auth, request, store).await?;
         Ok(to_authz_decision(cedar_decision(
             CedarPolicySource(&policy),
             request,
@@ -493,7 +499,7 @@ impl CedarRepositoryAuthorizer {
     pub(crate) async fn authorize_public_pull(
         &self,
         repository: &str,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<AuthzDecision, String> {
         let Ok(handle) = handle_of(repository) else {
             return Ok(AuthzDecision::Deny);
@@ -501,7 +507,7 @@ impl CedarRepositoryAuthorizer {
         if is_handle_reserved(handle) {
             return Ok(AuthzDecision::Deny);
         }
-        let Some(namespace) = namespaces
+        let Some(namespace) = store
             .get_namespace(handle)
             .await
             .map_err(|err| err.to_string())?
@@ -513,7 +519,7 @@ impl CedarRepositoryAuthorizer {
         let resource = CedarResource::Repository(CedarRepository::from_resource(&resource));
         let epoch = NamespaceEpoch::from_namespace(&namespace);
         let mut policy = String::new();
-        for grant in namespaces
+        for grant in store
             .list_namespace_grants(handle)
             .await
             .map_err(|err| err.to_string())?
@@ -522,6 +528,13 @@ impl CedarRepositoryAuthorizer {
                 append_namespace_grant_policies(&mut policy, &grant, &epoch)?;
             }
         }
+        append_enabled_policy_sets(
+            &mut policy,
+            &store
+                .list_policy_sets()
+                .await
+                .map_err(|err| err.to_string())?,
+        );
 
         Ok(to_authz_decision(public_cedar_decision(
             CedarPolicySource(&policy),
@@ -536,9 +549,9 @@ impl CedarRepositoryAuthorizer {
         auth: &AuthService,
         actor: &crate::auth::principal::Actor,
         repository: &str,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<Option<OciAction>, String> {
-        let resource = repository_resource_for_authorization(repository, namespaces).await?;
+        let resource = repository_resource_for_authorization(repository, store).await?;
         let mut max = None;
         for action in [
             OciAction::Pull,
@@ -552,7 +565,7 @@ impl CedarRepositoryAuthorizer {
                 resource: resource.clone(),
                 action,
             };
-            if self.authorize(auth, &request, namespaces).await? == AuthzDecision::Allow {
+            if self.authorize(auth, &request, store).await? == AuthzDecision::Allow {
                 max = Some(action);
             }
         }
@@ -693,13 +706,13 @@ fn cedar_decision_with_schema(
 async fn policy_for_request(
     auth: &AuthService,
     request: &AuthzRequest,
-    namespaces: &dyn NamespaceStore,
+    store: &dyn AuthorizationStore,
 ) -> Result<String, String> {
     let mut policy = String::new();
     let resource = CedarResource::from_request(request);
     if let Some(repository_resource) = request.resource.as_ref() {
         let epoch = &repository_resource.namespace.epoch;
-        if let Some(namespace) = namespaces
+        if let Some(namespace) = store
             .get_namespace(&epoch.handle)
             .await
             .map_err(|err| err.to_string())?
@@ -711,7 +724,7 @@ async fn policy_for_request(
                 &namespace.owner,
                 epoch,
             )?;
-            for grant in namespaces
+            for grant in store
                 .list_namespace_grants(&epoch.handle)
                 .await
                 .map_err(|err| err.to_string())?
@@ -722,7 +735,26 @@ async fn policy_for_request(
     }
     append_config_permission_policies(&mut policy, auth, request, &resource)?;
     append_explicit_scope_policies(&mut policy, request, &resource)?;
+    append_enabled_policy_sets(
+        &mut policy,
+        &store
+            .list_policy_sets()
+            .await
+            .map_err(|err| err.to_string())?,
+    );
     Ok(policy)
+}
+
+fn append_enabled_policy_sets(policy: &mut String, policy_sets: &[MetadataPolicySet]) {
+    for policy_set in policy_sets.iter().filter(|policy_set| policy_set.enabled) {
+        if !policy.ends_with('\n') {
+            policy.push('\n');
+        }
+        policy.push_str(&policy_set.cedar_text);
+        if !policy.ends_with('\n') {
+            policy.push('\n');
+        }
+    }
 }
 
 fn append_namespace_owner_policies(
@@ -1016,7 +1048,10 @@ mod tests {
     use crate::auth::principal::stable_group_ids;
     use crate::auth::token::AuthIdentity;
     use crate::config::PermissionMapping;
-    use crate::store::metadata::{InMemoryMetadataStore, ReleaseReason, typed_id::OrgId};
+    use crate::store::metadata::{
+        InMemoryMetadataStore, PolicySet as MetadataPolicySet, PolicySource, PolicyStore,
+        ReleaseReason, typed_id::OrgId,
+    };
 
     const STABLE_GROUP_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
     const BUILDER_GROUP_ID: &str = "550e8400-e29b-41d4-a716-446655440001";
@@ -1507,6 +1542,54 @@ permit(
             AuthzDecision::Deny,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn cedar_enforcement_raft_policy_sets_are_authoritative_when_enabled() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::Org(OrgId::generate())).await;
+        let mut builder = identity(
+            "subject-builder",
+            TokenType::OidcAccess,
+            &[BUILDER_GROUP_ID],
+            &[],
+        );
+        builder.username = Some("builder".to_string());
+
+        auth.check_permission(&builder, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("no builtin grant exists yet");
+
+        let policy = MetadataPolicySet {
+            id: "acme-builders".to_string(),
+            name: "acme builders".to_string(),
+            source: PolicySource::Raft,
+            cedar_text: format!(
+                r#"permit(
+    principal in Group::"test:group:{BUILDER_GROUP_ID}",
+    action == Action::"create",
+    resource in Namespace::"acme#1"
+);"#
+            ),
+            enabled: true,
+            created_by: Subject::new("subject-admin"),
+            updated_by: Subject::new("subject-admin"),
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.put_policy_set(policy.clone()).await.unwrap();
+
+        auth.check_permission(&builder, "acme/app", OciAction::Create, &store)
+            .await
+            .expect("enabled Raft Cedar policy allows create");
+
+        let mut disabled = policy;
+        disabled.enabled = false;
+        store.put_policy_set(disabled).await.unwrap();
+        auth.check_permission(&builder, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("disabled Raft Cedar policy is ignored");
     }
 
     #[tokio::test]

@@ -357,13 +357,26 @@ pub trait NamespaceStore: Send + Sync + 'static {
     ) -> Result<Vec<ObservedIdentity>, LayerhouseError>;
 }
 
+// ── Cedar policy storage ──────────────────────────────────────────────
+
+#[async_trait]
+pub trait PolicyStore: Send + Sync + 'static {
+    async fn list_policy_sets(&self) -> Result<Vec<PolicySet>, LayerhouseError>;
+    async fn get_policy_set(&self, id: &str) -> Result<Option<PolicySet>, LayerhouseError>;
+    async fn put_policy_set(&self, policy: PolicySet) -> Result<(), LayerhouseError>;
+    async fn delete_policy_set(&self, id: &str) -> Result<bool, LayerhouseError>;
+}
+
+pub trait AuthorizationStore: NamespaceStore + PolicyStore {}
+impl<T: NamespaceStore + PolicyStore> AuthorizationStore for T {}
+
 /// OCI registry core: manifest CRUD + mirror config + blob lifecycle.
 pub trait RegistryStore: ManifestStore + MirrorConfigStore {}
 impl<T: ManifestStore + MirrorConfigStore> RegistryStore for T {}
 
 /// Admin API: mirror rules, proxy caches, warm images, sync jobs, helm.
-pub trait AdminStore: MirrorConfigStore + JobStore + HelmStore {}
-impl<T: MirrorConfigStore + JobStore + HelmStore> AdminStore for T {}
+pub trait AdminStore: MirrorConfigStore + JobStore + HelmStore + PolicyStore {}
+impl<T: MirrorConfigStore + JobStore + HelmStore + PolicyStore> AdminStore for T {}
 
 /// Scheduler: mirror config + sync job execution + manifest reads.
 pub trait SchedulerStore: ManifestStore + MirrorConfigStore + JobStore {}
@@ -379,6 +392,7 @@ pub trait MetadataStore:
     + HelmStore
     + RepositoryStore
     + NamespaceStore
+    + PolicyStore
 {
 }
 
@@ -389,7 +403,8 @@ impl<
         + TokenStore
         + HelmStore
         + RepositoryStore
-        + NamespaceStore,
+        + NamespaceStore
+        + PolicyStore,
 > MetadataStore for T
 {
 }

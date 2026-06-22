@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::auth::token::{AuthIdentity, TokenType};
 use crate::error::LayerhouseError;
 use crate::routes::AppState;
-use crate::store::metadata::NamespaceStore;
+use crate::store::metadata::AuthorizationStore;
 
 #[derive(Debug, Serialize)]
 pub struct SessionResponse {
@@ -25,7 +25,7 @@ pub struct SessionResponse {
     pub is_admin: bool,
 }
 
-pub fn routes<M: NamespaceStore, B: Send + Sync + 'static>() -> Router<Arc<AppState<M, B>>> {
+pub fn routes<M: AuthorizationStore, B: Send + Sync + 'static>() -> Router<Arc<AppState<M, B>>> {
     Router::new()
         .route("/api/v1/session", axum::routing::get(get_session::<M, B>))
         .route(
@@ -34,7 +34,7 @@ pub fn routes<M: NamespaceStore, B: Send + Sync + 'static>() -> Router<Arc<AppSt
         )
 }
 
-async fn get_session<M: NamespaceStore, B: Send + Sync + 'static>(
+async fn get_session<M: AuthorizationStore, B: Send + Sync + 'static>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
 ) -> Result<impl IntoResponse, LayerhouseError> {

@@ -9,7 +9,7 @@ use crate::error::LayerhouseError;
 use crate::routes::AppState;
 use crate::store::blob::BlobStore;
 use crate::store::metadata::{
-    NamespaceGrant, NamespaceGrantGrantee, NamespaceStore, Owner, ReleaseReason,
+    AuthorizationStore, NamespaceGrant, NamespaceGrantGrantee, NamespaceStore, Owner, ReleaseReason,
 };
 
 use super::types::{
@@ -20,7 +20,7 @@ use super::types::{
     observed_identity_response, require_admin, require_auth,
 };
 
-pub(crate) async fn list_namespaces<M: NamespaceStore, B: BlobStore>(
+pub(crate) async fn list_namespaces<M: AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
 ) -> Result<Response, LayerhouseError> {
@@ -55,7 +55,7 @@ pub(crate) async fn list_account_namespaces<M: NamespaceStore, B: BlobStore>(
         .into_response())
 }
 
-pub(crate) async fn get_namespace<M: NamespaceStore, B: BlobStore>(
+pub(crate) async fn get_namespace<M: AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
     Path(handle): Path<String>,
@@ -72,7 +72,7 @@ pub(crate) async fn get_namespace<M: NamespaceStore, B: BlobStore>(
     }
 }
 
-pub(crate) async fn claim_namespace<M: NamespaceStore, B: BlobStore>(
+pub(crate) async fn claim_namespace<M: AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
     Path(handle): Path<String>,
@@ -139,7 +139,7 @@ pub(crate) async fn release_namespace<M: NamespaceStore, B: BlobStore>(
     Ok((StatusCode::NO_CONTENT, Json(())).into_response())
 }
 
-pub(crate) async fn revoke_namespace<M: NamespaceStore, B: BlobStore>(
+pub(crate) async fn revoke_namespace<M: AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
     Path(handle): Path<String>,
@@ -221,7 +221,7 @@ pub(crate) async fn search_observed_users<M: NamespaceStore, B: BlobStore>(
         .into_response())
 }
 
-pub(crate) async fn list_admin_namespace_grants<M: NamespaceStore, B: BlobStore>(
+pub(crate) async fn list_admin_namespace_grants<M: AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
     Path(handle): Path<String>,
@@ -232,7 +232,7 @@ pub(crate) async fn list_admin_namespace_grants<M: NamespaceStore, B: BlobStore>
     list_namespace_grants_response(&state, &handle).await
 }
 
-pub(crate) async fn create_admin_namespace_grant<M: NamespaceStore, B: BlobStore>(
+pub(crate) async fn create_admin_namespace_grant<M: AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
     Path(handle): Path<String>,
@@ -243,7 +243,7 @@ pub(crate) async fn create_admin_namespace_grant<M: NamespaceStore, B: BlobStore
     put_namespace_grant_response(&state, identity, &handle, req, true).await
 }
 
-pub(crate) async fn update_admin_namespace_grant<M: NamespaceStore, B: BlobStore>(
+pub(crate) async fn update_admin_namespace_grant<M: AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
     Path((handle, grant_id)): Path<(String, String)>,
@@ -254,7 +254,7 @@ pub(crate) async fn update_admin_namespace_grant<M: NamespaceStore, B: BlobStore
     patch_namespace_grant_response(&state, identity, &handle, &grant_id, req, true).await
 }
 
-pub(crate) async fn delete_admin_namespace_grant<M: NamespaceStore, B: BlobStore>(
+pub(crate) async fn delete_admin_namespace_grant<M: AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
     Path((handle, grant_id)): Path<(String, String)>,
@@ -273,7 +273,7 @@ pub(crate) async fn delete_admin_namespace_grant<M: NamespaceStore, B: BlobStore
     .await
 }
 
-pub(crate) async fn list_admin_namespace_grant_audit<M: NamespaceStore, B: BlobStore>(
+pub(crate) async fn list_admin_namespace_grant_audit<M: AuthorizationStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     identity: Option<Extension<AuthIdentity>>,
     Path(handle): Path<String>,
