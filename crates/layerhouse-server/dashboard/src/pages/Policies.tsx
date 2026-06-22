@@ -1,4 +1,5 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import type { RouteSectionProps } from "@solidjs/router";
 import {
   ApiError,
   deletePolicySet,
@@ -47,7 +48,9 @@ function sourceLabel(source: PolicySet["source"]) {
   return source === "raft" ? t("policies.source.raft") : source;
 }
 
-export default function Policies() {
+type PoliciesProps = { embedded?: boolean } & Partial<RouteSectionProps>;
+
+export default function Policies(props: PoliciesProps = {}) {
   const [session, setSession] = createSignal<DashboardSession | null>(null);
   const [policies, setPolicies] = createSignal<PolicySet[]>([]);
   const [loading, setLoading] = createSignal(true);
@@ -153,17 +156,19 @@ export default function Policies() {
   }
 
   return (
-    <div class="policy-page">
-      <section class="hero glass">
-        <div>
-          <p class="eyebrow">
-            <span class="status-dot" aria-hidden="true" />
-            {t("policies.eyebrow")}
-          </p>
-          <h1>{t("policies.title")}</h1>
-          <p class="hero-copy">{t("policies.heroCopy")}</p>
-        </div>
-      </section>
+    <div classList={{ "policy-page": true, "policy-page-embedded": !!props.embedded }}>
+      <Show when={!props.embedded}>
+        <section class="hero glass">
+          <div>
+            <p class="eyebrow">
+              <span class="status-dot" aria-hidden="true" />
+              {t("policies.eyebrow")}
+            </p>
+            <h1>{t("policies.title")}</h1>
+            <p class="hero-copy">{t("policies.heroCopy")}</p>
+          </div>
+        </section>
+      </Show>
 
       <Show when={error()}>
         <ErrorBanner message={error()!} onRetry={load} />

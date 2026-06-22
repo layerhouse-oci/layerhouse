@@ -6810,6 +6810,150 @@ pre {
 }
 
 /* ================================================================
+   Admin page — scoped under .admin-page
+   ================================================================ */
+
+.admin-page .admin-hero {
+  min-height: 188px;
+  display: grid;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 30px 34px;
+}
+
+.admin-page .admin-hero h1 {
+  max-width: 720px;
+  margin-bottom: 12px;
+  color: var(--strong);
+  font-size: 42px;
+  font-weight: 500;
+  line-height: 1.1;
+}
+
+.admin-tabs {
+  display: inline-flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--button-radius);
+  background: var(--control);
+}
+
+.admin-tabs button {
+  min-height: 38px;
+  border: 0;
+  border-radius: calc(var(--button-radius) - 2px);
+  padding: 0 14px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.admin-tabs button.active {
+  background: var(--control-active);
+  color: var(--strong);
+  box-shadow: var(--control-shadow);
+}
+
+.admin-open-mode {
+  display: grid;
+  gap: 22px;
+  padding: 28px;
+  border: 1px solid color-mix(in srgb, var(--yellow) 28%, var(--border));
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--yellow-soft) 42%, transparent), transparent),
+    var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.admin-open-mode h2 {
+  margin: 6px 0 8px;
+  color: var(--strong);
+  font-size: 28px;
+  font-weight: 600;
+}
+
+.admin-open-mode p:not(.eyebrow) {
+  max-width: 780px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.admin-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.admin-mode-grid div {
+  display: grid;
+  gap: 7px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-solid);
+}
+
+.admin-mode-grid span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.admin-mode-grid strong {
+  color: var(--strong);
+  font-size: 16px;
+}
+
+.admin-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.admin-page .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--button-radius);
+  background: var(--blue);
+  color: #fff;
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .admin-page .admin-hero {
+    min-height: auto;
+    padding: 24px;
+  }
+
+  .admin-page .admin-hero h1 {
+    font-size: 34px;
+  }
+
+  .admin-tabs,
+  .admin-mode-grid {
+    width: 100%;
+  }
+
+  .admin-tabs,
+  .admin-mode-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-tabs {
+    display: grid;
+  }
+}
+
+/* ================================================================
    Policy page — scoped under .policy-page
    ================================================================ */
 
