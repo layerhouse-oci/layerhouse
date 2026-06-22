@@ -20,6 +20,7 @@ const Repositories = lazy(() => import("./pages/Repositories"));
 const RepoDetail = lazy(() => import("./pages/RepoDetail"));
 const TagDiff = lazy(() => import("./pages/TagDiff"));
 const Access = lazy(() => import("./pages/Access"));
+const Admin = lazy(() => import("./pages/Admin"));
 const Policies = lazy(() => import("./pages/Policies"));
 const Mirror = lazy(() => import("./pages/Mirror"));
 const ProxyCache = lazy(() => import("./pages/ProxyCache"));
@@ -37,7 +38,7 @@ const OAuth2Start: Component = () => {
 const NAV_ITEMS = [
   { href: "/overview", label: "app.nav.overview" },
   { href: "/repos", label: "app.nav.repositories" },
-  { href: "/policies", label: "app.nav.policies", adminOnly: true },
+  { href: "/admin", label: "app.nav.admin", adminOnly: true },
   { href: "/mirror", label: "app.nav.mirror" },
   { href: "/proxy-cache", label: "app.nav.proxyCache" },
   { href: "/cluster", label: "app.nav.cluster" },
@@ -232,6 +233,7 @@ export default function App() {
       <Route path="/repos" component={Repositories} />
       <Route path="/repos/*name" component={RepoDetail} />
       <Route path="/diff/:name/:a/:b" component={TagDiff} />
+      <Route path="/admin" component={Admin} />
       <Route path="/policies" component={Policies} />
       <Route path="/mirror" component={Mirror} />
       <Route path="/proxy-cache" component={ProxyCache} />

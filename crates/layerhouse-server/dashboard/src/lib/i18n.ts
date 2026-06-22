@@ -48,6 +48,7 @@ const en: Messages = {
   "app.nav.overview": "Overview",
   "app.nav.repositories": "Repositories",
   "app.nav.policies": "Policies",
+  "app.nav.admin": "Admin",
   "app.nav.mirror": "Mirror",
   "app.nav.proxyCache": "Proxy Cache",
   "app.nav.cluster": "Cluster",
@@ -424,6 +425,32 @@ const en: Messages = {
   "policies.deleteTitle": "Delete policy {id}?",
   "policies.deleteWarning":
     "This removes the policy set from Raft. Any access granted only by this policy stops on the next authorization check.",
+
+  "admin.eyebrow": "Control Plane",
+  "admin.title": "Admin",
+  "admin.copy":
+    "Manage registry-wide operations in one place: namespace recovery, durable grants, and Cedar policy sets.",
+  "admin.loading": "Loading admin state...",
+  "admin.fetchError": "Failed to load admin state",
+  "admin.tabs": "Admin sections",
+  "admin.namespaces": "Namespaces",
+  "admin.policies": "Policies",
+  "admin.signInTitle": "Sign in to administer Layerhouse",
+  "admin.signInDesc": "Admin APIs require an authenticated session with registry admin access.",
+  "admin.requiredTitle": "Admin access required",
+  "admin.requiredDesc":
+    "Your session can manage personal access, but it cannot edit registry-wide namespaces or policy sets.",
+  "admin.authDisabledEyebrow": "Open registry mode",
+  "admin.authDisabledTitle": "Authentication is disabled",
+  "admin.authDisabledDesc":
+    "This registry is open to the trusted network. There are no dashboard sessions, PATs, per-user grants, or enforced Cedar policy decisions until auth is configured.",
+  "admin.openModeRepos": "Repository access",
+  "admin.openModeReposValue": "Anyone can push, pull, and delete",
+  "admin.openModeTokens": "Personal tokens",
+  "admin.openModeTokensValue": "Unavailable without auth",
+  "admin.openModePolicies": "Cedar policies",
+  "admin.openModePoliciesValue": "Stored only; not enforced",
+  "admin.viewOpenRegistry": "View open registry",
 
   "oauth2.errorEyebrow": "OIDC sign in",
   "oauth2.stateErrorTitle": "Sign-in link expired",

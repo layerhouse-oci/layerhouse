@@ -278,9 +278,10 @@ function GrantTable(props: {
   );
 }
 
-export default function Access(props: { onClose?: () => void }) {
+export default function Access(props: { onClose?: () => void; mode?: "account" | "admin" }) {
   const isModal = () => props.onClose !== undefined;
-  const [tab, setTab] = createSignal<AccessTab>("tokens");
+  const adminMode = () => props.mode === "admin";
+  const [tab, setTab] = createSignal<AccessTab>(props.mode === "admin" ? "admin" : "tokens");
   const [session, setSession] = createSignal<DashboardSession | null>(null);
   const [tokens, setTokens] = createSignal<PersonalAccessToken[]>([]);
   const [accountNamespaces, setAccountNamespaces] = createSignal<NamespaceResponse[]>([]);
@@ -348,13 +349,19 @@ export default function Access(props: { onClose?: () => void }) {
       const nextSession = await fetchSession();
       setSession(nextSession);
       if (nextSession.auth_enabled) {
-        setTokens(await fetchPersonalAccessTokens());
-        const accountResponse = await fetchAccountNamespaces();
-        setAccountNamespaces(accountResponse.namespaces);
-        if (!selectedAccountNamespace() && accountResponse.namespaces.length > 0) {
-          setSelectedAccountNamespace(accountResponse.namespaces[0]);
+        if (!adminMode()) {
+          setTokens(await fetchPersonalAccessTokens());
+          const accountResponse = await fetchAccountNamespaces();
+          setAccountNamespaces(accountResponse.namespaces);
+          if (!selectedAccountNamespace() && accountResponse.namespaces.length > 0) {
+            setSelectedAccountNamespace(accountResponse.namespaces[0]);
+          }
+          await refreshAccountGrantMap(accountResponse.namespaces);
+        } else {
+          setTokens([]);
+          setAccountNamespaces([]);
+          setAccountNamespaceGrants({});
         }
-        await refreshAccountGrantMap(accountResponse.namespaces);
         if (nextSession.is_admin) {
           const response = await fetchNamespaces();
           setAdminNamespaces(response.namespaces);
@@ -902,7 +909,7 @@ export default function Access(props: { onClose?: () => void }) {
 
   const content = (
     <div>
-      <Show when={!isModal()}>
+      <Show when={!isModal() && !adminMode()}>
         <div class="page-header">
           <div>
             <p class="eyebrow">{t("access.eyebrow")}</p>
@@ -916,7 +923,7 @@ export default function Access(props: { onClose?: () => void }) {
           </Show>
         </div>
       </Show>
-      <Show when={isModal()}>
+      <Show when={isModal() && !adminMode()}>
         <div class="access-modal-header">
           <h2>{t("access.title")}</h2>
           <div class="access-modal-header-actions">
@@ -962,62 +969,55 @@ export default function Access(props: { onClose?: () => void }) {
               </div>
             }
           >
-            <div class="access-stats">
-              <div class="fact-grid">
-                <div>
-                  <span>{t("access.signedInAs")}</span>
-                  <strong>{userLabel(session())}</strong>
-                </div>
-                <div>
-                  <span>{t("access.activeTokens")}</span>
-                  <strong>{activeTokens()}</strong>
-                </div>
-                <div>
-                  <span>{t("access.expiringSoon")}</span>
-                  <strong>{expiringSoonCount()}</strong>
+            <Show when={!adminMode()}>
+              <div class="access-stats">
+                <div class="fact-grid">
+                  <div>
+                    <span>{t("access.signedInAs")}</span>
+                    <strong>{userLabel(session())}</strong>
+                  </div>
+                  <div>
+                    <span>{t("access.activeTokens")}</span>
+                    <strong>{activeTokens()}</strong>
+                  </div>
+                  <div>
+                    <span>{t("access.expiringSoon")}</span>
+                    <strong>{expiringSoonCount()}</strong>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div class="tabs" role="tablist">
-              <button
-                class={tab() === "tokens" ? "active" : ""}
-                type="button"
-                onClick={() => setTab("tokens")}
-              >
-                {t("access.personalTokens")}
-              </button>
-              <button
-                class={tab() === "namespaces" ? "active" : ""}
-                type="button"
-                onClick={() => setTab("namespaces")}
-              >
-                {t("access.namespaces")}
-              </button>
-              <button
-                class={tab() === "session" ? "active" : ""}
-                type="button"
-                onClick={() => setTab("session")}
-              >
-                {t("access.session")}
-              </button>
-              <button
-                class={tab() === "permissions" ? "active" : ""}
-                type="button"
-                onClick={() => setTab("permissions")}
-              >
-                {t("access.permissions")}
-              </button>
-              <Show when={session()?.is_admin}>
+              <div class="tabs" role="tablist">
                 <button
-                  class={tab() === "admin" ? "active" : ""}
+                  class={tab() === "tokens" ? "active" : ""}
                   type="button"
-                  onClick={() => setTab("admin")}
+                  onClick={() => setTab("tokens")}
                 >
-                  {t("access.admin")}
+                  {t("access.personalTokens")}
                 </button>
-              </Show>
-            </div>
+                <button
+                  class={tab() === "namespaces" ? "active" : ""}
+                  type="button"
+                  onClick={() => setTab("namespaces")}
+                >
+                  {t("access.namespaces")}
+                </button>
+                <button
+                  class={tab() === "session" ? "active" : ""}
+                  type="button"
+                  onClick={() => setTab("session")}
+                >
+                  {t("access.session")}
+                </button>
+                <button
+                  class={tab() === "permissions" ? "active" : ""}
+                  type="button"
+                  onClick={() => setTab("permissions")}
+                >
+                  {t("access.permissions")}
+                </button>
+              </div>
+            </Show>
 
             <Show when={tab() === "tokens"}>
               <div class="card">
