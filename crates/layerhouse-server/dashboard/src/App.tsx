@@ -20,6 +20,7 @@ const Repositories = lazy(() => import("./pages/Repositories"));
 const RepoDetail = lazy(() => import("./pages/RepoDetail"));
 const TagDiff = lazy(() => import("./pages/TagDiff"));
 const Access = lazy(() => import("./pages/Access"));
+const Policies = lazy(() => import("./pages/Policies"));
 const Mirror = lazy(() => import("./pages/Mirror"));
 const ProxyCache = lazy(() => import("./pages/ProxyCache"));
 const Cluster = lazy(() => import("./pages/Cluster"));
@@ -36,6 +37,7 @@ const OAuth2Start: Component = () => {
 const NAV_ITEMS = [
   { href: "/overview", label: "app.nav.overview" },
   { href: "/repos", label: "app.nav.repositories" },
+  { href: "/policies", label: "app.nav.policies", adminOnly: true },
   { href: "/mirror", label: "app.nav.mirror" },
   { href: "/proxy-cache", label: "app.nav.proxyCache" },
   { href: "/cluster", label: "app.nav.cluster" },
@@ -118,7 +120,7 @@ const AppShell: Component<RouteSectionProps> = (props) => {
             <span class="brand-label">{t("app.brandName")}</span>
           </A>
           <nav class="nav">
-            {NAV_ITEMS.map((item) => (
+            {NAV_ITEMS.filter((item) => !item.adminOnly || session()?.is_admin).map((item) => (
               <A href={item.href} activeClass="active" inactiveClass="">
                 {t(item.label)}
               </A>
@@ -230,6 +232,7 @@ export default function App() {
       <Route path="/repos" component={Repositories} />
       <Route path="/repos/*name" component={RepoDetail} />
       <Route path="/diff/:name/:a/:b" component={TagDiff} />
+      <Route path="/policies" component={Policies} />
       <Route path="/mirror" component={Mirror} />
       <Route path="/proxy-cache" component={ProxyCache} />
       <Route path="/cluster" component={Cluster} />

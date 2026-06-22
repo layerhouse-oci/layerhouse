@@ -47,6 +47,7 @@ const en: Messages = {
   "app.brandName": "Layerhouse",
   "app.nav.overview": "Overview",
   "app.nav.repositories": "Repositories",
+  "app.nav.policies": "Policies",
   "app.nav.mirror": "Mirror",
   "app.nav.proxyCache": "Proxy Cache",
   "app.nav.cluster": "Cluster",
@@ -392,6 +393,37 @@ const en: Messages = {
   "access.authDisabled": "Authentication is not configured",
   "access.authDisabledDesc":
     "This registry is currently open. Configure auth to manage dashboard sessions and personal access tokens.",
+
+  "policies.eyebrow": "Cedar Authorization",
+  "policies.title": "Policies",
+  "policies.heroCopy":
+    "Edit Raft-backed Cedar policy sets. Policy text is validated before it can change registry authorization.",
+  "policies.enabled": "Enabled",
+  "policies.disabled": "Disabled",
+  "policies.total": "Total policies",
+  "policies.catalog": "Policy catalog",
+  "policies.policySets": "Policy sets",
+  "policies.create": "Create policy",
+  "policies.loading": "Loading policies...",
+  "policies.empty": "No policy sets yet",
+  "policies.emptyDesc":
+    "Create a Cedar policy set to grant access beyond namespace ownership and grants.",
+  "policies.source": "Source",
+  "policies.source.raft": "Raft",
+  "policies.editor": "Policy editor",
+  "policies.newPolicy": "New policy",
+  "policies.name": "Name",
+  "policies.cedarText": "Cedar policy text",
+  "policies.validationHint":
+    "Layerhouse validates Cedar syntax and schema before committing the policy through Raft. Rust safety guards still apply.",
+  "policies.required": "Policy ID, name, and Cedar text are required.",
+  "policies.fetchError": "Failed to load policies",
+  "policies.saveError": "Failed to save policy",
+  "policies.deleteError": "Failed to delete policy",
+  "policies.deleteEyebrow": "Policy removal",
+  "policies.deleteTitle": "Delete policy {id}?",
+  "policies.deleteWarning":
+    "This removes the policy set from Raft. Any access granted only by this policy stops on the next authorization check.",
 
   "oauth2.errorEyebrow": "OIDC sign in",
   "oauth2.stateErrorTitle": "Sign-in link expired",

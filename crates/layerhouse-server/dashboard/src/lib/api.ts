@@ -23,8 +23,10 @@ import type {
   ObservedIdentityListResponse,
   PatchNamespaceGrantRequest,
   PersonalAccessToken,
+  PolicySet,
   ProxyCache,
   ProxyCacheCreate,
+  PutPolicySetRequest,
   PutNamespaceGrantRequest,
   ReleaseNamespaceRequest,
   RepositoryFilter,
@@ -410,6 +412,26 @@ export function fetchAdminNamespaceGrantAudit(
   handle: string,
 ): Promise<NamespaceGrantAuditListResponse> {
   return fetchJson(`/api/v1/admin/namespaces/${encodeURIComponent(handle)}/grant-audit`);
+}
+
+export function fetchPolicySets(): Promise<PolicySet[]> {
+  return fetchJson("/api/v1/admin/policies");
+}
+
+export async function putPolicySet(id: string, policy: PutPolicySetRequest): Promise<void> {
+  await fetchNoBody(`/api/v1/admin/policies/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(policy),
+    signal: AbortSignal.timeout(15000),
+  });
+}
+
+export async function deletePolicySet(id: string): Promise<void> {
+  await fetchNoBody(`/api/v1/admin/policies/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    signal: AbortSignal.timeout(15000),
+  });
 }
 
 export function createPersonalAccessToken(token: CreateTokenRequest): Promise<CreateTokenResponse> {
