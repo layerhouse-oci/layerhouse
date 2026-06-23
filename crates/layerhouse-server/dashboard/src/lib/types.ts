@@ -289,6 +289,8 @@ export interface PolicySet {
   updated_by: string;
   created_at: number;
   updated_at: number;
+  editable?: boolean;
+  description?: string | null;
 }
 
 export interface PutPolicySetRequest {
