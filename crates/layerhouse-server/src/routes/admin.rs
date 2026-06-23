@@ -6,10 +6,11 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::identity::Subject;
 use crate::auth::token::AuthIdentity;
+use crate::config::ConfigPolicySet;
 use crate::error::LayerhouseError;
 use crate::store::blob::BlobStore;
 #[allow(unused_imports)]
@@ -20,6 +21,8 @@ use crate::store::metadata::{
 };
 
 use super::AppState;
+
+const BUILTIN_POLICY_ID: &str = "builtin-authorization";
 
 #[derive(Deserialize)]
 struct ListRulesQuery {
@@ -36,6 +39,89 @@ struct PutPolicySetRequest {
     name: String,
     cedar_text: String,
     enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct PolicySetResponse {
+    id: String,
+    name: String,
+    source: PolicySource,
+    cedar_text: String,
+    enabled: bool,
+    created_by: Subject,
+    updated_by: Subject,
+    created_at: u64,
+    updated_at: u64,
+    editable: bool,
+    description: Option<String>,
+}
+
+impl PolicySetResponse {
+    fn from_raft(policy: PolicySet) -> Self {
+        Self {
+            id: policy.id,
+            name: policy.name,
+            source: policy.source,
+            cedar_text: policy.cedar_text,
+            enabled: policy.enabled,
+            created_by: policy.created_by,
+            updated_by: policy.updated_by,
+            created_at: policy.created_at,
+            updated_at: policy.updated_at,
+            editable: true,
+            description: None,
+        }
+    }
+
+    fn from_config(policy: &ConfigPolicySet) -> Self {
+        Self {
+            id: policy.id.clone(),
+            name: policy.name.clone(),
+            source: PolicySource::Config,
+            cedar_text: policy.cedar_text.clone(),
+            enabled: policy.enabled,
+            created_by: Subject::new("config"),
+            updated_by: Subject::new("config"),
+            created_at: 0,
+            updated_at: 0,
+            editable: false,
+            description: Some("Loaded from [[auth.policy_sets]] in the node config.".to_string()),
+        }
+    }
+
+    fn builtin_authorization() -> Self {
+        Self {
+            id: BUILTIN_POLICY_ID.to_string(),
+            name: "Builtin authorization inputs".to_string(),
+            source: PolicySource::Builtin,
+            cedar_text: String::new(),
+            enabled: true,
+            created_by: Subject::new("builtin"),
+            updated_by: Subject::new("builtin"),
+            created_at: 0,
+            updated_at: 0,
+            editable: false,
+            description: Some(
+                "Namespace ownership, namespace grants, token scopes, and Rust safety guards are synthesized at authorization time."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+fn effective_static_policy(
+    auth: Option<&crate::auth::AuthService>,
+    id: &str,
+) -> Option<PolicySetResponse> {
+    let auth = auth?;
+    if id == BUILTIN_POLICY_ID {
+        return Some(PolicySetResponse::builtin_authorization());
+    }
+    auth.config
+        .policy_sets
+        .iter()
+        .find(|policy| policy.id == id)
+        .map(PolicySetResponse::from_config)
 }
 
 fn required(value: &str, field: &str) -> Result<(), LayerhouseError> {
@@ -272,15 +358,37 @@ pub fn routes<M: AdminStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
 async fn list_policy_sets<M: AdminStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
-    Ok(Json(state.core.metadata.list_policy_sets().await?))
+    let mut policies = Vec::new();
+    if let Some(auth) = state.auth.as_ref() {
+        policies.push(PolicySetResponse::builtin_authorization());
+        policies.extend(
+            auth.config
+                .policy_sets
+                .iter()
+                .map(PolicySetResponse::from_config),
+        );
+    }
+    policies.extend(
+        state
+            .core
+            .metadata
+            .list_policy_sets()
+            .await?
+            .into_iter()
+            .map(PolicySetResponse::from_raft),
+    );
+    Ok(Json(policies))
 }
 
 async fn get_policy_set<M: AdminStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     Path(id): Path<String>,
 ) -> Result<Response, LayerhouseError> {
+    if let Some(policy) = effective_static_policy(state.auth.as_deref(), &id) {
+        return Ok(Json(policy).into_response());
+    }
     match state.core.metadata.get_policy_set(&id).await? {
-        Some(policy) => Ok(Json(policy).into_response()),
+        Some(policy) => Ok(Json(PolicySetResponse::from_raft(policy)).into_response()),
         None => Err(LayerhouseError::NameUnknown(id)),
     }
 }
@@ -292,6 +400,7 @@ async fn put_policy_set<M: AdminStore, B: BlobStore>(
     Json(req): Json<PutPolicySetRequest>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
     validate_policy_fields(&id, &req)?;
+    reject_reserved_policy_id(state.auth.as_deref(), &id)?;
     let actor = policy_actor(identity);
     let existing = state.core.metadata.get_policy_set(&id).await?;
     let now = crate::store::metadata::now_epoch();
@@ -320,8 +429,25 @@ async fn delete_policy_set<M: AdminStore, B: BlobStore>(
     State(state): State<Arc<AppState<M, B>>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, LayerhouseError> {
+    reject_reserved_policy_id(state.auth.as_deref(), &id)?;
     state.core.metadata.delete_policy_set(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn reject_reserved_policy_id(
+    auth: Option<&crate::auth::AuthService>,
+    id: &str,
+) -> Result<(), LayerhouseError> {
+    if id == BUILTIN_POLICY_ID
+        || auth
+            .map(|auth| auth.config.policy_sets.iter().any(|policy| policy.id == id))
+            .unwrap_or(false)
+    {
+        return Err(LayerhouseError::NameInvalid(
+            "only Raft policy sets can be mutated through the admin API".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn list_rules<M: AdminStore, B: BlobStore>(
@@ -548,6 +674,7 @@ async fn list_helm_versions<M: AdminStore, B: BlobStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigPolicySet;
     use crate::store::blob::InMemoryBlobStore;
     use crate::store::metadata::{
         InMemoryMetadataStore, JobStore, MirrorConfigStore, MirrorRule, MirrorStrategy,
@@ -558,7 +685,7 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    use crate::routes::test_state;
+    use crate::routes::{test_state, test_state_with_auth};
 
     async fn seed_rule(state: &AppState<InMemoryMetadataStore, InMemoryBlobStore>) {
         state
@@ -585,6 +712,198 @@ mod tests {
 
     fn router(state: Arc<AppState<InMemoryMetadataStore, InMemoryBlobStore>>) -> axum::Router {
         routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state)
+    }
+
+    fn config_policy_set(id: &str) -> ConfigPolicySet {
+        ConfigPolicySet {
+            id: id.to_string(),
+            name: "config admins".to_string(),
+            enabled: true,
+            cedar_text: r#"permit(
+    principal == User::"test:user:subject-admin",
+    action == Action::"admin",
+    resource == Registry::"root"
+);"#
+            .to_string(),
+        }
+    }
+
+    fn raft_policy_set(id: &str) -> PolicySet {
+        PolicySet {
+            id: id.to_string(),
+            name: "raft readers".to_string(),
+            source: PolicySource::Raft,
+            cedar_text: r#"permit(
+    principal == User::"test:user:subject-alice",
+    action == Action::"pull",
+    resource == Repository::"acme#1/app"
+);"#
+            .to_string(),
+            enabled: true,
+            created_by: Subject::new("subject-admin"),
+            updated_by: Subject::new("subject-admin"),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_policy_sets_returns_effective_catalog() {
+        let state = test_state_with_auth(vec![config_policy_set("config-admins")]);
+        state
+            .core
+            .metadata
+            .put_policy_set(raft_policy_set("raft-readers"))
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/admin/policies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = json_body(response).await;
+        let policies = value.as_array().expect("policy catalog should be an array");
+        let builtin = policies
+            .iter()
+            .find(|policy| policy["id"] == BUILTIN_POLICY_ID)
+            .expect("builtin policy row should be present");
+        assert_eq!(builtin["source"], "builtin");
+        assert_eq!(builtin["editable"], false);
+        assert!(
+            builtin["description"]
+                .as_str()
+                .unwrap()
+                .contains("Rust safety")
+        );
+
+        let config = policies
+            .iter()
+            .find(|policy| policy["id"] == "config-admins")
+            .expect("config policy row should be present");
+        assert_eq!(config["source"], "config");
+        assert_eq!(config["editable"], false);
+        assert_eq!(config["created_by"], "config");
+
+        let raft = policies
+            .iter()
+            .find(|policy| policy["id"] == "raft-readers")
+            .expect("raft policy row should be present");
+        assert_eq!(raft["source"], "raft");
+        assert_eq!(raft["editable"], true);
+    }
+
+    #[tokio::test]
+    async fn get_policy_set_returns_static_sources() {
+        let state = test_state_with_auth(vec![config_policy_set("config-admins")]);
+        let app = router(state);
+
+        let builtin = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/v1/admin/policies/{BUILTIN_POLICY_ID}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(builtin.status(), StatusCode::OK);
+        let builtin = json_body(builtin).await;
+        assert_eq!(builtin["source"], "builtin");
+        assert_eq!(builtin["editable"], false);
+
+        let config = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/admin/policies/config-admins")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(config.status(), StatusCode::OK);
+        let config = json_body(config).await;
+        assert_eq!(config["source"], "config");
+        assert_eq!(config["editable"], false);
+    }
+
+    #[tokio::test]
+    async fn policy_mutations_reject_static_sources() {
+        let state = test_state_with_auth(vec![config_policy_set("config-admins")]);
+        let app = router(state.clone());
+        let policy = serde_json::json!({
+            "name": "override",
+            "enabled": true,
+            "cedar_text": r#"permit(
+    principal == User::"test:user:subject-admin",
+    action == Action::"admin",
+    resource == Registry::"root"
+);"#
+        });
+
+        let put_config = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/admin/policies/config-admins")
+                    .header("content-type", "application/json")
+                    .body(Body::from(policy.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_config.status(), StatusCode::BAD_REQUEST);
+
+        let put_builtin = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/admin/policies/{BUILTIN_POLICY_ID}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(policy.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_builtin.status(), StatusCode::BAD_REQUEST);
+
+        let delete_config = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/admin/policies/config-admins")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_config.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            state
+                .core
+                .metadata
+                .get_policy_set("config-admins")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

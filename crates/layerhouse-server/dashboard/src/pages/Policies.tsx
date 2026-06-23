@@ -45,7 +45,11 @@ function policyForm(policy: PolicySet): PolicyForm {
 }
 
 function sourceLabel(source: PolicySet["source"]) {
-  return source === "raft" ? t("policies.source.raft") : source;
+  return t(`admin.policySource.${source}`);
+}
+
+function policyEditable(policy: PolicySet): boolean {
+  return policy.editable ?? policy.source === "raft";
 }
 
 type PoliciesProps = { embedded?: boolean } & Partial<RouteSectionProps>;
@@ -249,7 +253,7 @@ export default function Policies(props: PoliciesProps = {}) {
                         </td>
                         <td class="mono">{formatAgo(policy.updated_at)}</td>
                         <td>
-                          <Show when={session()?.is_admin}>
+                          <Show when={session()?.is_admin && policyEditable(policy)}>
                             <div class="actions">
                               <button class="action primary" onClick={() => editPolicy(policy)}>
                                 {t("common.edit")}

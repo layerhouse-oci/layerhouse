@@ -1,30 +1,772 @@
 import { A } from "@solidjs/router";
-import { createEffect, createSignal, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onMount, Show, type Setter } from "solid-js";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
 import LoadingSpinner from "../components/LoadingSpinner";
-import { fetchSession, redirectToSignIn } from "../lib/api";
+import {
+  ApiError,
+  fetchAdminNamespaceGrants,
+  fetchMirrorRules,
+  fetchNamespaces,
+  fetchObservedUsers,
+  fetchPolicySets,
+  fetchProxyCaches,
+  fetchRepositories,
+  fetchSession,
+  fetchSyncJobs,
+  redirectToSignIn,
+} from "../lib/api";
+import {
+  formatAgo,
+  formatBytes,
+  formatTime,
+  prefixLabel,
+  strategyLabel,
+  upstreamLabel,
+} from "../lib/format";
 import { t } from "../lib/i18n";
-import type { DashboardSession } from "../lib/types";
-import Access from "./Access";
-import Policies from "./Policies";
+import type {
+  DashboardSession,
+  MirrorRule,
+  NamespaceGrant,
+  NamespaceResponse,
+  ObservedIdentity,
+  PolicySet,
+  ProxyCache,
+  RepositorySummary,
+  SyncJob,
+} from "../lib/types";
 
-type AdminTab = "namespaces" | "policies";
+type LoadStatus = "idle" | "loading" | "ready" | "error";
+type ResourceKind =
+  | "repository"
+  | "namespace"
+  | "handle"
+  | "policy"
+  | "mirror-rule"
+  | "sync-job"
+  | "proxy-cache"
+  | "identity"
+  | "setup";
+
+interface SourceState<T> {
+  status: LoadStatus;
+  data: T;
+  error: string | null;
+  lastLoaded: number | null;
+}
+
+interface DetailPair {
+  label: string;
+  value: string;
+}
+
+interface ResourceRow {
+  key: string;
+  id: string;
+  kind: ResourceKind;
+  title: string;
+  subtitle: string;
+  source: string;
+  status: string;
+  statusTone: "good" | "warn" | "danger" | "neutral";
+  updatedAt: number | null;
+  description: string;
+  href?: string;
+  details: DetailPair[];
+  policy?: PolicySet;
+  namespace?: NamespaceResponse;
+}
+
+interface SourceCard {
+  id: string;
+  label: string;
+  status: LoadStatus;
+  count: number;
+  lastLoaded: number | null;
+  error: string | null;
+  onRefresh: () => void;
+}
+
+const KINDS: ResourceKind[] = [
+  "repository",
+  "namespace",
+  "handle",
+  "policy",
+  "mirror-rule",
+  "sync-job",
+  "proxy-cache",
+  "identity",
+  "setup",
+];
+
+function emptySource<T>(data: T): SourceState<T> {
+  return { status: "idle", data, error: null, lastLoaded: null };
+}
+
+function nowEpoch(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiError && error.status === 403) return t("cluster.adminRequired");
+  return error instanceof Error ? error.message : fallback;
+}
+
+async function loadSource<T>(
+  setSource: Setter<SourceState<T>>,
+  fallback: string,
+  loader: () => Promise<T>,
+) {
+  setSource((previous) => ({ ...previous, status: "loading", error: null }));
+  try {
+    const data = await loader();
+    setSource({ status: "ready", data, error: null, lastLoaded: nowEpoch() });
+  } catch (error) {
+    setSource((previous) => ({
+      ...previous,
+      status: "error",
+      error: errorMessage(error, fallback),
+    }));
+  }
+}
+
+function kindLabel(kind: ResourceKind): string {
+  return t(`admin.kind.${kind}`);
+}
+
+function policySourceLabel(policy: PolicySet): string {
+  return t(`admin.policySource.${policy.source}`);
+}
+
+function loadStatusLabel(status: LoadStatus): string {
+  return t(`admin.sourceStatus.${status}`);
+}
+
+function repositoryNamespace(name: string): string {
+  return name.split("/")[0] || name;
+}
+
+function rowMatches(row: ResourceRow, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return [
+    row.id,
+    row.title,
+    row.subtitle,
+    row.source,
+    row.status,
+    row.description,
+    ...row.details.flatMap((detail) => [detail.label, detail.value]),
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(needle);
+}
+
+function policyEditable(policy: PolicySet): boolean {
+  return policy.editable ?? policy.source === "raft";
+}
+
+function repositoryRows(repositories: RepositorySummary[]): ResourceRow[] {
+  return repositories.map((repo) => ({
+    key: `repository:${repo.name}`,
+    id: repo.name,
+    kind: "repository",
+    title: repo.name,
+    subtitle: t("admin.repositorySubtitle", { namespace: repositoryNamespace(repo.name) }),
+    source: t("admin.source.repositories"),
+    status: t("admin.repositoryAccess", { action: repo.access_level }),
+    statusTone: repo.access_level === "delete" ? "good" : "neutral",
+    updatedAt: repo.last_modified,
+    description: repo.description || t("admin.noDescription"),
+    href: `/repos/${repo.name}`,
+    details: [
+      { label: t("common.tags"), value: String(repo.tag_count) },
+      { label: t("common.digests"), value: String(repo.manifest_count) },
+      { label: t("common.size"), value: formatBytes(repo.stored_size_bytes) },
+      { label: t("admin.manifestBytes"), value: formatBytes(repo.manifest_size_bytes) },
+      { label: t("admin.visibility"), value: repo.visibility },
+      { label: t("admin.grantSource"), value: t(`access.grantSource.${repo.grant_source}`) },
+      { label: t("admin.maxGrantable"), value: repo.max_grantable },
+    ],
+  }));
+}
+
+function namespaceRows(namespaces: NamespaceResponse[]): ResourceRow[] {
+  return namespaces.map((namespace) => ({
+    key: `namespace:${namespace.handle}`,
+    id: namespace.handle,
+    kind: "namespace",
+    title: namespace.handle,
+    subtitle: t("admin.namespaceSubtitle", { owner: namespace.owner_label }),
+    source: t("admin.source.namespaces"),
+    status: t("admin.claimed"),
+    statusTone: "good",
+    updatedAt: namespace.created_at,
+    description: t("admin.namespaceDescription", { generation: namespace.generation }),
+    details: [
+      { label: t("admin.owner"), value: namespace.owner_label },
+      { label: t("admin.ownerKind"), value: namespace.owner_kind },
+      { label: t("admin.generation"), value: String(namespace.generation) },
+      { label: t("admin.created"), value: formatTime(namespace.created_at) },
+    ],
+    namespace,
+  }));
+}
+
+function observedHandleRows(repositories: RepositorySummary[]): ResourceRow[] {
+  const counts = new Map<string, number>();
+  repositories.forEach((repo) => {
+    const handle = repositoryNamespace(repo.name);
+    counts.set(handle, (counts.get(handle) ?? 0) + 1);
+  });
+  return [...counts.entries()].map(([handle, count]) => ({
+    key: `handle:${handle}`,
+    id: handle,
+    kind: "handle",
+    title: handle,
+    subtitle: t("admin.observedHandleSubtitle", { count }),
+    source: t("admin.source.repositories"),
+    status: t("admin.openRegistry"),
+    statusTone: "warn",
+    updatedAt: null,
+    description: t("admin.observedHandleDescription"),
+    details: [
+      { label: t("common.repositories"), value: String(count) },
+      { label: t("admin.authorization"), value: t("admin.authDisabled") },
+    ],
+  }));
+}
+
+function policyRows(policies: PolicySet[]): ResourceRow[] {
+  return policies.map((policy) => ({
+    key: `policy:${policy.id}`,
+    id: policy.id,
+    kind: "policy",
+    title: policy.name,
+    subtitle: policy.id,
+    source: policySourceLabel(policy),
+    status: policy.enabled ? t("policies.enabled") : t("policies.disabled"),
+    statusTone: policy.enabled ? "good" : "warn",
+    updatedAt: policy.updated_at,
+    description: policy.description || t("admin.policyDescription"),
+    href: policyEditable(policy) ? "/policies" : undefined,
+    details: [
+      { label: t("policies.source"), value: policySourceLabel(policy) },
+      {
+        label: t("admin.editability"),
+        value: policyEditable(policy) ? t("admin.editable") : t("admin.readOnly"),
+      },
+      { label: t("admin.createdBy"), value: policy.created_by },
+      { label: t("admin.updatedBy"), value: policy.updated_by },
+    ],
+    policy,
+  }));
+}
+
+function mirrorRuleRows(rules: MirrorRule[]): ResourceRow[] {
+  return rules.map((rule) => ({
+    key: `mirror-rule:${rule.id}`,
+    id: rule.id,
+    kind: "mirror-rule",
+    title: rule.local_prefix,
+    subtitle: upstreamLabel(rule.upstream_registry, rule.upstream_prefix),
+    source: t("admin.source.mirrorRules"),
+    status: rule.schedule ? t("common.schedule") : t("common.manual"),
+    statusTone: "neutral",
+    updatedAt: rule.created_at,
+    description: t("admin.mirrorRuleDescription"),
+    href: "/mirror",
+    details: [
+      { label: t("common.id"), value: rule.id },
+      {
+        label: t("common.upstream"),
+        value: upstreamLabel(rule.upstream_registry, rule.upstream_prefix),
+      },
+      { label: t("common.schedule"), value: rule.schedule || t("common.manual") },
+      { label: t("mirror.strategy"), value: strategyLabel(rule.strategy) },
+      { label: t("common.proxy"), value: rule.outbound_proxy.protocol },
+    ],
+  }));
+}
+
+function syncJobRows(jobs: SyncJob[]): ResourceRow[] {
+  return jobs.map((job) => ({
+    key: `sync-job:${job.id}`,
+    id: job.id,
+    kind: "sync-job",
+    title: job.rule_name || job.rule_id || job.image || job.id,
+    subtitle: job.image,
+    source: t("admin.source.jobs"),
+    status: job.last_error ? t("admin.jobErrored") : job.status,
+    statusTone: job.last_error ? "danger" : job.status === "Running" ? "warn" : "good",
+    updatedAt: job.last_run_at ?? job.claimed_at ?? job.next_run_at,
+    description: job.last_error || t("admin.jobDescription"),
+    href: job.kind === "proxy_cache" ? "/proxy-cache" : "/mirror",
+    details: [
+      { label: t("common.id"), value: job.id },
+      { label: t("common.type"), value: job.kind || t("common.unknown") },
+      { label: t("admin.rule"), value: job.rule_id || t("common.none") },
+      { label: t("admin.nextRun"), value: formatTime(job.next_run_at) },
+      { label: t("admin.lastRun"), value: formatTime(job.last_run_at) },
+      { label: t("admin.claimedBy"), value: job.claimed_by || t("common.none") },
+    ],
+  }));
+}
+
+function proxyCacheRows(caches: ProxyCache[]): ResourceRow[] {
+  return caches.map((cache) => ({
+    key: `proxy-cache:${cache.id}`,
+    id: cache.id,
+    kind: "proxy-cache",
+    title: cache.local_prefix,
+    subtitle: upstreamLabel(cache.upstream_registry, cache.upstream_prefix),
+    source: t("admin.source.proxyCaches"),
+    status: cache.warm_schedule ? t("common.schedule") : t("common.manual"),
+    statusTone: "neutral",
+    updatedAt: cache.created_at,
+    description: t("admin.proxyCacheDescription"),
+    href: "/proxy-cache",
+    details: [
+      { label: t("common.id"), value: cache.id },
+      {
+        label: t("common.upstream"),
+        value: upstreamLabel(cache.upstream_registry, cache.upstream_prefix),
+      },
+      { label: t("common.repository"), value: prefixLabel(cache.local_prefix) },
+      { label: t("common.schedule"), value: cache.warm_schedule || t("common.manual") },
+      { label: t("admin.warmFilters"), value: String(cache.warm_filters.length) },
+      { label: t("common.proxy"), value: cache.outbound_proxy.protocol },
+    ],
+  }));
+}
+
+function identityRows(identities: ObservedIdentity[]): ResourceRow[] {
+  return identities.map((identity) => ({
+    key: `identity:${identity.principal}`,
+    id: identity.principal,
+    kind: "identity",
+    title: identity.display_name || identity.username || identity.email || identity.subject,
+    subtitle: identity.principal,
+    source: t("admin.source.principals"),
+    status: t("admin.observed"),
+    statusTone: "neutral",
+    updatedAt: identity.last_seen_at,
+    description: t("admin.identityDescription"),
+    details: [
+      { label: t("admin.subject"), value: identity.subject },
+      { label: t("common.username"), value: identity.username || t("common.none") },
+      { label: t("admin.email"), value: identity.email || t("common.none") },
+      { label: t("admin.groups"), value: String(identity.groups.length) },
+      { label: t("admin.groupIds"), value: String(identity.group_ids.length) },
+    ],
+  }));
+}
+
+function setupRows(): ResourceRow[] {
+  return [
+    {
+      key: "setup:auth-config",
+      id: "auth-config",
+      kind: "setup",
+      title: t("admin.setupAuthTitle"),
+      subtitle: t("admin.setupAuthSubtitle"),
+      source: t("admin.source.setup"),
+      status: t("admin.todo"),
+      statusTone: "warn",
+      updatedAt: null,
+      description: t("admin.setupAuthDescription"),
+      details: [
+        { label: t("admin.authorization"), value: t("admin.authDisabled") },
+        { label: t("admin.nextStep"), value: t("admin.setupAuthNextStep") },
+      ],
+    },
+    {
+      key: "setup:config-policy",
+      id: "config-policy",
+      kind: "setup",
+      title: t("admin.setupPolicyTitle"),
+      subtitle: t("admin.setupPolicySubtitle"),
+      source: t("admin.source.setup"),
+      status: t("admin.todo"),
+      statusTone: "warn",
+      updatedAt: null,
+      description: t("admin.setupPolicyDescription"),
+      details: [
+        { label: t("policies.source"), value: t("admin.policySource.config") },
+        { label: t("admin.nextStep"), value: t("admin.setupPolicyNextStep") },
+      ],
+    },
+  ];
+}
+
+function ResourceInspector(props: {
+  row: ResourceRow;
+  authEnabled: boolean;
+  grants: SourceState<NamespaceGrant[]>;
+  onRefreshGrants: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <aside class="admin-inspector glass" aria-label={t("admin.inspector")}>
+      <div class="admin-inspector-head">
+        <div>
+          <p class="eyebrow">{kindLabel(props.row.kind)}</p>
+          <h2>{props.row.title}</h2>
+          <p>{props.row.subtitle}</p>
+        </div>
+        <button type="button" class="btn btn-compact admin-inspector-close" onClick={props.onClose}>
+          {t("common.close")}
+        </button>
+      </div>
+
+      <div class="admin-inspector-status">
+        <span class={`resource-status ${props.row.statusTone}`}>{props.row.status}</span>
+        <span>{props.row.source}</span>
+        <span>{formatAgo(props.row.updatedAt)}</span>
+      </div>
+
+      <p class="admin-inspector-description">{props.row.description}</p>
+
+      <Show when={props.row.href}>
+        <A class="button admin-inspector-action" href={props.row.href!}>
+          {t("admin.openResource")}
+        </A>
+      </Show>
+
+      <dl class="admin-detail-grid">
+        <For each={props.row.details}>
+          {(detail) => (
+            <div>
+              <dt>{detail.label}</dt>
+              <dd>{detail.value}</dd>
+            </div>
+          )}
+        </For>
+      </dl>
+
+      <Show when={props.row.policy}>
+        {(policy) => (
+          <section class="admin-inspector-section">
+            <div class="admin-section-head">
+              <h3>{t("policies.cedarText")}</h3>
+              <span>{policyEditable(policy()) ? t("admin.editable") : t("admin.readOnly")}</span>
+            </div>
+            <Show
+              when={policy().cedar_text.trim()}
+              fallback={<p class="hint">{t("admin.builtinPolicyNoCedar")}</p>}
+            >
+              <pre class="admin-code">
+                <code>{policy().cedar_text}</code>
+              </pre>
+            </Show>
+          </section>
+        )}
+      </Show>
+
+      <Show when={props.authEnabled && props.row.kind === "namespace"}>
+        <section class="admin-inspector-section">
+          <div class="admin-section-head">
+            <h3>{t("admin.grants")}</h3>
+            <button type="button" class="btn btn-compact" onClick={props.onRefreshGrants}>
+              {t("common.retry")}
+            </button>
+          </div>
+          <Show
+            when={props.grants.status !== "loading"}
+            fallback={<LoadingSpinner label={t("admin.grantsLoading")} />}
+          >
+            <Show
+              when={props.grants.status !== "error"}
+              fallback={
+                <ErrorBanner
+                  message={props.grants.error ?? t("admin.grantsError")}
+                  onRetry={props.onRefreshGrants}
+                />
+              }
+            >
+              <Show
+                when={props.grants.data.length > 0}
+                fallback={<p class="hint">{t("admin.noNamespaceGrants")}</p>}
+              >
+                <div class="admin-grant-list">
+                  <For each={props.grants.data}>
+                    {(grant) => (
+                      <div class="admin-grant-card">
+                        <strong>{grant.label || grant.id}</strong>
+                        <span>
+                          {grant.grantee.kind} · {grant.action}
+                        </span>
+                        <span class="mono">{grant.id}</span>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </Show>
+          </Show>
+        </section>
+      </Show>
+    </aside>
+  );
+}
 
 export default function Admin() {
   const [session, setSession] = createSignal<DashboardSession | null>(null);
-  const [loading, setLoading] = createSignal(true);
-  const [error, setError] = createSignal<string | null>(null);
-  const [tab, setTab] = createSignal<AdminTab>("namespaces");
+  const [sessionLoading, setSessionLoading] = createSignal(true);
+  const [sessionError, setSessionError] = createSignal<string | null>(null);
+  const [query, setQuery] = createSignal("");
+  const [kindFilter, setKindFilter] = createSignal<ResourceKind | "all">("all");
+  const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
+
+  const [repoSource, setRepoSource] = createSignal(emptySource<RepositorySummary[]>([]));
+  const [namespaceSource, setNamespaceSource] = createSignal(emptySource<NamespaceResponse[]>([]));
+  const [policySource, setPolicySource] = createSignal(emptySource<PolicySet[]>([]));
+  const [mirrorRuleSource, setMirrorRuleSource] = createSignal(emptySource<MirrorRule[]>([]));
+  const [jobSource, setJobSource] = createSignal(emptySource<SyncJob[]>([]));
+  const [proxyCacheSource, setProxyCacheSource] = createSignal(emptySource<ProxyCache[]>([]));
+  const [identitySource, setIdentitySource] = createSignal(emptySource<ObservedIdentity[]>([]));
+  const [grantSource, setGrantSource] = createSignal(emptySource<NamespaceGrant[]>([]));
+
+  async function loadRepositories() {
+    await loadSource(setRepoSource, t("repos.fetchError"), async () => {
+      const response = await fetchRepositories({ n: 100, sort: "updated_desc" });
+      return response.repositories;
+    });
+  }
+
+  async function loadNamespaces() {
+    await loadSource(setNamespaceSource, t("access.namespaceLoadError"), async () => {
+      const response = await fetchNamespaces();
+      return response.namespaces;
+    });
+  }
+
+  async function loadPolicies() {
+    await loadSource(setPolicySource, t("policies.fetchError"), fetchPolicySets);
+  }
+
+  async function loadMirrorRules() {
+    await loadSource(setMirrorRuleSource, t("mirror.fetchError"), () => fetchMirrorRules(false));
+  }
+
+  async function loadJobs() {
+    await loadSource(setJobSource, t("mirror.fetchError"), fetchSyncJobs);
+  }
+
+  async function loadProxyCaches() {
+    await loadSource(setProxyCacheSource, t("proxy.fetchError"), fetchProxyCaches);
+  }
+
+  async function loadAll() {
+    setSessionLoading(true);
+    setSessionError(null);
+    try {
+      const next = await fetchSession();
+      setSession(next);
+      if (next.auth_enabled && !next.subject) return;
+      if (next.auth_enabled && !next.is_admin) return;
+
+      const tasks = [
+        loadRepositories(),
+        loadPolicies(),
+        loadMirrorRules(),
+        loadJobs(),
+        loadProxyCaches(),
+      ];
+      if (next.auth_enabled) {
+        tasks.push(loadNamespaces());
+      } else {
+        setNamespaceSource({ status: "ready", data: [], error: null, lastLoaded: nowEpoch() });
+        setIdentitySource({ status: "idle", data: [], error: null, lastLoaded: null });
+        setGrantSource({ status: "idle", data: [], error: null, lastLoaded: null });
+      }
+      await Promise.all(tasks);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        redirectToSignIn();
+        return;
+      }
+      setSessionError(error instanceof Error ? error.message : t("admin.fetchError"));
+    } finally {
+      setSessionLoading(false);
+    }
+  }
+
+  async function refreshSelectedNamespaceGrants() {
+    const row = selected();
+    if (!row?.namespace || !session()?.auth_enabled) return;
+    await loadSource(setGrantSource, t("admin.grantsError"), async () => {
+      const response = await fetchAdminNamespaceGrants(row.namespace!.handle);
+      return response.grants;
+    });
+  }
+
+  const rows = createMemo<ResourceRow[]>(() => {
+    const nextRows = [
+      ...repositoryRows(repoSource().data),
+      ...(session()?.auth_enabled
+        ? namespaceRows(namespaceSource().data)
+        : observedHandleRows(repoSource().data)),
+      ...policyRows(policySource().data),
+      ...mirrorRuleRows(mirrorRuleSource().data),
+      ...syncJobRows(jobSource().data),
+      ...proxyCacheRows(proxyCacheSource().data),
+      ...(session()?.auth_enabled ? identityRows(identitySource().data) : setupRows()),
+    ];
+    return nextRows.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+  });
+
+  const filteredRows = createMemo(() =>
+    rows().filter((row) => {
+      if (kindFilter() !== "all" && row.kind !== kindFilter()) return false;
+      return rowMatches(row, query());
+    }),
+  );
+
+  const selected = createMemo(() => {
+    const key = selectedKey();
+    if (!key) return null;
+    return rows().find((row) => row.key === key) ?? null;
+  });
+
+  const sourceCards = createMemo<SourceCard[]>(() => {
+    const cards: SourceCard[] = [
+      {
+        id: "repositories",
+        label: t("admin.source.repositories"),
+        status: repoSource().status,
+        count: repoSource().data.length,
+        lastLoaded: repoSource().lastLoaded,
+        error: repoSource().error,
+        onRefresh: loadRepositories,
+      },
+      {
+        id: "policies",
+        label: t("admin.source.policies"),
+        status: policySource().status,
+        count: policySource().data.length,
+        lastLoaded: policySource().lastLoaded,
+        error: policySource().error,
+        onRefresh: loadPolicies,
+      },
+      {
+        id: "mirror-rules",
+        label: t("admin.source.mirrorRules"),
+        status: mirrorRuleSource().status,
+        count: mirrorRuleSource().data.length,
+        lastLoaded: mirrorRuleSource().lastLoaded,
+        error: mirrorRuleSource().error,
+        onRefresh: loadMirrorRules,
+      },
+      {
+        id: "jobs",
+        label: t("admin.source.jobs"),
+        status: jobSource().status,
+        count: jobSource().data.length,
+        lastLoaded: jobSource().lastLoaded,
+        error: jobSource().error,
+        onRefresh: loadJobs,
+      },
+      {
+        id: "proxy-caches",
+        label: t("admin.source.proxyCaches"),
+        status: proxyCacheSource().status,
+        count: proxyCacheSource().data.length,
+        lastLoaded: proxyCacheSource().lastLoaded,
+        error: proxyCacheSource().error,
+        onRefresh: loadProxyCaches,
+      },
+    ];
+    if (session()?.auth_enabled) {
+      cards.splice(1, 0, {
+        id: "namespaces",
+        label: t("admin.source.namespaces"),
+        status: namespaceSource().status,
+        count: namespaceSource().data.length,
+        lastLoaded: namespaceSource().lastLoaded,
+        error: namespaceSource().error,
+        onRefresh: loadNamespaces,
+      });
+      cards.push({
+        id: "principals",
+        label: t("admin.source.principals"),
+        status: identitySource().status,
+        count: identitySource().data.length,
+        lastLoaded: identitySource().lastLoaded,
+        error: identitySource().error,
+        onRefresh: () => void loadObservedIdentities(query()),
+      });
+    }
+    return cards;
+  });
+
+  const kindOptions = createMemo(() => {
+    const counts = new Map<ResourceKind, number>();
+    rows().forEach((row) => counts.set(row.kind, (counts.get(row.kind) ?? 0) + 1));
+    return [
+      { kind: "all" as const, label: t("common.all"), count: rows().length },
+      ...KINDS.filter((kind) => counts.has(kind)).map((kind) => ({
+        kind,
+        label: kindLabel(kind),
+        count: counts.get(kind) ?? 0,
+      })),
+    ];
+  });
+
+  const sourceErrors = createMemo(() =>
+    sourceCards().filter((source) => source.status === "error"),
+  );
+  const runningJobs = createMemo(
+    () => jobSource().data.filter((job) => job.status === "Running").length,
+  );
+  const authEnabled = createMemo(() => session()?.auth_enabled !== false);
+
+  let identityRequest = 0;
+  async function loadObservedIdentities(searchValue: string) {
+    if (!session()?.auth_enabled || searchValue.trim().length < 2) {
+      setIdentitySource({ status: "idle", data: [], error: null, lastLoaded: null });
+      return;
+    }
+    const request = ++identityRequest;
+    setIdentitySource((previous) => ({ ...previous, status: "loading", error: null }));
+    try {
+      const response = await fetchObservedUsers(searchValue.trim());
+      if (request === identityRequest) {
+        setIdentitySource({
+          status: "ready",
+          data: response.users,
+          error: null,
+          lastLoaded: nowEpoch(),
+        });
+      }
+    } catch (error) {
+      if (request === identityRequest) {
+        setIdentitySource((previous) => ({
+          ...previous,
+          status: "error",
+          error: errorMessage(error, t("access.observedUserSearchError")),
+        }));
+      }
+    }
+  }
 
   createEffect(() => {
-    fetchSession()
-      .then((next) => {
-        setSession(next);
-        setError(null);
-      })
-      .catch((e) => setError(e instanceof Error ? e.message : t("admin.fetchError")))
-      .finally(() => setLoading(false));
+    void loadObservedIdentities(query());
+  });
+
+  createEffect(() => {
+    const row = selected();
+    if (!row?.namespace || !session()?.auth_enabled) {
+      setGrantSource({ status: "idle", data: [], error: null, lastLoaded: null });
+      return;
+    }
+    void refreshSelectedNamespaceGrants();
+  });
+
+  onMount(() => {
+    void loadAll();
   });
 
   return (
@@ -38,94 +780,191 @@ export default function Admin() {
           <h1>{t("admin.title")}</h1>
           <p class="hero-copy">{t("admin.copy")}</p>
         </div>
+        <div class="admin-hero-stats" aria-label={t("admin.summary")}>
+          <div>
+            <span>{t("admin.resources")}</span>
+            <strong>{rows().length}</strong>
+          </div>
+          <div>
+            <span>{t("admin.runningJobs")}</span>
+            <strong>{runningJobs()}</strong>
+          </div>
+          <div>
+            <span>{t("admin.sourceErrors")}</span>
+            <strong>{sourceErrors().length}</strong>
+          </div>
+        </div>
       </section>
 
-      <Show when={error()}>
-        <ErrorBanner message={error()!} onRetry={() => window.location.reload()} />
+      <Show when={sessionError()}>
+        <ErrorBanner message={sessionError()!} onRetry={loadAll} />
       </Show>
 
-      <Show when={!loading()} fallback={<LoadingSpinner label={t("admin.loading")} />}>
+      <Show when={!sessionLoading()} fallback={<LoadingSpinner label={t("admin.loading")} />}>
         <Show
-          when={session()?.auth_enabled !== false}
+          when={!authEnabled() || session()?.subject}
           fallback={
-            <section class="admin-open-mode glass">
+            <section class="access-signin card">
               <div>
-                <p class="eyebrow">{t("admin.authDisabledEyebrow")}</p>
-                <h2>{t("admin.authDisabledTitle")}</h2>
-                <p>{t("admin.authDisabledDesc")}</p>
+                <p class="eyebrow">{t("access.signIn")}</p>
+                <h2>{t("admin.signInTitle")}</h2>
+                <p>{t("admin.signInDesc")}</p>
               </div>
-              <div class="admin-mode-grid">
-                <div>
-                  <span>{t("admin.openModeRepos")}</span>
-                  <strong>{t("admin.openModeReposValue")}</strong>
-                </div>
-                <div>
-                  <span>{t("admin.openModeTokens")}</span>
-                  <strong>{t("admin.openModeTokensValue")}</strong>
-                </div>
-                <div>
-                  <span>{t("admin.openModePolicies")}</span>
-                  <strong>{t("admin.openModePoliciesValue")}</strong>
-                </div>
-              </div>
-              <div class="admin-actions">
-                <A class="button" href="/repos">
-                  {t("admin.viewOpenRegistry")}
-                </A>
-              </div>
+              <button type="button" class="btn btn-primary" onClick={redirectToSignIn}>
+                {t("access.signInWithOidc")}
+              </button>
             </section>
           }
         >
           <Show
-            when={session()?.subject}
+            when={!authEnabled() || session()?.is_admin}
             fallback={
-              <section class="access-signin card">
-                <div>
-                  <p class="eyebrow">{t("access.signIn")}</p>
-                  <h2>{t("admin.signInTitle")}</h2>
-                  <p>{t("admin.signInDesc")}</p>
-                </div>
-                <button type="button" class="btn btn-primary" onClick={redirectToSignIn}>
-                  {t("access.signInWithOidc")}
-                </button>
-              </section>
+              <div class="card">
+                <EmptyState
+                  title={t("admin.requiredTitle")}
+                  description={t("admin.requiredDesc")}
+                />
+              </div>
             }
           >
-            <Show
-              when={session()?.is_admin}
-              fallback={
-                <div class="card">
-                  <EmptyState
-                    title={t("admin.requiredTitle")}
-                    description={t("admin.requiredDesc")}
-                  />
+            <Show when={!authEnabled()}>
+              <section class="admin-open-mode glass">
+                <div>
+                  <p class="eyebrow">{t("admin.authDisabledEyebrow")}</p>
+                  <h2>{t("admin.authDisabledTitle")}</h2>
+                  <p>{t("admin.authDisabledDesc")}</p>
                 </div>
-              }
-            >
-              <div class="admin-tabs" role="tablist" aria-label={t("admin.tabs")}>
-                <button
-                  class={tab() === "namespaces" ? "active" : ""}
-                  type="button"
-                  onClick={() => setTab("namespaces")}
+                <div class="admin-mode-grid">
+                  <div>
+                    <span>{t("admin.openModeRepos")}</span>
+                    <strong>{t("admin.openModeReposValue")}</strong>
+                  </div>
+                  <div>
+                    <span>{t("admin.openModeTokens")}</span>
+                    <strong>{t("admin.openModeTokensValue")}</strong>
+                  </div>
+                  <div>
+                    <span>{t("admin.openModePolicies")}</span>
+                    <strong>{t("admin.openModePoliciesValue")}</strong>
+                  </div>
+                </div>
+              </section>
+            </Show>
+
+            <section class="admin-source-grid" aria-label={t("admin.sources")}>
+              <For each={sourceCards()}>
+                {(source) => (
+                  <article class={`admin-source-card ${source.status}`}>
+                    <div>
+                      <span>{source.label}</span>
+                      <strong>{source.count}</strong>
+                    </div>
+                    <div class="admin-source-meta">
+                      <span>{loadStatusLabel(source.status)}</span>
+                      <span>{formatAgo(source.lastLoaded)}</span>
+                    </div>
+                    <Show when={source.error}>
+                      <p>{source.error}</p>
+                    </Show>
+                    <button type="button" class="btn btn-compact" onClick={source.onRefresh}>
+                      {t("common.retry")}
+                    </button>
+                  </article>
+                )}
+              </For>
+            </section>
+
+            <section class="admin-workbench">
+              <div class="admin-results glass">
+                <div class="admin-searchbar">
+                  <label>
+                    <span>{t("admin.searchLabel")}</span>
+                    <input
+                      type="search"
+                      value={query()}
+                      placeholder={t("admin.searchPlaceholder")}
+                      onInput={(event) => setQuery(event.currentTarget.value)}
+                    />
+                  </label>
+                  <button type="button" class="button" onClick={loadAll}>
+                    {t("admin.refreshAll")}
+                  </button>
+                </div>
+
+                <div class="admin-kind-filters" role="list" aria-label={t("admin.filters")}>
+                  <For each={kindOptions()}>
+                    {(option) => (
+                      <button
+                        type="button"
+                        classList={{ active: kindFilter() === option.kind }}
+                        onClick={() => setKindFilter(option.kind)}
+                      >
+                        <span>{option.label}</span>
+                        <strong>{option.count}</strong>
+                      </button>
+                    )}
+                  </For>
+                </div>
+
+                <Show
+                  when={filteredRows().length > 0}
+                  fallback={
+                    <div class="admin-empty">
+                      <EmptyState
+                        title={t("admin.noResults")}
+                        description={t("admin.noResultsDesc")}
+                      />
+                    </div>
+                  }
                 >
-                  {t("admin.namespaces")}
-                </button>
-                <button
-                  class={tab() === "policies" ? "active" : ""}
-                  type="button"
-                  onClick={() => setTab("policies")}
-                >
-                  {t("admin.policies")}
-                </button>
+                  <div class="admin-resource-list" role="list" aria-label={t("admin.results")}>
+                    <For each={filteredRows()}>
+                      {(row) => (
+                        <button
+                          type="button"
+                          classList={{
+                            "admin-resource-row": true,
+                            selected: selected()?.key === row.key,
+                          }}
+                          onClick={() => setSelectedKey(row.key)}
+                        >
+                          <span class="resource-kind">{kindLabel(row.kind)}</span>
+                          <span class="resource-main">
+                            <strong>{row.title}</strong>
+                            <span>{row.subtitle}</span>
+                          </span>
+                          <span class={`resource-status ${row.statusTone}`}>{row.status}</span>
+                          <span class="resource-source">{row.source}</span>
+                          <span class="resource-updated">{formatAgo(row.updatedAt)}</span>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </Show>
               </div>
 
-              <Show when={tab() === "namespaces"}>
-                <Access mode="admin" />
+              <Show
+                when={selected()}
+                fallback={
+                  <aside class="admin-inspector glass">
+                    <EmptyState
+                      title={t("admin.noSelection")}
+                      description={t("admin.noSelectionDesc")}
+                    />
+                  </aside>
+                }
+              >
+                {(row) => (
+                  <ResourceInspector
+                    row={row()}
+                    authEnabled={authEnabled()}
+                    grants={grantSource()}
+                    onRefreshGrants={refreshSelectedNamespaceGrants}
+                    onClose={() => setSelectedKey(null)}
+                  />
+                )}
               </Show>
-              <Show when={tab() === "policies"}>
-                <Policies embedded />
-              </Show>
-            </Show>
+            </section>
           </Show>
         </Show>
       </Show>
