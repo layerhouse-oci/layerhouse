@@ -7,6 +7,7 @@ import {
   ApiError,
   createAdminNamespaceGrant,
   deleteAdminNamespaceGrant,
+  fetchAdminNamespaceGrantAudit,
   fetchAdminNamespaceGrants,
   fetchMirrorRules,
   fetchNamespaces,
@@ -32,6 +33,7 @@ import type {
   DashboardSession,
   MirrorRule,
   NamespaceGrant,
+  NamespaceGrantAuditEvent,
   NamespaceGrantGrantee,
   NamespaceResponse,
   ObservedIdentity,
@@ -124,6 +126,8 @@ interface AdminGrantDeleteTarget {
   namespace: NamespaceResponse;
   grant: NamespaceGrant;
 }
+
+type AuditOperationTone = "good" | "warn" | "danger";
 
 const RESOURCE_KIND_ORDER: Record<ResourceKind, number> = {
   policy: 0,
@@ -280,6 +284,39 @@ function actionSummary(action: OciAction): string {
 
 function granteeKindLabel(kind: GrantGranteeKind): string {
   return t(`access.grantee.${kind}`);
+}
+
+function auditOperationLabel(operation: NamespaceGrantAuditEvent["operation"]): string {
+  return t(`admin.auditOperation.${operation}`);
+}
+
+function auditOperationTone(operation: NamespaceGrantAuditEvent["operation"]): AuditOperationTone {
+  if (operation === "create") return "good";
+  if (operation === "delete") return "danger";
+  return "warn";
+}
+
+function auditGrantSummary(grant: NamespaceGrant | null): string {
+  if (!grant) return t("common.none");
+  return t("admin.auditGrantSummary", {
+    label: grantLabel(grant),
+    kind: granteeKindLabel(grant.grantee.kind),
+    detail: grantDetail(grant),
+    action: actionLabel(grant.action),
+  });
+}
+
+function auditChangeSummary(event: NamespaceGrantAuditEvent): string {
+  if (event.operation === "create") {
+    return t("admin.auditChange.create", { after: auditGrantSummary(event.after) });
+  }
+  if (event.operation === "delete") {
+    return t("admin.auditChange.delete", { before: auditGrantSummary(event.before) });
+  }
+  return t("admin.auditChange.update", {
+    before: auditGrantSummary(event.before),
+    after: auditGrantSummary(event.after),
+  });
 }
 
 function policyActions(policy: PolicySet): ResourceAction[] {
@@ -606,6 +643,7 @@ function ResourceInspector(props: {
   row: ResourceRow;
   authEnabled: boolean;
   grants: SourceState<NamespaceGrant[]>;
+  audit: SourceState<NamespaceGrantAuditEvent[]>;
   grantEditor: AdminGrantEditor | null;
   grantForm: AdminGrantForm;
   grantError: string | null;
@@ -629,6 +667,7 @@ function ResourceInspector(props: {
   onCancelDeleteGrant: () => void;
   onConfirmDeleteGrant: () => void;
   onRefreshGrants: () => void;
+  onLoadAudit: () => void;
   onClose: () => void;
 }) {
   return (
@@ -1010,6 +1049,65 @@ function ResourceInspector(props: {
                 </Show>
               </Show>
             </Show>
+
+            <section class="admin-audit-panel">
+              <div class="admin-section-head">
+                <div>
+                  <h3>{t("admin.grantAudit")}</h3>
+                  <p class="hint">{t("admin.grantAuditDesc")}</p>
+                </div>
+                <button type="button" class="btn btn-compact" onClick={props.onLoadAudit}>
+                  {props.audit.status === "idle" ? t("admin.loadAudit") : t("admin.refreshAudit")}
+                </button>
+              </div>
+
+              <Show when={props.audit.status !== "idle"}>
+                <Show
+                  when={props.audit.status !== "loading"}
+                  fallback={<LoadingSpinner label={t("admin.auditLoading")} />}
+                >
+                  <Show
+                    when={props.audit.status !== "error"}
+                    fallback={
+                      <ErrorBanner
+                        message={props.audit.error ?? t("admin.auditError")}
+                        onRetry={props.onLoadAudit}
+                      />
+                    }
+                  >
+                    <Show
+                      when={props.audit.data.length > 0}
+                      fallback={<p class="hint">{t("admin.noGrantAudit")}</p>}
+                    >
+                      <div class="admin-audit-list">
+                        <For each={props.audit.data}>
+                          {(event) => (
+                            <article class="admin-audit-card">
+                              <div class="admin-audit-card-head">
+                                <span
+                                  class={`resource-status ${auditOperationTone(event.operation)}`}
+                                >
+                                  {auditOperationLabel(event.operation)}
+                                </span>
+                                <span>{formatTime(event.created_at)}</span>
+                              </div>
+                              <p class="admin-audit-change">{auditChangeSummary(event)}</p>
+                              <p class="admin-audit-reason">{event.reason}</p>
+                              <div class="admin-audit-meta">
+                                <span>{t("admin.auditActor", { actor: event.actor_label })}</span>
+                                <Show when={event.grant_id}>
+                                  {(grantId) => <span class="mono">{grantId()}</span>}
+                                </Show>
+                              </div>
+                            </article>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                  </Show>
+                </Show>
+              </Show>
+            </section>
           </section>
         )}
       </Show>
@@ -1034,6 +1132,9 @@ export default function Admin() {
   const [proxyCacheSource, setProxyCacheSource] = createSignal(emptySource<ProxyCache[]>([]));
   const [identitySource, setIdentitySource] = createSignal(emptySource<ObservedIdentity[]>([]));
   const [grantSource, setGrantSource] = createSignal(emptySource<NamespaceGrant[]>([]));
+  const [grantAuditSource, setGrantAuditSource] = createSignal(
+    emptySource<NamespaceGrantAuditEvent[]>([]),
+  );
   const [grantEditor, setGrantEditor] = createSignal<AdminGrantEditor | null>(null);
   const [grantForm, setGrantForm] = createSignal<AdminGrantForm>({ ...EMPTY_GRANT_FORM });
   const [grantError, setGrantError] = createSignal<string | null>(null);
@@ -1099,6 +1200,7 @@ export default function Admin() {
         setNamespaceSource({ status: "ready", data: [], error: null, lastLoaded: nowEpoch() });
         setIdentitySource({ status: "idle", data: [], error: null, lastLoaded: null });
         setGrantSource({ status: "idle", data: [], error: null, lastLoaded: null });
+        resetGrantAudit();
       }
       await Promise.all(tasks);
     } catch (error) {
@@ -1116,6 +1218,7 @@ export default function Admin() {
     setSelectionDismissed(false);
     setSelectedKey(key);
     resetGrantFeedback();
+    resetGrantAudit();
     closeGrantEditor();
     cancelDeleteGrant();
   }
@@ -1124,6 +1227,7 @@ export default function Admin() {
     setSelectionDismissed(true);
     setSelectedKey(null);
     resetGrantFeedback();
+    resetGrantAudit();
     closeGrantEditor();
     cancelDeleteGrant();
   }
@@ -1131,6 +1235,7 @@ export default function Admin() {
   function updateQuery(value: string) {
     setSelectionDismissed(false);
     resetGrantFeedback();
+    resetGrantAudit();
     closeGrantEditor();
     cancelDeleteGrant();
     setQuery(value);
@@ -1139,6 +1244,7 @@ export default function Admin() {
   function updateKindFilter(kind: ResourceKind | "all") {
     setSelectionDismissed(false);
     resetGrantFeedback();
+    resetGrantAudit();
     closeGrantEditor();
     cancelDeleteGrant();
     setKindFilter(kind);
@@ -1151,6 +1257,24 @@ export default function Admin() {
       const response = await fetchAdminNamespaceGrants(row.namespace!.handle);
       return response.grants;
     });
+  }
+
+  function resetGrantAudit() {
+    setGrantAuditSource({ status: "idle", data: [], error: null, lastLoaded: null });
+  }
+
+  async function loadSelectedNamespaceGrantAudit() {
+    const row = selected();
+    if (!row?.namespace || !session()?.auth_enabled) return;
+    await loadSource(setGrantAuditSource, t("admin.auditError"), async () => {
+      const response = await fetchAdminNamespaceGrantAudit(row.namespace!.handle);
+      return response.audit;
+    });
+  }
+
+  async function refreshGrantAuditIfLoaded() {
+    if (grantAuditSource().status === "idle") return;
+    await loadSelectedNamespaceGrantAudit();
   }
 
   function resetGrantFeedback() {
@@ -1305,6 +1429,7 @@ export default function Admin() {
         await createAdminNamespaceGrant(editor.namespace.handle, request);
       }
       await refreshSelectedNamespaceGrants();
+      await refreshGrantAuditIfLoaded();
       setGrantMessage(t(editor.mode === "edit" ? "admin.grantUpdated" : "admin.grantCreated"));
       setGrantEditor(null);
       setGrantForm({ ...EMPTY_GRANT_FORM });
@@ -1344,6 +1469,7 @@ export default function Admin() {
     try {
       await deleteAdminNamespaceGrant(target.namespace.handle, target.grant.id, reason);
       await refreshSelectedNamespaceGrants();
+      await refreshGrantAuditIfLoaded();
       setGrantMessage(t("admin.grantDeleted"));
       setGrantDeleteTarget(null);
       setGrantDeleteReason("");
@@ -1537,6 +1663,7 @@ export default function Admin() {
     const row = selected();
     if (!row?.namespace || !session()?.auth_enabled) {
       setGrantSource({ status: "idle", data: [], error: null, lastLoaded: null });
+      resetGrantAudit();
       return;
     }
     void refreshSelectedNamespaceGrants();
@@ -1729,6 +1856,7 @@ export default function Admin() {
                     row={row()}
                     authEnabled={authEnabled()}
                     grants={grantSource()}
+                    audit={grantAuditSource()}
                     grantEditor={grantEditor()}
                     grantForm={grantForm()}
                     grantError={grantError()}
@@ -1752,6 +1880,7 @@ export default function Admin() {
                     onCancelDeleteGrant={cancelDeleteGrant}
                     onConfirmDeleteGrant={confirmDeleteGrant}
                     onRefreshGrants={refreshSelectedNamespaceGrants}
+                    onLoadAudit={loadSelectedNamespaceGrantAudit}
                     onClose={dismissInspector}
                   />
                 )}
