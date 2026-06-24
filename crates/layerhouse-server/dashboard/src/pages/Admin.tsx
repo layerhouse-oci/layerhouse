@@ -61,6 +61,14 @@ interface DetailPair {
   value: string;
 }
 
+interface ResourceAction {
+  label: string;
+  description: string;
+  href?: string;
+  tone?: "primary" | "neutral" | "warn";
+  disabled?: boolean;
+}
+
 interface ResourceRow {
   key: string;
   id: string;
@@ -72,7 +80,7 @@ interface ResourceRow {
   statusTone: "good" | "warn" | "danger" | "neutral";
   updatedAt: number | null;
   description: string;
-  href?: string;
+  actions: ResourceAction[];
   details: DetailPair[];
   policy?: PolicySet;
   namespace?: NamespaceResponse;
@@ -200,6 +208,27 @@ function policyEditable(policy: PolicySet): boolean {
   return policy.editable ?? policy.source === "raft";
 }
 
+function policyActions(policy: PolicySet): ResourceAction[] {
+  if (policyEditable(policy)) {
+    return [
+      {
+        label: t("admin.action.editRaftPolicy"),
+        description: t("admin.action.editRaftPolicyDesc"),
+        href: "/policies",
+        tone: "primary",
+      },
+    ];
+  }
+  return [
+    {
+      label: t("admin.action.readOnlyPolicy"),
+      description: t(`admin.action.readOnlyPolicyDesc.${policy.source}`),
+      tone: "warn",
+      disabled: true,
+    },
+  ];
+}
+
 function repositoryRows(repositories: RepositorySummary[]): ResourceRow[] {
   return repositories.map((repo) => ({
     key: `repository:${repo.name}`,
@@ -212,7 +241,14 @@ function repositoryRows(repositories: RepositorySummary[]): ResourceRow[] {
     statusTone: repo.access_level === "delete" ? "good" : "neutral",
     updatedAt: repo.last_modified,
     description: repo.description || t("admin.noDescription"),
-    href: `/repos/${repo.name}`,
+    actions: [
+      {
+        label: t("admin.action.openRepository"),
+        description: t("admin.action.openRepositoryDesc"),
+        href: `/repos/${repo.name}`,
+        tone: "primary",
+      },
+    ],
     details: [
       { label: t("common.tags"), value: String(repo.tag_count) },
       { label: t("common.digests"), value: String(repo.manifest_count) },
@@ -237,6 +273,13 @@ function namespaceRows(namespaces: NamespaceResponse[]): ResourceRow[] {
     statusTone: "good",
     updatedAt: namespace.created_at,
     description: t("admin.namespaceDescription", { generation: namespace.generation }),
+    actions: [
+      {
+        label: t("admin.action.inspectGrants"),
+        description: t("admin.action.inspectGrantsDesc"),
+        tone: "primary",
+      },
+    ],
     details: [
       { label: t("admin.owner"), value: namespace.owner_label },
       { label: t("admin.ownerKind"), value: namespace.owner_kind },
@@ -264,6 +307,14 @@ function observedHandleRows(repositories: RepositorySummary[]): ResourceRow[] {
     statusTone: "warn",
     updatedAt: null,
     description: t("admin.observedHandleDescription"),
+    actions: [
+      {
+        label: t("admin.action.observedHandle"),
+        description: t("admin.action.observedHandleDesc"),
+        tone: "warn",
+        disabled: true,
+      },
+    ],
     details: [
       { label: t("common.repositories"), value: String(count) },
       { label: t("admin.authorization"), value: t("admin.authDisabled") },
@@ -283,7 +334,7 @@ function policyRows(policies: PolicySet[]): ResourceRow[] {
     statusTone: policy.enabled ? "good" : "warn",
     updatedAt: policy.updated_at,
     description: policy.description || t("admin.policyDescription"),
-    href: policyEditable(policy) ? "/policies" : undefined,
+    actions: policyActions(policy),
     details: [
       { label: t("policies.source"), value: policySourceLabel(policy) },
       {
@@ -309,7 +360,14 @@ function mirrorRuleRows(rules: MirrorRule[]): ResourceRow[] {
     statusTone: "neutral",
     updatedAt: rule.created_at,
     description: t("admin.mirrorRuleDescription"),
-    href: "/mirror",
+    actions: [
+      {
+        label: t("admin.action.openMirror"),
+        description: t("admin.action.openMirrorDesc"),
+        href: "/mirror",
+        tone: "primary",
+      },
+    ],
     details: [
       { label: t("common.id"), value: rule.id },
       {
@@ -335,7 +393,14 @@ function syncJobRows(jobs: SyncJob[]): ResourceRow[] {
     statusTone: job.last_error ? "danger" : job.status === "Running" ? "warn" : "good",
     updatedAt: job.last_run_at ?? job.claimed_at ?? job.next_run_at,
     description: job.last_error || t("admin.jobDescription"),
-    href: job.kind === "proxy_cache" ? "/proxy-cache" : "/mirror",
+    actions: [
+      {
+        label: t("admin.action.openJobs"),
+        description: t("admin.action.openJobsDesc"),
+        href: job.kind === "proxy_cache" ? "/proxy-cache" : "/mirror",
+        tone: "primary",
+      },
+    ],
     details: [
       { label: t("common.id"), value: job.id },
       { label: t("common.type"), value: job.kind || t("common.unknown") },
@@ -359,7 +424,14 @@ function proxyCacheRows(caches: ProxyCache[]): ResourceRow[] {
     statusTone: "neutral",
     updatedAt: cache.created_at,
     description: t("admin.proxyCacheDescription"),
-    href: "/proxy-cache",
+    actions: [
+      {
+        label: t("admin.action.openProxyCache"),
+        description: t("admin.action.openProxyCacheDesc"),
+        href: "/proxy-cache",
+        tone: "primary",
+      },
+    ],
     details: [
       { label: t("common.id"), value: cache.id },
       {
@@ -386,6 +458,13 @@ function identityRows(identities: ObservedIdentity[]): ResourceRow[] {
     statusTone: "neutral",
     updatedAt: identity.last_seen_at,
     description: t("admin.identityDescription"),
+    actions: [
+      {
+        label: t("admin.action.observedPrincipal"),
+        description: t("admin.action.observedPrincipalDesc"),
+        disabled: true,
+      },
+    ],
     details: [
       { label: t("admin.subject"), value: identity.subject },
       { label: t("common.username"), value: identity.username || t("common.none") },
@@ -409,6 +488,14 @@ function setupRows(): ResourceRow[] {
       statusTone: "warn",
       updatedAt: null,
       description: t("admin.setupAuthDescription"),
+      actions: [
+        {
+          label: t("admin.action.configureAuth"),
+          description: t("admin.action.configureAuthDesc"),
+          tone: "warn",
+          disabled: true,
+        },
+      ],
       details: [
         { label: t("admin.authorization"), value: t("admin.authDisabled") },
         { label: t("admin.nextStep"), value: t("admin.setupAuthNextStep") },
@@ -425,6 +512,14 @@ function setupRows(): ResourceRow[] {
       statusTone: "warn",
       updatedAt: null,
       description: t("admin.setupPolicyDescription"),
+      actions: [
+        {
+          label: t("admin.action.bootstrapPolicy"),
+          description: t("admin.action.bootstrapPolicyDesc"),
+          tone: "warn",
+          disabled: true,
+        },
+      ],
       details: [
         { label: t("policies.source"), value: t("admin.policySource.config") },
         { label: t("admin.nextStep"), value: t("admin.setupPolicyNextStep") },
@@ -461,10 +556,37 @@ function ResourceInspector(props: {
 
       <p class="admin-inspector-description">{props.row.description}</p>
 
-      <Show when={props.row.href}>
-        <A class="button admin-inspector-action" href={props.row.href!}>
-          {t("admin.openResource")}
-        </A>
+      <Show when={props.row.actions.length > 0}>
+        <section class="admin-inspector-section admin-inspector-actions">
+          <div class="admin-section-head">
+            <h3>{t("admin.actions")}</h3>
+          </div>
+          <div class="admin-action-list">
+            <For each={props.row.actions}>
+              {(action) => (
+                <Show
+                  when={action.href}
+                  fallback={
+                    <div
+                      class={`admin-action-card ${action.tone ?? "neutral"}`}
+                      classList={{ disabled: action.disabled }}
+                    >
+                      <strong>{action.label}</strong>
+                      <span>{action.description}</span>
+                    </div>
+                  }
+                >
+                  {(href) => (
+                    <A class={`admin-action-card ${action.tone ?? "neutral"}`} href={href()}>
+                      <strong>{action.label}</strong>
+                      <span>{action.description}</span>
+                    </A>
+                  )}
+                </Show>
+              )}
+            </For>
+          </div>
+        </section>
       </Show>
 
       <dl class="admin-detail-grid">
@@ -502,7 +624,7 @@ function ResourceInspector(props: {
           <div class="admin-section-head">
             <h3>{t("admin.grants")}</h3>
             <button type="button" class="btn btn-compact" onClick={props.onRefreshGrants}>
-              {t("common.retry")}
+              {t("admin.refreshGrants")}
             </button>
           </div>
           <Show
