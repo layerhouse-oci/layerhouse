@@ -299,6 +299,15 @@ export interface PutPolicySetRequest {
   enabled?: boolean;
 }
 
+export interface ValidatePolicyRequest {
+  cedar_text: string;
+}
+
+export interface ValidatePolicyResponse {
+  valid: boolean;
+  error: string | null;
+}
+
 // ---- Mirror Rules ----
 
 export type MirrorDirection = "pull" | "push";
