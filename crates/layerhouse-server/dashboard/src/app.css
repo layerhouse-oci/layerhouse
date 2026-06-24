@@ -7687,6 +7687,60 @@ a.admin-action-card:not(.disabled):hover {
   gap: 8px;
 }
 
+.policy-page .action {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--button-radius);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    color 180ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    background 180ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    transform 180ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    filter 180ms cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+
+.policy-page .action:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.03);
+}
+
+.policy-page .action.primary {
+  color: #fff;
+  border-color: rgba(0, 122, 255, 0.38);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.025)),
+    rgba(0, 122, 255, 0.72);
+}
+
+.policy-page .action.secondary {
+  min-height: 38px;
+  padding: 0 14px;
+}
+
+.policy-page .action.remove,
+.policy-page .action.danger {
+  color: #ffdeda;
+  border-color: rgba(255, 69, 58, 0.28);
+  background: rgba(255, 69, 58, 0.08);
+}
+
+.policy-page .action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  filter: none;
+}
+
 .policy-page .form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 180px;
@@ -7751,14 +7805,38 @@ a.admin-action-card:not(.disabled):hover {
 
 .policy-page .policy-hint {
   margin: 0;
-  padding: 0 24px 18px;
+  padding: 0 24px 10px;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
 }
 
+.policy-page .policy-validation {
+  margin: 0 24px 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--button-radius);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.policy-page .policy-validation.valid {
+  color: #c9f7d8;
+  border-color: rgba(48, 209, 88, 0.28);
+  background: rgba(48, 209, 88, 0.08);
+}
+
+.policy-page .policy-validation.invalid {
+  color: #ffdeda;
+  border-color: rgba(255, 69, 58, 0.28);
+  background: rgba(255, 69, 58, 0.08);
+}
+
 .policy-page .form-actions {
   display: flex;
+  gap: 10px;
   justify-content: flex-end;
   padding: 0 24px 24px;
 }

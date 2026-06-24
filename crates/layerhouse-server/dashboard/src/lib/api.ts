@@ -34,6 +34,8 @@ import type {
   SyncJob,
   SyncJobRun,
   TagListResponse,
+  ValidatePolicyRequest,
+  ValidatePolicyResponse,
   WarmImage,
 } from "./types";
 
@@ -421,6 +423,15 @@ export function fetchPolicySets(): Promise<PolicySet[]> {
 export async function putPolicySet(id: string, policy: PutPolicySetRequest): Promise<void> {
   await fetchNoBody(`/api/v1/admin/policies/${encodeURIComponent(id)}`, {
     method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(policy),
+    signal: AbortSignal.timeout(15000),
+  });
+}
+
+export function validatePolicySet(policy: ValidatePolicyRequest): Promise<ValidatePolicyResponse> {
+  return fetchJson("/api/v1/admin/policies/validate", {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(policy),
     signal: AbortSignal.timeout(15000),

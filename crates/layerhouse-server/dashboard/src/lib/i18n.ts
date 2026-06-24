@@ -417,6 +417,12 @@ const en: Messages = {
   "policies.cedarText": "Cedar policy text",
   "policies.validationHint":
     "Layerhouse validates Cedar syntax and schema before committing the policy through Raft. Rust safety guards still apply.",
+  "policies.validate": "Validate policy",
+  "policies.validating": "Validating...",
+  "policies.validationValid": "Cedar syntax and schema checks passed.",
+  "policies.validationInvalid": "Cedar validation failed.",
+  "policies.validationRequired": "Cedar policy text is required.",
+  "policies.validationError": "Failed to validate policy",
   "policies.required": "Policy ID, name, and Cedar text are required.",
   "policies.fetchError": "Failed to load policies",
   "policies.saveError": "Failed to save policy",

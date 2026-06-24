@@ -7,6 +7,7 @@ import {
   fetchSession,
   putPolicySet,
   redirectToSignIn,
+  validatePolicySet,
 } from "../lib/api";
 import type { DashboardSession, PolicySet } from "../lib/types";
 import { formatAgo } from "../lib/format";
@@ -20,6 +21,13 @@ interface PolicyForm {
   name: string;
   cedar_text: string;
   enabled: boolean;
+}
+
+type ValidationStatus = "idle" | "validating" | "valid" | "invalid";
+
+interface ValidationState {
+  status: ValidationStatus;
+  message: string | null;
 }
 
 const DEFAULT_CEDAR = `permit(
@@ -63,6 +71,10 @@ export default function Policies(props: PoliciesProps = {}) {
   const [showForm, setShowForm] = createSignal(false);
   const [editingId, setEditingId] = createSignal<string | null>(null);
   const [form, setForm] = createSignal<PolicyForm>({ ...EMPTY_FORM });
+  const [validation, setValidation] = createSignal<ValidationState>({
+    status: "idle",
+    message: null,
+  });
   const [saving, setSaving] = createSignal(false);
   const [deleteTarget, setDeleteTarget] = createSignal<PolicySet | null>(null);
 
@@ -100,13 +112,52 @@ export default function Policies(props: PoliciesProps = {}) {
   function createPolicy() {
     setEditingId(null);
     setForm({ ...EMPTY_FORM });
+    setValidation({ status: "idle", message: null });
     setShowForm(true);
   }
 
   function editPolicy(policy: PolicySet) {
     setEditingId(policy.id);
     setForm(policyForm(policy));
+    setValidation({ status: "idle", message: null });
     setShowForm(true);
+  }
+
+  function updateForm(next: PolicyForm) {
+    setForm(next);
+    setValidation({ status: "idle", message: null });
+  }
+
+  async function validateCurrentPolicy(): Promise<boolean> {
+    const current = form();
+    if (!current.cedar_text.trim()) {
+      setValidation({ status: "invalid", message: t("policies.validationRequired") });
+      return false;
+    }
+
+    setValidation({ status: "validating", message: t("policies.validating") });
+    try {
+      const result = await validatePolicySet({ cedar_text: current.cedar_text });
+      if (result.valid) {
+        setValidation({ status: "valid", message: t("policies.validationValid") });
+        return true;
+      }
+      setValidation({
+        status: "invalid",
+        message: result.error || t("policies.validationInvalid"),
+      });
+      return false;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        redirectToSignIn();
+        return false;
+      }
+      setValidation({
+        status: "invalid",
+        message: e instanceof Error ? e.message : t("policies.validationError"),
+      });
+      return false;
+    }
   }
 
   async function save() {
@@ -119,6 +170,7 @@ export default function Policies(props: PoliciesProps = {}) {
 
     setSaving(true);
     try {
+      if (!(await validateCurrentPolicy())) return;
       await putPolicySet(id, {
         name: current.name.trim(),
         cedar_text: current.cedar_text,
@@ -127,6 +179,7 @@ export default function Policies(props: PoliciesProps = {}) {
       setShowForm(false);
       setEditingId(null);
       setForm({ ...EMPTY_FORM });
+      setValidation({ status: "idle", message: null });
       await load();
     } catch (e) {
       if (e instanceof ApiError && e.status === 403) {
@@ -298,7 +351,7 @@ export default function Policies(props: PoliciesProps = {}) {
                 value={form().id}
                 disabled={editingId() !== null}
                 placeholder="team-readers"
-                onInput={(event) => setForm({ ...form(), id: event.currentTarget.value })}
+                onInput={(event) => updateForm({ ...form(), id: event.currentTarget.value })}
               />
             </label>
             <label class="field">
@@ -306,7 +359,7 @@ export default function Policies(props: PoliciesProps = {}) {
               <input
                 value={form().name}
                 placeholder="Team readers"
-                onInput={(event) => setForm({ ...form(), name: event.currentTarget.value })}
+                onInput={(event) => updateForm({ ...form(), name: event.currentTarget.value })}
               />
             </label>
             <label class="field field-toggle">
@@ -314,7 +367,7 @@ export default function Policies(props: PoliciesProps = {}) {
               <select
                 value={form().enabled ? "enabled" : "disabled"}
                 onChange={(event) =>
-                  setForm({ ...form(), enabled: event.currentTarget.value === "enabled" })
+                  updateForm({ ...form(), enabled: event.currentTarget.value === "enabled" })
                 }
               >
                 <option value="enabled">{t("policies.enabled")}</option>
@@ -326,12 +379,34 @@ export default function Policies(props: PoliciesProps = {}) {
               <textarea
                 spellcheck={false}
                 value={form().cedar_text}
-                onInput={(event) => setForm({ ...form(), cedar_text: event.currentTarget.value })}
+                onInput={(event) =>
+                  updateForm({ ...form(), cedar_text: event.currentTarget.value })
+                }
               />
             </label>
           </div>
           <p class="policy-hint">{t("policies.validationHint")}</p>
+          <Show when={validation().status !== "idle"}>
+            <p
+              class="policy-validation"
+              classList={{
+                valid: validation().status === "valid",
+                invalid: validation().status === "invalid",
+              }}
+            >
+              {validation().message}
+            </p>
+          </Show>
           <div class="form-actions">
+            <button
+              class="action secondary"
+              disabled={saving() || validation().status === "validating"}
+              onClick={validateCurrentPolicy}
+            >
+              {validation().status === "validating"
+                ? t("policies.validating")
+                : t("policies.validate")}
+            </button>
             <button class="button" disabled={saving()} onClick={save}>
               {saving() ? t("common.saving") : t("common.save")}
             </button>
