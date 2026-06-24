@@ -88,6 +88,18 @@ interface SourceCard {
   onRefresh: () => void;
 }
 
+const RESOURCE_KIND_ORDER: Record<ResourceKind, number> = {
+  policy: 0,
+  repository: 1,
+  namespace: 2,
+  handle: 2,
+  "sync-job": 3,
+  "mirror-rule": 4,
+  "proxy-cache": 5,
+  identity: 6,
+  setup: 7,
+};
+
 const KINDS: ResourceKind[] = [
   "repository",
   "namespace",
@@ -141,6 +153,26 @@ function policySourceLabel(policy: PolicySet): string {
 
 function loadStatusLabel(status: LoadStatus): string {
   return t(`admin.sourceStatus.${status}`);
+}
+
+function sourceHint(source: SourceCard): string {
+  if (source.status === "error") return source.error ?? t("common.unknownError");
+  if (source.id === "principals" && source.status === "idle") {
+    return t("admin.sourceHint.principalsIdle");
+  }
+  if (source.status === "idle") return t("admin.sourceHint.idle");
+  if (source.status === "loading") return t("admin.sourceHint.loading");
+  return t("admin.sourceHint.ready", { count: source.count });
+}
+
+function compareResourceRows(a: ResourceRow, b: ResourceRow, groupByKind: boolean): number {
+  if (groupByKind) {
+    const kindDelta = RESOURCE_KIND_ORDER[a.kind] - RESOURCE_KIND_ORDER[b.kind];
+    if (kindDelta !== 0) return kindDelta;
+  }
+  const updatedDelta = (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+  if (updatedDelta !== 0) return updatedDelta;
+  return a.title.localeCompare(b.title);
 }
 
 function repositoryNamespace(name: string): string {
@@ -519,6 +551,7 @@ export default function Admin() {
   const [query, setQuery] = createSignal("");
   const [kindFilter, setKindFilter] = createSignal<ResourceKind | "all">("all");
   const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
+  const [selectionDismissed, setSelectionDismissed] = createSignal(false);
 
   const [repoSource, setRepoSource] = createSignal(emptySource<RepositorySummary[]>([]));
   const [namespaceSource, setNamespaceSource] = createSignal(emptySource<NamespaceResponse[]>([]));
@@ -594,6 +627,26 @@ export default function Admin() {
     }
   }
 
+  function selectResource(key: string | null) {
+    setSelectionDismissed(false);
+    setSelectedKey(key);
+  }
+
+  function dismissInspector() {
+    setSelectionDismissed(true);
+    setSelectedKey(null);
+  }
+
+  function updateQuery(value: string) {
+    setSelectionDismissed(false);
+    setQuery(value);
+  }
+
+  function updateKindFilter(kind: ResourceKind | "all") {
+    setSelectionDismissed(false);
+    setKindFilter(kind);
+  }
+
   async function refreshSelectedNamespaceGrants() {
     const row = selected();
     if (!row?.namespace || !session()?.auth_enabled) return;
@@ -604,7 +657,7 @@ export default function Admin() {
   }
 
   const rows = createMemo<ResourceRow[]>(() => {
-    const nextRows = [
+    return [
       ...repositoryRows(repoSource().data),
       ...(session()?.auth_enabled
         ? namespaceRows(namespaceSource().data)
@@ -615,20 +668,39 @@ export default function Admin() {
       ...proxyCacheRows(proxyCacheSource().data),
       ...(session()?.auth_enabled ? identityRows(identitySource().data) : setupRows()),
     ];
-    return nextRows.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
   });
 
-  const filteredRows = createMemo(() =>
-    rows().filter((row) => {
-      if (kindFilter() !== "all" && row.kind !== kindFilter()) return false;
-      return rowMatches(row, query());
-    }),
-  );
+  const filteredRows = createMemo(() => {
+    const groupByKind = !query().trim() && kindFilter() === "all";
+    return rows()
+      .filter((row) => {
+        if (kindFilter() !== "all" && row.kind !== kindFilter()) return false;
+        return rowMatches(row, query());
+      })
+      .sort((a, b) => compareResourceRows(a, b, groupByKind));
+  });
 
   const selected = createMemo(() => {
     const key = selectedKey();
     if (!key) return null;
-    return rows().find((row) => row.key === key) ?? null;
+    return filteredRows().find((row) => row.key === key) ?? null;
+  });
+
+  createEffect(() => {
+    const visibleRows = filteredRows();
+    const currentKey = selectedKey();
+    if (visibleRows.length === 0) {
+      if (currentKey !== null) setSelectedKey(null);
+      return;
+    }
+    if (currentKey && visibleRows.some((row) => row.key === currentKey)) return;
+    if (selectionDismissed()) return;
+
+    const preferPolicy = !query().trim() && kindFilter() === "all";
+    const nextRow = preferPolicy
+      ? (visibleRows.find((row) => row.kind === "policy") ?? visibleRows[0])
+      : visibleRows[0];
+    setSelectedKey(nextRow.key);
   });
 
   const sourceCards = createMemo<SourceCard[]>(() => {
@@ -698,6 +770,16 @@ export default function Admin() {
         error: identitySource().error,
         onRefresh: () => void loadObservedIdentities(query()),
       });
+    } else {
+      cards.push({
+        id: "setup",
+        label: t("admin.source.setup"),
+        status: "ready",
+        count: setupRows().length,
+        lastLoaded: null,
+        error: null,
+        onRefresh: loadAll,
+      });
     }
     return cards;
   });
@@ -717,9 +799,6 @@ export default function Admin() {
 
   const sourceErrors = createMemo(() =>
     sourceCards().filter((source) => source.status === "error"),
-  );
-  const runningJobs = createMemo(
-    () => jobSource().data.filter((job) => job.status === "Running").length,
   );
   const authEnabled = createMemo(() => session()?.auth_enabled !== false);
 
@@ -780,19 +859,19 @@ export default function Admin() {
           <h1>{t("admin.title")}</h1>
           <p class="hero-copy">{t("admin.copy")}</p>
         </div>
-        <div class="admin-hero-stats" aria-label={t("admin.summary")}>
-          <div>
-            <span>{t("admin.resources")}</span>
-            <strong>{rows().length}</strong>
-          </div>
-          <div>
-            <span>{t("admin.runningJobs")}</span>
-            <strong>{runningJobs()}</strong>
-          </div>
-          <div>
-            <span>{t("admin.sourceErrors")}</span>
-            <strong>{sourceErrors().length}</strong>
-          </div>
+        <div class="admin-hero-pills" aria-label={t("admin.summary")}>
+          <span class={authEnabled() ? "admin-pill good" : "admin-pill warn"}>
+            {authEnabled() ? t("admin.authEnabledStatus") : t("admin.authDisabledStatus")}
+          </span>
+          <Show when={session()?.is_admin}>
+            <span class="admin-pill good">{t("admin.adminSession")}</span>
+          </Show>
+          <span class="admin-pill">{t("admin.resourceCount", { count: rows().length })}</span>
+          <span class={sourceErrors().length > 0 ? "admin-pill danger" : "admin-pill good"}>
+            {sourceErrors().length > 0
+              ? t("admin.sourceErrorCount", { count: sourceErrors().length })
+              : t("admin.sourcesHealthy")}
+          </span>
         </div>
       </section>
 
@@ -828,50 +907,43 @@ export default function Admin() {
             }
           >
             <Show when={!authEnabled()}>
-              <section class="admin-open-mode glass">
-                <div>
-                  <p class="eyebrow">{t("admin.authDisabledEyebrow")}</p>
-                  <h2>{t("admin.authDisabledTitle")}</h2>
-                  <p>{t("admin.authDisabledDesc")}</p>
-                </div>
-                <div class="admin-mode-grid">
-                  <div>
-                    <span>{t("admin.openModeRepos")}</span>
-                    <strong>{t("admin.openModeReposValue")}</strong>
-                  </div>
-                  <div>
-                    <span>{t("admin.openModeTokens")}</span>
-                    <strong>{t("admin.openModeTokensValue")}</strong>
-                  </div>
-                  <div>
-                    <span>{t("admin.openModePolicies")}</span>
-                    <strong>{t("admin.openModePoliciesValue")}</strong>
-                  </div>
-                </div>
+              <section class="admin-open-mode glass admin-open-mode-compact">
+                <p class="eyebrow">{t("admin.authDisabledEyebrow")}</p>
+                <p>{t("admin.authDisabledDesc")}</p>
               </section>
             </Show>
 
-            <section class="admin-source-grid" aria-label={t("admin.sources")}>
-              <For each={sourceCards()}>
-                {(source) => (
-                  <article class={`admin-source-card ${source.status}`}>
-                    <div>
-                      <span>{source.label}</span>
-                      <strong>{source.count}</strong>
-                    </div>
-                    <div class="admin-source-meta">
-                      <span>{loadStatusLabel(source.status)}</span>
-                      <span>{formatAgo(source.lastLoaded)}</span>
-                    </div>
-                    <Show when={source.error}>
-                      <p>{source.error}</p>
-                    </Show>
-                    <button type="button" class="btn btn-compact" onClick={source.onRefresh}>
-                      {t("common.retry")}
-                    </button>
-                  </article>
-                )}
-              </For>
+            <section class="admin-source-strip glass" aria-label={t("admin.sources")}>
+              <div class="admin-source-strip-head">
+                <span>{t("admin.sources")}</span>
+                <button type="button" class="btn btn-compact" onClick={loadAll}>
+                  {t("admin.refreshAll")}
+                </button>
+              </div>
+              <div class="admin-source-chips">
+                <For each={sourceCards()}>
+                  {(source) => (
+                    <article class={`admin-source-chip ${source.status}`}>
+                      <div>
+                        <span>{source.label}</span>
+                        <strong>{source.count}</strong>
+                      </div>
+                      <div class="admin-source-meta">
+                        <span>{loadStatusLabel(source.status)}</span>
+                        <span>{sourceHint(source)}</span>
+                      </div>
+                      <Show when={source.lastLoaded}>
+                        <span class="admin-source-updated">{formatAgo(source.lastLoaded)}</span>
+                      </Show>
+                      <Show when={source.status === "error"}>
+                        <button type="button" class="btn btn-compact" onClick={source.onRefresh}>
+                          {t("common.retry")}
+                        </button>
+                      </Show>
+                    </article>
+                  )}
+                </For>
+              </div>
             </section>
 
             <section class="admin-workbench">
@@ -883,12 +955,12 @@ export default function Admin() {
                       type="search"
                       value={query()}
                       placeholder={t("admin.searchPlaceholder")}
-                      onInput={(event) => setQuery(event.currentTarget.value)}
+                      onInput={(event) => updateQuery(event.currentTarget.value)}
                     />
                   </label>
-                  <button type="button" class="button" onClick={loadAll}>
-                    {t("admin.refreshAll")}
-                  </button>
+                  <span class="admin-results-count">
+                    {t("admin.loadedResourceCount", { count: filteredRows().length })}
+                  </span>
                 </div>
 
                 <div class="admin-kind-filters" role="list" aria-label={t("admin.filters")}>
@@ -897,7 +969,7 @@ export default function Admin() {
                       <button
                         type="button"
                         classList={{ active: kindFilter() === option.kind }}
-                        onClick={() => setKindFilter(option.kind)}
+                        onClick={() => updateKindFilter(option.kind)}
                       >
                         <span>{option.label}</span>
                         <strong>{option.count}</strong>
@@ -926,7 +998,7 @@ export default function Admin() {
                             "admin-resource-row": true,
                             selected: selected()?.key === row.key,
                           }}
-                          onClick={() => setSelectedKey(row.key)}
+                          onClick={() => selectResource(row.key)}
                         >
                           <span class="resource-kind">{kindLabel(row.kind)}</span>
                           <span class="resource-main">
@@ -960,7 +1032,7 @@ export default function Admin() {
                     authEnabled={authEnabled()}
                     grants={grantSource()}
                     onRefreshGrants={refreshSelectedNamespaceGrants}
-                    onClose={() => setSelectedKey(null)}
+                    onClose={dismissInspector}
                   />
                 )}
               </Show>
