@@ -7335,6 +7335,58 @@ pre {
   margin-top: 18px;
 }
 
+.admin-inspector-actions {
+  margin-top: 20px;
+}
+
+.admin-action-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-action-card {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--panel-subtle);
+  color: var(--text);
+  transition:
+    border-color 150ms ease,
+    background 150ms ease;
+}
+
+a.admin-action-card:not(.disabled):hover {
+  border-color: color-mix(in srgb, var(--blue) 44%, var(--border));
+  background: color-mix(in srgb, var(--blue-soft) 45%, var(--panel-subtle));
+}
+
+.admin-action-card.primary {
+  border-color: color-mix(in srgb, var(--blue) 34%, var(--border));
+}
+
+.admin-action-card.warn {
+  border-color: color-mix(in srgb, var(--yellow) 34%, var(--border));
+  background: color-mix(in srgb, var(--yellow-soft) 36%, var(--panel-subtle));
+}
+
+.admin-action-card.disabled {
+  cursor: default;
+}
+
+.admin-action-card strong {
+  color: var(--strong);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.admin-action-card span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .admin-detail-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -470,6 +470,7 @@ const en: Messages = {
   "admin.refreshAll": "Refresh all",
   "admin.inspector": "Resource inspector",
   "admin.openResource": "Open resource",
+  "admin.actions": "Available actions",
   "admin.noSelection": "No resource selected",
   "admin.noSelectionDesc":
     "Select a loaded row to inspect source, status, and operational details.",
@@ -505,6 +506,38 @@ const en: Messages = {
   "admin.policySource.builtin": "Builtin",
   "admin.policySource.config": "Config",
   "admin.policySource.raft": "Raft",
+  "admin.action.openRepository": "Open repository",
+  "admin.action.openRepositoryDesc": "Inspect tags, manifests, size, and repository history.",
+  "admin.action.inspectGrants": "Inspect namespace grants",
+  "admin.action.inspectGrantsDesc":
+    "Grant rows load from metadata when this namespace is selected.",
+  "admin.action.observedHandle": "Observed handle only",
+  "admin.action.observedHandleDesc":
+    "Enable auth and claim namespaces before ownership actions exist.",
+  "admin.action.editRaftPolicy": "Edit Raft policy set",
+  "admin.action.editRaftPolicyDesc":
+    "Open the policy editor for mutable Raft-backed Cedar policy sets.",
+  "admin.action.readOnlyPolicy": "Read-only policy source",
+  "admin.action.readOnlyPolicyDesc.builtin":
+    "Builtin policy rows are synthesized by the server and cannot be edited here.",
+  "admin.action.readOnlyPolicyDesc.config":
+    "Config policy rows come from startup config. Edit the config file and restart to change them.",
+  "admin.action.readOnlyPolicyDesc.raft":
+    "This Raft policy row is marked read-only by the server and cannot be edited here.",
+  "admin.action.openMirror": "Open mirror rules",
+  "admin.action.openMirrorDesc": "Manage upstream mapping and mirror scheduling.",
+  "admin.action.openJobs": "Open job owner page",
+  "admin.action.openJobsDesc": "Review the mirror or proxy page that owns this job type.",
+  "admin.action.openProxyCache": "Open proxy cache",
+  "admin.action.openProxyCacheDesc": "Manage pull-through cache mappings and warm schedules.",
+  "admin.action.observedPrincipal": "Observed locally",
+  "admin.action.observedPrincipalDesc":
+    "This identity came from local activity. Authorization still uses stable IDs and cached claims.",
+  "admin.action.configureAuth": "Configure auth outside the dashboard",
+  "admin.action.configureAuthDesc": "Add an [auth] config section and restart with OIDC settings.",
+  "admin.action.bootstrapPolicy": "Bootstrap through config",
+  "admin.action.bootstrapPolicyDesc":
+    "Add a config policy set granting Action::admin on Registry::root before enforcing auth.",
   "admin.repositorySubtitle": "Namespace {namespace}",
   "admin.repositoryAccess": "{action} access",
   "admin.manifestBytes": "Manifest bytes",
@@ -562,6 +595,7 @@ const en: Messages = {
   "admin.todo": "To do",
   "admin.nextStep": "Next step",
   "admin.grants": "Grants",
+  "admin.refreshGrants": "Refresh grants",
   "admin.grantsLoading": "Loading grants...",
   "admin.grantsError": "Failed to load grants",
   "admin.noNamespaceGrants": "No grants on this namespace.",
