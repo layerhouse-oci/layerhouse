@@ -7635,6 +7635,66 @@ a.admin-action-card:not(.disabled):hover {
   color: var(--green);
 }
 
+.admin-audit-panel {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--border);
+}
+
+.admin-audit-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-audit-card {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--panel-subtle);
+}
+
+.admin-audit-card-head,
+.admin-audit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.admin-audit-card-head > span:last-child,
+.admin-audit-meta span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.admin-audit-change,
+.admin-audit-reason {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.admin-audit-change {
+  color: var(--strong);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.admin-audit-reason {
+  border-left: 2px solid color-mix(in srgb, var(--blue) 34%, var(--border));
+  padding-left: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.admin-audit-meta .mono {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}
+
 @media (max-width: 760px) {
   .admin-page .admin-hero {
     min-height: auto;
