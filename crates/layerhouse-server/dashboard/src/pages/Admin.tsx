@@ -5,6 +5,8 @@ import ErrorBanner from "../components/ErrorBanner";
 import LoadingSpinner from "../components/LoadingSpinner";
 import {
   ApiError,
+  createAdminNamespaceGrant,
+  deleteAdminNamespaceGrant,
   fetchAdminNamespaceGrants,
   fetchMirrorRules,
   fetchNamespaces,
@@ -15,6 +17,7 @@ import {
   fetchSession,
   fetchSyncJobs,
   redirectToSignIn,
+  updateAdminNamespaceGrant,
 } from "../lib/api";
 import {
   formatAgo,
@@ -29,15 +32,19 @@ import type {
   DashboardSession,
   MirrorRule,
   NamespaceGrant,
+  NamespaceGrantGrantee,
   NamespaceResponse,
   ObservedIdentity,
+  OciAction,
   PolicySet,
   ProxyCache,
+  PutNamespaceGrantRequest,
   RepositorySummary,
   SyncJob,
 } from "../lib/types";
 
 type LoadStatus = "idle" | "loading" | "ready" | "error";
+type GrantGranteeKind = NamespaceGrantGrantee["kind"];
 type ResourceKind =
   | "repository"
   | "namespace"
@@ -96,6 +103,28 @@ interface SourceCard {
   onRefresh: () => void;
 }
 
+interface AdminGrantEditor {
+  mode: "create" | "edit";
+  namespace: NamespaceResponse;
+  grant?: NamespaceGrant;
+}
+
+interface AdminGrantForm {
+  granteeKind: GrantGranteeKind;
+  groupName: string;
+  userQuery: string;
+  selectedUser: ObservedIdentity | null;
+  publicLabel: string;
+  action: OciAction;
+  label: string;
+  reason: string;
+}
+
+interface AdminGrantDeleteTarget {
+  namespace: NamespaceResponse;
+  grant: NamespaceGrant;
+}
+
 const RESOURCE_KIND_ORDER: Record<ResourceKind, number> = {
   policy: 0,
   repository: 1,
@@ -119,6 +148,19 @@ const KINDS: ResourceKind[] = [
   "identity",
   "setup",
 ];
+
+const GRANT_ACTIONS: OciAction[] = ["pull", "create", "update", "delete"];
+
+const EMPTY_GRANT_FORM: AdminGrantForm = {
+  granteeKind: "group",
+  groupName: "",
+  userQuery: "",
+  selectedUser: null,
+  publicLabel: "Public",
+  action: "pull",
+  label: "",
+  reason: "",
+};
 
 function emptySource<T>(data: T): SourceState<T> {
   return { status: "idle", data, error: null, lastLoaded: null };
@@ -206,6 +248,38 @@ function rowMatches(row: ResourceRow, query: string): boolean {
 
 function policyEditable(policy: PolicySet): boolean {
   return policy.editable ?? policy.source === "raft";
+}
+
+function isProviderQualifiedId(value: string, kind: "user" | "group"): boolean {
+  const parts = value.trim().split(":");
+  return parts.length === 3 && parts[0] !== "" && parts[1] === kind && parts[2] !== "";
+}
+
+function observedUserLabel(user: ObservedIdentity): string {
+  return user.display_name || user.username || user.email || user.subject;
+}
+
+function grantLabel(grant: NamespaceGrant): string {
+  if (grant.label) return grant.label;
+  if (grant.grantee.kind === "public") return t("access.grantee.public");
+  return grant.grantee.id;
+}
+
+function grantDetail(grant: NamespaceGrant): string {
+  if (grant.grantee.kind === "public") return t("access.publicPullOnly");
+  return grant.grantee.id;
+}
+
+function actionLabel(action: OciAction): string {
+  return t(`access.action.${action}`);
+}
+
+function actionSummary(action: OciAction): string {
+  return t("access.grantAllows", { action: actionLabel(action) });
+}
+
+function granteeKindLabel(kind: GrantGranteeKind): string {
+  return t(`access.grantee.${kind}`);
 }
 
 function policyActions(policy: PolicySet): ResourceAction[] {
@@ -532,6 +606,28 @@ function ResourceInspector(props: {
   row: ResourceRow;
   authEnabled: boolean;
   grants: SourceState<NamespaceGrant[]>;
+  grantEditor: AdminGrantEditor | null;
+  grantForm: AdminGrantForm;
+  grantError: string | null;
+  grantMessage: string | null;
+  grantSaving: boolean;
+  grantDeleteTarget: AdminGrantDeleteTarget | null;
+  grantDeleteReason: string;
+  grantDeleting: boolean;
+  observedUsers: ObservedIdentity[];
+  observedUserLoading: boolean;
+  onStartCreateGrant: (namespace: NamespaceResponse) => void;
+  onStartEditGrant: (namespace: NamespaceResponse, grant: NamespaceGrant) => void;
+  onCloseGrantEditor: () => void;
+  onUpdateGrantForm: (form: AdminGrantForm) => void;
+  onSetGrantGranteeKind: (kind: GrantGranteeKind) => void;
+  onSearchGrantUsers: () => void;
+  onSelectGrantUser: (user: ObservedIdentity) => void;
+  onSaveGrant: () => void;
+  onStartDeleteGrant: (namespace: NamespaceResponse, grant: NamespaceGrant) => void;
+  onUpdateDeleteReason: (reason: string) => void;
+  onCancelDeleteGrant: () => void;
+  onConfirmDeleteGrant: () => void;
   onRefreshGrants: () => void;
   onClose: () => void;
 }) {
@@ -619,48 +715,303 @@ function ResourceInspector(props: {
         )}
       </Show>
 
-      <Show when={props.authEnabled && props.row.kind === "namespace"}>
-        <section class="admin-inspector-section">
-          <div class="admin-section-head">
-            <h3>{t("admin.grants")}</h3>
-            <button type="button" class="btn btn-compact" onClick={props.onRefreshGrants}>
-              {t("admin.refreshGrants")}
-            </button>
-          </div>
-          <Show
-            when={props.grants.status !== "loading"}
-            fallback={<LoadingSpinner label={t("admin.grantsLoading")} />}
-          >
+      <Show when={props.authEnabled ? props.row.namespace : null}>
+        {(namespace) => (
+          <section class="admin-inspector-section">
+            <div class="admin-section-head">
+              <h3>{t("admin.grants")}</h3>
+              <div class="admin-section-actions">
+                <button
+                  type="button"
+                  class="btn btn-compact"
+                  onClick={() => props.onStartCreateGrant(namespace())}
+                >
+                  {t("admin.addGrant")}
+                </button>
+                <button type="button" class="btn btn-compact" onClick={props.onRefreshGrants}>
+                  {t("admin.refreshGrants")}
+                </button>
+              </div>
+            </div>
+
+            <Show when={props.grantMessage}>
+              <p class="hint admin-grant-success">{props.grantMessage}</p>
+            </Show>
+
+            <Show when={props.grantError}>
+              <p class="warning">{props.grantError}</p>
+            </Show>
+
+            <Show when={props.grantEditor}>
+              {(editor) => (
+                <div class="admin-grant-editor">
+                  <div class="admin-grant-editor-head">
+                    <strong>
+                      {editor().mode === "edit" ? t("admin.editGrant") : t("admin.addGrant")}
+                    </strong>
+                    <button
+                      type="button"
+                      class="btn btn-compact"
+                      disabled={props.grantSaving}
+                      onClick={props.onCloseGrantEditor}
+                    >
+                      {t("common.cancel")}
+                    </button>
+                  </div>
+
+                  <div
+                    class="admin-grantee-tabs"
+                    role="tablist"
+                    aria-label={t("admin.granteeKind")}
+                  >
+                    <For each={["group", "user", "public"] as GrantGranteeKind[]}>
+                      {(kind) => (
+                        <button
+                          type="button"
+                          classList={{ active: props.grantForm.granteeKind === kind }}
+                          disabled={editor().mode === "edit"}
+                          onClick={() => props.onSetGrantGranteeKind(kind)}
+                        >
+                          {granteeKindLabel(kind)}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+
+                  <Show when={props.grantForm.granteeKind === "group"}>
+                    <label class="admin-grant-field">
+                      <span>{t("admin.groupStableId")}</span>
+                      <input
+                        value={props.grantForm.groupName}
+                        disabled={editor().mode === "edit"}
+                        placeholder="kanidm:group:550e8400-e29b-41d4-a716-446655440000"
+                        onInput={(event) =>
+                          props.onUpdateGrantForm({
+                            ...props.grantForm,
+                            groupName: event.currentTarget.value,
+                          })
+                        }
+                      />
+                    </label>
+                  </Show>
+
+                  <Show when={props.grantForm.granteeKind === "user"}>
+                    <div class="admin-grant-field">
+                      <span>{t("admin.userStableId")}</span>
+                      <div class="admin-user-search-row">
+                        <input
+                          value={props.grantForm.userQuery}
+                          disabled={editor().mode === "edit"}
+                          placeholder="kanidm:user:550e8400-e29b-41d4-a716-446655440000"
+                          onInput={(event) =>
+                            props.onUpdateGrantForm({
+                              ...props.grantForm,
+                              selectedUser: null,
+                              userQuery: event.currentTarget.value,
+                            })
+                          }
+                        />
+                        <button
+                          type="button"
+                          class="btn btn-compact"
+                          disabled={editor().mode === "edit" || props.observedUserLoading}
+                          onClick={props.onSearchGrantUsers}
+                        >
+                          {props.observedUserLoading
+                            ? t("common.loading")
+                            : t("access.searchUsers")}
+                        </button>
+                      </div>
+                      <Show when={props.observedUsers.length > 0 && editor().mode !== "edit"}>
+                        <div class="admin-user-results">
+                          <For each={props.observedUsers}>
+                            {(user) => (
+                              <button
+                                type="button"
+                                classList={{
+                                  active:
+                                    props.grantForm.selectedUser?.principal === user.principal,
+                                }}
+                                onClick={() => props.onSelectGrantUser(user)}
+                              >
+                                <strong>{observedUserLabel(user)}</strong>
+                                <span>{user.principal}</span>
+                              </button>
+                            )}
+                          </For>
+                        </div>
+                      </Show>
+                    </div>
+                  </Show>
+
+                  <Show when={props.grantForm.granteeKind === "public"}>
+                    <label class="admin-grant-field">
+                      <span>{t("admin.publicLabel")}</span>
+                      <input
+                        value={props.grantForm.publicLabel}
+                        disabled={editor().mode === "edit"}
+                        onInput={(event) =>
+                          props.onUpdateGrantForm({
+                            ...props.grantForm,
+                            publicLabel: event.currentTarget.value,
+                          })
+                        }
+                      />
+                    </label>
+                  </Show>
+
+                  <label class="admin-grant-field">
+                    <span>{t("admin.grantLabel")}</span>
+                    <input
+                      value={props.grantForm.label}
+                      placeholder={t("admin.grantLabelPlaceholder")}
+                      onInput={(event) =>
+                        props.onUpdateGrantForm({
+                          ...props.grantForm,
+                          label: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  </label>
+
+                  <div class="admin-grant-field">
+                    <span>{t("access.permission")}</span>
+                    <div class="admin-action-ladder">
+                      <For each={GRANT_ACTIONS}>
+                        {(action) => (
+                          <button
+                            type="button"
+                            classList={{ active: props.grantForm.action === action }}
+                            disabled={props.grantForm.granteeKind === "public" && action !== "pull"}
+                            onClick={() => props.onUpdateGrantForm({ ...props.grantForm, action })}
+                          >
+                            {actionLabel(action)}
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  </div>
+
+                  <label class="admin-grant-field">
+                    <span>{t("admin.reason")}</span>
+                    <textarea
+                      value={props.grantForm.reason}
+                      placeholder={t("admin.grantReasonPlaceholder")}
+                      onInput={(event) =>
+                        props.onUpdateGrantForm({
+                          ...props.grantForm,
+                          reason: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  </label>
+
+                  <div class="admin-grant-editor-actions">
+                    <button
+                      type="button"
+                      class="btn btn-primary"
+                      disabled={props.grantSaving}
+                      onClick={props.onSaveGrant}
+                    >
+                      {props.grantSaving ? t("common.saving") : t("common.save")}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </Show>
+
+            <Show when={props.grantDeleteTarget}>
+              {(target) => (
+                <div class="admin-grant-delete">
+                  <strong>
+                    {t("admin.deleteGrantTitle", { label: grantLabel(target().grant) })}
+                  </strong>
+                  <p class="hint">{t("admin.deleteGrantDesc")}</p>
+                  <label class="admin-grant-field">
+                    <span>{t("admin.reason")}</span>
+                    <textarea
+                      value={props.grantDeleteReason}
+                      placeholder={t("admin.deleteGrantReasonPlaceholder")}
+                      onInput={(event) => props.onUpdateDeleteReason(event.currentTarget.value)}
+                    />
+                  </label>
+                  <div class="admin-grant-editor-actions">
+                    <button
+                      type="button"
+                      class="btn btn-compact"
+                      disabled={props.grantDeleting}
+                      onClick={props.onCancelDeleteGrant}
+                    >
+                      {t("common.cancel")}
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-compact btn-danger"
+                      disabled={props.grantDeleting}
+                      onClick={props.onConfirmDeleteGrant}
+                    >
+                      {props.grantDeleting ? t("common.deleting") : t("common.delete")}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </Show>
+
             <Show
-              when={props.grants.status !== "error"}
-              fallback={
-                <ErrorBanner
-                  message={props.grants.error ?? t("admin.grantsError")}
-                  onRetry={props.onRefreshGrants}
-                />
-              }
+              when={props.grants.status !== "loading"}
+              fallback={<LoadingSpinner label={t("admin.grantsLoading")} />}
             >
               <Show
-                when={props.grants.data.length > 0}
-                fallback={<p class="hint">{t("admin.noNamespaceGrants")}</p>}
+                when={props.grants.status !== "error"}
+                fallback={
+                  <ErrorBanner
+                    message={props.grants.error ?? t("admin.grantsError")}
+                    onRetry={props.onRefreshGrants}
+                  />
+                }
               >
-                <div class="admin-grant-list">
-                  <For each={props.grants.data}>
-                    {(grant) => (
-                      <div class="admin-grant-card">
-                        <strong>{grant.label || grant.id}</strong>
-                        <span>
-                          {grant.grantee.kind} · {grant.action}
-                        </span>
-                        <span class="mono">{grant.id}</span>
-                      </div>
-                    )}
-                  </For>
-                </div>
+                <Show
+                  when={props.grants.data.length > 0}
+                  fallback={<p class="hint">{t("admin.noNamespaceGrants")}</p>}
+                >
+                  <div class="admin-grant-list">
+                    <For each={props.grants.data}>
+                      {(grant) => (
+                        <div class="admin-grant-card">
+                          <div>
+                            <strong>{grantLabel(grant)}</strong>
+                            <span>
+                              {granteeKindLabel(grant.grantee.kind)} · {grantDetail(grant)}
+                            </span>
+                          </div>
+                          <span class="resource-status neutral">{actionSummary(grant.action)}</span>
+                          <span class="mono">{grant.id}</span>
+                          <span>{formatTime(grant.updated_at)}</span>
+                          <div class="admin-grant-row-actions">
+                            <button
+                              type="button"
+                              class="btn btn-compact"
+                              onClick={() => props.onStartEditGrant(namespace(), grant)}
+                            >
+                              {t("common.edit")}
+                            </button>
+                            <button
+                              type="button"
+                              class="btn btn-compact btn-danger"
+                              onClick={() => props.onStartDeleteGrant(namespace(), grant)}
+                            >
+                              {t("common.delete")}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </Show>
               </Show>
             </Show>
-          </Show>
-        </section>
+          </section>
+        )}
       </Show>
     </aside>
   );
@@ -683,6 +1034,18 @@ export default function Admin() {
   const [proxyCacheSource, setProxyCacheSource] = createSignal(emptySource<ProxyCache[]>([]));
   const [identitySource, setIdentitySource] = createSignal(emptySource<ObservedIdentity[]>([]));
   const [grantSource, setGrantSource] = createSignal(emptySource<NamespaceGrant[]>([]));
+  const [grantEditor, setGrantEditor] = createSignal<AdminGrantEditor | null>(null);
+  const [grantForm, setGrantForm] = createSignal<AdminGrantForm>({ ...EMPTY_GRANT_FORM });
+  const [grantError, setGrantError] = createSignal<string | null>(null);
+  const [grantMessage, setGrantMessage] = createSignal<string | null>(null);
+  const [grantSaving, setGrantSaving] = createSignal(false);
+  const [grantDeleteTarget, setGrantDeleteTarget] = createSignal<AdminGrantDeleteTarget | null>(
+    null,
+  );
+  const [grantDeleteReason, setGrantDeleteReason] = createSignal("");
+  const [grantDeleting, setGrantDeleting] = createSignal(false);
+  const [grantObservedUsers, setGrantObservedUsers] = createSignal<ObservedIdentity[]>([]);
+  const [grantObservedUserLoading, setGrantObservedUserLoading] = createSignal(false);
 
   async function loadRepositories() {
     await loadSource(setRepoSource, t("repos.fetchError"), async () => {
@@ -752,20 +1115,32 @@ export default function Admin() {
   function selectResource(key: string | null) {
     setSelectionDismissed(false);
     setSelectedKey(key);
+    resetGrantFeedback();
+    closeGrantEditor();
+    cancelDeleteGrant();
   }
 
   function dismissInspector() {
     setSelectionDismissed(true);
     setSelectedKey(null);
+    resetGrantFeedback();
+    closeGrantEditor();
+    cancelDeleteGrant();
   }
 
   function updateQuery(value: string) {
     setSelectionDismissed(false);
+    resetGrantFeedback();
+    closeGrantEditor();
+    cancelDeleteGrant();
     setQuery(value);
   }
 
   function updateKindFilter(kind: ResourceKind | "all") {
     setSelectionDismissed(false);
+    resetGrantFeedback();
+    closeGrantEditor();
+    cancelDeleteGrant();
     setKindFilter(kind);
   }
 
@@ -776,6 +1151,207 @@ export default function Admin() {
       const response = await fetchAdminNamespaceGrants(row.namespace!.handle);
       return response.grants;
     });
+  }
+
+  function resetGrantFeedback() {
+    setGrantError(null);
+    setGrantMessage(null);
+  }
+
+  function openCreateGrant(namespace: NamespaceResponse) {
+    resetGrantFeedback();
+    setGrantDeleteTarget(null);
+    setGrantDeleteReason("");
+    setGrantObservedUsers([]);
+    setGrantForm({ ...EMPTY_GRANT_FORM });
+    setGrantEditor({ mode: "create", namespace });
+  }
+
+  function openEditGrant(namespace: NamespaceResponse, grant: NamespaceGrant) {
+    resetGrantFeedback();
+    setGrantDeleteTarget(null);
+    setGrantDeleteReason("");
+    setGrantObservedUsers([]);
+    setGrantForm({
+      granteeKind: grant.grantee.kind,
+      groupName: grant.grantee.kind === "group" ? grant.grantee.id : "",
+      userQuery: grant.grantee.kind === "user" ? grant.grantee.id : "",
+      selectedUser: null,
+      publicLabel: grant.grantee.kind === "public" ? grant.label : "Public",
+      action: grant.action,
+      label: grant.label,
+      reason: "",
+    });
+    setGrantEditor({ mode: "edit", namespace, grant });
+  }
+
+  function closeGrantEditor() {
+    if (grantSaving()) return;
+    setGrantEditor(null);
+    setGrantForm({ ...EMPTY_GRANT_FORM });
+    setGrantObservedUsers([]);
+    setGrantObservedUserLoading(false);
+  }
+
+  function setGrantGranteeKind(kind: GrantGranteeKind) {
+    setGrantForm({
+      ...grantForm(),
+      granteeKind: kind,
+      action: kind === "public" ? "pull" : grantForm().action,
+    });
+    resetGrantFeedback();
+  }
+
+  async function searchGrantUsers() {
+    const query = grantForm().userQuery.trim();
+    if (query.length < 2) {
+      setGrantError(t("admin.userSearchRequired"));
+      return;
+    }
+    setGrantObservedUserLoading(true);
+    setGrantError(null);
+    try {
+      const response = await fetchObservedUsers(query);
+      setGrantObservedUsers(response.users);
+    } catch (error) {
+      setGrantError(errorMessage(error, t("access.observedUserSearchError")));
+    } finally {
+      setGrantObservedUserLoading(false);
+    }
+  }
+
+  function selectGrantUser(user: ObservedIdentity) {
+    setGrantForm({
+      ...grantForm(),
+      selectedUser: user,
+      userQuery: observedUserLabel(user),
+      label: observedUserLabel(user),
+    });
+    resetGrantFeedback();
+  }
+
+  function buildGrantRequest(): PutNamespaceGrantRequest | null {
+    const form = grantForm();
+    const reason = form.reason.trim();
+    if (!reason) {
+      setGrantError(t("admin.reasonRequired"));
+      return null;
+    }
+
+    const action = form.granteeKind === "public" ? "pull" : form.action;
+    if (form.granteeKind === "group") {
+      const group = form.groupName.trim();
+      if (!group) {
+        setGrantError(t("access.groupRequired"));
+        return null;
+      }
+      if (!isProviderQualifiedId(group, "group")) {
+        setGrantError(t("access.groupIdInvalid"));
+        return null;
+      }
+      return {
+        grantee: { kind: "group", id: group },
+        action,
+        label: form.label.trim() || group,
+        reason,
+      };
+    }
+
+    if (form.granteeKind === "user") {
+      const id = form.selectedUser?.principal || form.userQuery.trim();
+      if (!id) {
+        setGrantError(t("access.userRequired"));
+        return null;
+      }
+      if (!isProviderQualifiedId(id, "user")) {
+        setGrantError(t("access.userIdInvalid"));
+        return null;
+      }
+      const label =
+        form.label.trim() || (form.selectedUser ? observedUserLabel(form.selectedUser) : id);
+      return {
+        grantee: { kind: "user", id },
+        action,
+        label,
+        reason,
+      };
+    }
+
+    return {
+      grantee: { kind: "public" },
+      action: "pull",
+      label: form.label.trim() || form.publicLabel.trim() || t("access.grantee.public"),
+      reason,
+    };
+  }
+
+  async function saveGrant() {
+    const editor = grantEditor();
+    if (!editor) return;
+    const request = buildGrantRequest();
+    if (!request) return;
+
+    setGrantSaving(true);
+    setGrantError(null);
+    setGrantMessage(null);
+    try {
+      if (editor.mode === "edit" && editor.grant) {
+        await updateAdminNamespaceGrant(editor.namespace.handle, editor.grant.id, {
+          action: request.action,
+          label: request.label,
+          reason: request.reason,
+        });
+      } else {
+        await createAdminNamespaceGrant(editor.namespace.handle, request);
+      }
+      await refreshSelectedNamespaceGrants();
+      setGrantMessage(t(editor.mode === "edit" ? "admin.grantUpdated" : "admin.grantCreated"));
+      setGrantEditor(null);
+      setGrantForm({ ...EMPTY_GRANT_FORM });
+      setGrantObservedUsers([]);
+    } catch (error) {
+      setGrantError(errorMessage(error, t("admin.grantSaveError")));
+    } finally {
+      setGrantSaving(false);
+    }
+  }
+
+  function openDeleteGrant(namespace: NamespaceResponse, grant: NamespaceGrant) {
+    resetGrantFeedback();
+    closeGrantEditor();
+    setGrantDeleteReason("");
+    setGrantDeleteTarget({ namespace, grant });
+  }
+
+  function cancelDeleteGrant() {
+    if (grantDeleting()) return;
+    setGrantDeleteTarget(null);
+    setGrantDeleteReason("");
+  }
+
+  async function confirmDeleteGrant() {
+    const target = grantDeleteTarget();
+    if (!target) return;
+    const reason = grantDeleteReason().trim();
+    if (!reason) {
+      setGrantError(t("admin.reasonRequired"));
+      return;
+    }
+
+    setGrantDeleting(true);
+    setGrantError(null);
+    setGrantMessage(null);
+    try {
+      await deleteAdminNamespaceGrant(target.namespace.handle, target.grant.id, reason);
+      await refreshSelectedNamespaceGrants();
+      setGrantMessage(t("admin.grantDeleted"));
+      setGrantDeleteTarget(null);
+      setGrantDeleteReason("");
+    } catch (error) {
+      setGrantError(errorMessage(error, t("admin.grantDeleteError")));
+    } finally {
+      setGrantDeleting(false);
+    }
   }
 
   const rows = createMemo<ResourceRow[]>(() => {
@@ -1153,6 +1729,28 @@ export default function Admin() {
                     row={row()}
                     authEnabled={authEnabled()}
                     grants={grantSource()}
+                    grantEditor={grantEditor()}
+                    grantForm={grantForm()}
+                    grantError={grantError()}
+                    grantMessage={grantMessage()}
+                    grantSaving={grantSaving()}
+                    grantDeleteTarget={grantDeleteTarget()}
+                    grantDeleteReason={grantDeleteReason()}
+                    grantDeleting={grantDeleting()}
+                    observedUsers={grantObservedUsers()}
+                    observedUserLoading={grantObservedUserLoading()}
+                    onStartCreateGrant={openCreateGrant}
+                    onStartEditGrant={openEditGrant}
+                    onCloseGrantEditor={closeGrantEditor}
+                    onUpdateGrantForm={setGrantForm}
+                    onSetGrantGranteeKind={setGrantGranteeKind}
+                    onSearchGrantUsers={searchGrantUsers}
+                    onSelectGrantUser={selectGrantUser}
+                    onSaveGrant={saveGrant}
+                    onStartDeleteGrant={openDeleteGrant}
+                    onUpdateDeleteReason={setGrantDeleteReason}
+                    onCancelDeleteGrant={cancelDeleteGrant}
+                    onConfirmDeleteGrant={confirmDeleteGrant}
                     onRefreshGrants={refreshSelectedNamespaceGrants}
                     onClose={dismissInspector}
                   />
