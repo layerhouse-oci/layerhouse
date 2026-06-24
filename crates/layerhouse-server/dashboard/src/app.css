@@ -7424,6 +7424,13 @@ a.admin-action-card:not(.disabled):hover {
   margin-bottom: 12px;
 }
 
+.admin-section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .admin-section-head h3 {
   margin: 0;
   color: var(--strong);
@@ -7451,11 +7458,19 @@ a.admin-action-card:not(.disabled):hover {
 
 .admin-grant-card {
   display: grid;
-  gap: 4px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel-subtle);
+}
+
+.admin-grant-card > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
 .admin-grant-card span {
@@ -7464,7 +7479,160 @@ a.admin-action-card:not(.disabled):hover {
 }
 
 .admin-grant-card .mono {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
   font-family: var(--font-mono);
+}
+
+.admin-grant-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.admin-grant-editor,
+.admin-grant-delete {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 14px;
+  border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--border));
+  border-radius: var(--radius-sm);
+  padding: 13px;
+  background: color-mix(in srgb, var(--blue-soft) 28%, var(--panel-subtle));
+}
+
+.admin-grant-delete {
+  border-color: color-mix(in srgb, var(--red) 30%, var(--border));
+  background: color-mix(in srgb, var(--red-soft) 24%, var(--panel-subtle));
+}
+
+.admin-grant-editor-head,
+.admin-grant-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-grant-editor-head strong,
+.admin-grant-delete strong {
+  color: var(--strong);
+}
+
+.admin-grantee-tabs,
+.admin-action-ladder {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--button-radius);
+  background: var(--control);
+}
+
+.admin-action-ladder {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.admin-grantee-tabs button,
+.admin-action-ladder button {
+  min-height: 34px;
+  border: 0;
+  border-radius: var(--button-radius);
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.admin-grantee-tabs button.active,
+.admin-action-ladder button.active {
+  color: var(--strong);
+  background: var(--control-active);
+}
+
+.admin-grantee-tabs button:disabled,
+.admin-action-ladder button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.admin-grant-field {
+  display: grid;
+  gap: 7px;
+}
+
+.admin-grant-field span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.admin-grant-field input,
+.admin-grant-field textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--button-radius);
+  outline: none;
+  background: var(--control);
+  color: var(--text);
+}
+
+.admin-grant-field input {
+  height: 38px;
+  padding: 0 11px;
+}
+
+.admin-grant-field textarea {
+  min-height: 74px;
+  resize: vertical;
+  padding: 10px 11px;
+}
+
+.admin-user-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.admin-user-results {
+  display: grid;
+  gap: 7px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.admin-user-results button {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
+  color: var(--text);
+  background: var(--surface-solid);
+  text-align: start;
+  cursor: pointer;
+}
+
+.admin-user-results button.active {
+  border-color: color-mix(in srgb, var(--blue) 52%, var(--border));
+  background: color-mix(in srgb, var(--blue-soft) 55%, var(--surface-solid));
+}
+
+.admin-user-results span {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.admin-grant-success {
+  color: var(--green);
 }
 
 @media (max-width: 760px) {
@@ -7530,6 +7698,27 @@ a.admin-action-card:not(.disabled):hover {
 
   .resource-status {
     justify-self: flex-start;
+  }
+
+  .admin-section-head,
+  .admin-grant-editor-head,
+  .admin-grant-editor-actions,
+  .admin-section-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-grant-card,
+  .admin-user-search-row {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-grant-row-actions {
+    justify-content: flex-start;
+  }
+
+  .admin-action-ladder {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .admin-inspector {
