@@ -41,6 +41,17 @@ struct PutPolicySetRequest {
     enabled: Option<bool>,
 }
 
+#[derive(Deserialize)]
+struct ValidatePolicyRequest {
+    cedar_text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ValidatePolicyResponse {
+    valid: bool,
+    error: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct PolicySetResponse {
     id: String,
@@ -300,9 +311,30 @@ fn validate_policy_fields(id: &str, req: &PutPolicySetRequest) -> Result<(), Lay
         .map_err(LayerhouseError::NameInvalid)
 }
 
+fn validate_policy_text_response(cedar_text: &str) -> ValidatePolicyResponse {
+    if cedar_text.trim().is_empty() {
+        return ValidatePolicyResponse {
+            valid: false,
+            error: Some("cedar_text is required".to_string()),
+        };
+    }
+
+    match crate::auth::cedar_authorizer::validate_policy_text(cedar_text) {
+        Ok(()) => ValidatePolicyResponse {
+            valid: true,
+            error: None,
+        },
+        Err(error) => ValidatePolicyResponse {
+            valid: false,
+            error: Some(error),
+        },
+    }
+}
+
 pub fn routes<M: AdminStore, B: BlobStore>() -> Router<Arc<AppState<M, B>>> {
     Router::new()
         .route("/api/v1/admin/policies", get(list_policy_sets::<M, B>))
+        .route("/api/v1/admin/policies/validate", post(validate_policy_set))
         .route(
             "/api/v1/admin/policies/{id}",
             get(get_policy_set::<M, B>)
@@ -423,6 +455,12 @@ async fn put_policy_set<M: AdminStore, B: BlobStore>(
     };
     state.core.metadata.put_policy_set(policy).await?;
     Ok(StatusCode::OK)
+}
+
+async fn validate_policy_set(
+    Json(req): Json<ValidatePolicyRequest>,
+) -> Result<impl IntoResponse, LayerhouseError> {
+    Ok(Json(validate_policy_text_response(&req.cedar_text)))
 }
 
 async fn delete_policy_set<M: AdminStore, B: BlobStore>(
@@ -985,6 +1023,106 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn validate_policy_set_reports_valid_cedar() {
+        let state = test_state();
+        let app = router(state);
+        let policy = serde_json::json!({
+            "cedar_text": r#"permit(
+    principal == User::"test:user:subject-alice",
+    action == Action::"pull",
+    resource in Namespace::"acme#1"
+);"#
+        });
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/policies/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(policy.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["valid"], true);
+        assert_eq!(value["error"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn validate_policy_set_reports_invalid_cedar_without_mutating() {
+        let state = test_state();
+        let app = router(state.clone());
+        let policy = serde_json::json!({
+            "cedar_text": "not cedar policy"
+        });
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/policies/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(policy.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["valid"], false);
+        assert!(!value["error"].as_str().unwrap().is_empty());
+        assert!(
+            state
+                .core
+                .metadata
+                .list_policy_sets()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_policy_set_reports_empty_text() {
+        let state = test_state();
+        let app = router(state);
+        let policy = serde_json::json!({
+            "cedar_text": "   "
+        });
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/policies/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(policy.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["valid"], false);
+        assert_eq!(value["error"], "cedar_text is required");
     }
 
     #[tokio::test]
