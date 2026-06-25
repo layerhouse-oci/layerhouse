@@ -101,12 +101,15 @@ pub(crate) fn matching_scope(
 }
 
 /// Map a single scope-string token to its action. `*` is an alias for the
-/// top of the ladder (`Delete`). Unknown tokens (including the legacy `push`,
-/// which is intentionally not parsed) yield `None`.
+/// top of the ladder (`Delete`). OCI clients use `push` for write access;
+/// Layerhouse maps it to `Update`, which covers create and update but not
+/// delete/admin.
 fn parse_action_token(token: &str) -> Option<OciAction> {
     match token.trim() {
         "*" | "delete" => Some(OciAction::Delete),
-        "update" => Some(OciAction::Update),
+        // Docker, ORAS, and Helm ask for `push`; Layerhouse keeps the
+        // finer internal write split and treats it as update-without-delete.
+        "push" | "update" => Some(OciAction::Update),
         "create" => Some(OciAction::Create),
         "pull" => Some(OciAction::Pull),
         _ => None,
@@ -264,13 +267,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_scope_rejects_legacy_push() {
-        // `push` is no longer a recognized token; a lone `push` yields nothing.
-        assert_eq!(parse_scope("repository:foo:push"), None);
-        // Mixed with a known token, only the known token survives.
+    fn parse_scope_accepts_oci_push() {
+        assert_eq!(
+            parse_scope("repository:foo:push"),
+            Some(("foo".to_string(), OciAction::Update))
+        );
         assert_eq!(
             parse_scope("repository:foo:pull,push"),
-            Some(("foo".to_string(), OciAction::Pull))
+            Some(("foo".to_string(), OciAction::Update))
         );
     }
 
@@ -300,6 +304,25 @@ mod tests {
         assert!(action_matches(Admin, Admin));
         assert!(!action_matches(Admin, Delete));
         assert!(!action_matches(Delete, Admin));
+    }
+
+    #[test]
+    fn oci_push_scope_matches_write_actions_but_not_delete() {
+        let scopes = vec!["repository:foo:pull,push".to_string()];
+
+        assert_eq!(
+            matching_scope(&scopes, "foo", OciAction::Pull),
+            Some(("foo".to_string(), OciAction::Update))
+        );
+        assert_eq!(
+            matching_scope(&scopes, "foo", OciAction::Create),
+            Some(("foo".to_string(), OciAction::Update))
+        );
+        assert_eq!(
+            matching_scope(&scopes, "foo", OciAction::Update),
+            Some(("foo".to_string(), OciAction::Update))
+        );
+        assert_eq!(matching_scope(&scopes, "foo", OciAction::Delete), None);
     }
 
     #[test]
