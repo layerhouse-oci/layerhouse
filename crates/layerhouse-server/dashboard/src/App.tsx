@@ -64,14 +64,9 @@ const AppShell: Component<RouteSectionProps> = (props) => {
       .catch(() => setSession(null));
   });
 
-  async function signOut() {
-    try {
-      await logoutSession();
-    } finally {
-      setSession(null);
-      setShowAccountMenu(false);
-      window.location.hash = "/overview";
-    }
+  function signOut() {
+    setShowAccountMenu(false);
+    logoutSession();
   }
 
   const displayUser = () =>

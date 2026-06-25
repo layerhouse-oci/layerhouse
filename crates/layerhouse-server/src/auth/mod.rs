@@ -859,6 +859,14 @@ impl AuthService {
         self.discovery.read().await.end_session_endpoint.clone()
     }
 
+    pub fn logout_url(&self) -> Option<&str> {
+        self.config
+            .logout_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+    }
+
     pub async fn jwks_metrics(&self) -> JwksMetrics {
         self.jwks_cache.read().await.metrics()
     }
@@ -868,9 +876,21 @@ impl AuthService {
     /// instance (e.g. route-level permission enforcement) without network/S3.
     #[cfg(test)]
     pub(crate) fn for_test(policy_sets: Vec<crate::config::ConfigPolicySet>) -> Self {
-        use base64::Engine as _;
         let mut config = tests::auth_config();
         config.policy_sets = policy_sets;
+        Self::for_test_config(config)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_logout_url(logout_url: &str) -> Self {
+        let mut config = tests::auth_config();
+        config.logout_url = Some(logout_url.to_string());
+        Self::for_test_config(config)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_config(config: AuthConfig) -> Self {
+        use base64::Engine as _;
         let signing_key_bytes = base64::engine::general_purpose::STANDARD
             .decode(&config.token_signing_keys[0])
             .expect("valid signing key");
@@ -999,6 +1019,7 @@ mod tests {
             client_secret: "secret".to_string(),
             token_endpoint_url: "https://registry.example.test/v2/token".to_string(),
             redirect_uri: "https://registry.example.test/oauth2/callback".to_string(),
+            logout_url: None,
             tls_insecure_skip_verify: false,
             jwks_refresh_seconds: 300,
             jwks_cache_s3_key: "auth/jwks/last-good.json".to_string(),

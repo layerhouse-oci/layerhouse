@@ -1740,7 +1740,14 @@ export default function Admin() {
 
             <section class="admin-source-strip glass" aria-label={t("admin.sources")}>
               <div class="admin-source-strip-head">
-                <span>{t("admin.sources")}</span>
+                <div>
+                  <span>{t("admin.sources")}</span>
+                  <strong>
+                    {sourceErrors().length > 0
+                      ? t("admin.sourceErrorCount", { count: sourceErrors().length })
+                      : t("admin.sourcesHealthy")}
+                  </strong>
+                </div>
                 <button type="button" class="btn btn-compact" onClick={loadAll}>
                   {t("admin.refreshAll")}
                 </button>
@@ -1749,17 +1756,24 @@ export default function Admin() {
                 <For each={sourceCards()}>
                   {(source) => (
                     <article class={`admin-source-chip ${source.status}`}>
-                      <div>
-                        <span>{source.label}</span>
-                        <strong>{source.count}</strong>
+                      <div class="admin-source-chip-main">
+                        <div>
+                          <span>{source.label}</span>
+                          <strong>{source.count}</strong>
+                        </div>
+                        <span class={`admin-source-state ${source.status}`}>
+                          {loadStatusLabel(source.status)}
+                        </span>
                       </div>
                       <div class="admin-source-meta">
-                        <span>{loadStatusLabel(source.status)}</span>
                         <span>{sourceHint(source)}</span>
+                        <Show
+                          when={source.lastLoaded}
+                          fallback={<span>{t("admin.sourceHint.idle")}</span>}
+                        >
+                          <span>{formatAgo(source.lastLoaded)}</span>
+                        </Show>
                       </div>
-                      <Show when={source.lastLoaded}>
-                        <span class="admin-source-updated">{formatAgo(source.lastLoaded)}</span>
-                      </Show>
                       <Show when={source.status === "error"}>
                         <button type="button" class="btn btn-compact" onClick={source.onRefresh}>
                           {t("common.retry")}
