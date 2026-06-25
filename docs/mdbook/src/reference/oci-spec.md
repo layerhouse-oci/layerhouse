@@ -30,6 +30,19 @@ All required endpoints from the specification are implemented:
 - **Cross-repository blob mounting** (POST with `?mount=<digest>&from=<repo>`):
   Mounts are metadata-only operations. The digest must already exist in S3.
 
+## Authorization Scopes
+
+Layerhouse accepts standard Docker/OCI bearer-token scopes such as
+`repository:<name>:pull,push`. The client-facing `push` action maps to
+Layerhouse's internal `update` action, which covers create and update writes but
+does not grant delete or admin access.
+
+This scope mapping is only authorization vocabulary compatibility. It does not
+provision registry metadata. Writes to a normal repository handle still require
+the namespace to be claimed first; if `<name>` is `acme/app` and `acme` is
+unclaimed, a `pull,push` token is denied for create/update before Cedar policy
+evaluation.
+
 ## OCI Error Codes
 
 Layerhouse returns standard OCI error codes in the response body:

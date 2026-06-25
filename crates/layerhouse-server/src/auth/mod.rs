@@ -1640,6 +1640,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oci_bearer_pull_push_scope_allows_writes_but_not_delete() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+
+        let mut bearer = identity(
+            "subject-alice",
+            TokenType::OciBearer,
+            &[],
+            &["repository:users/alice/app:pull,push"],
+        );
+        bearer.username = Some("alice".to_string());
+
+        auth.check_permission(&bearer, "users/alice/app", OciAction::Pull, &store)
+            .await
+            .expect("standard OCI push scope allows pull");
+        auth.check_permission(&bearer, "users/alice/app", OciAction::Create, &store)
+            .await
+            .expect("standard OCI push scope allows create");
+        auth.check_permission(&bearer, "users/alice/app", OciAction::Update, &store)
+            .await
+            .expect("standard OCI push scope allows update");
+        auth.check_permission(&bearer, "users/alice/app", OciAction::Delete, &store)
+            .await
+            .expect_err("standard OCI push scope does not allow delete");
+    }
+
+    #[tokio::test]
+    async fn oci_bearer_pull_push_scope_does_not_claim_namespace() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+
+        let bearer = identity(
+            "subject-alice",
+            TokenType::OciBearer,
+            &[],
+            &["repository:acme/app:pull,push"],
+        );
+
+        auth.check_permission(&bearer, "acme/app", OciAction::Pull, &store)
+            .await
+            .expect("scoped reads do not require a claimed namespace");
+        // `push` compatibility must not become implicit namespace provisioning.
+        auth.check_permission(&bearer, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("push scope does not bypass the namespace claim gate");
+        auth.check_permission(&bearer, "acme/app", OciAction::Update, &store)
+            .await
+            .expect_err("push scope does not auto-claim namespaces");
+    }
+
+    #[tokio::test]
     async fn oidc_cross_user_personal_namespace_denied_despite_rbac() {
         // Even with an RBAC grant matching `users/bob/*`, Alice cannot access
         // Bob's personal namespace via OIDC — personal namespaces are private.

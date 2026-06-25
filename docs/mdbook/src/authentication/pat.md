@@ -58,8 +58,20 @@ PATs carry explicit OCI scope strings that define what the token can do:
 | Scope | Allows |
 |-------|--------|
 | `repository:foo/*:pull,create,update` | Pull, create, or update manifests under `foo` and all sub-repositories |
+| `repository:foo/*:pull,push` | Docker/ORAS-compatible write access; equivalent to `pull,update` |
 | `repository:foo:pull` | Pull from `foo` |
 | `repository:*:*` | All repository actions; does not grant admin API access |
+
+Layerhouse uses a finer internal action ladder than Docker clients expose:
+`pull < create < update < delete`. Standard OCI clients request `push` when
+they need write access, so Layerhouse accepts `push` as an alias for `update`.
+That lets Docker, ORAS, and Helm push normally while still keeping delete and
+admin access separate.
+
+Write scopes do not create or claim namespaces. For a normal repository such as
+`acme/app`, `repository:acme/app:pull,push` is only usable for writes after the
+`acme` namespace already has a live claim and the actor is authorized for that
+namespace. Unclaimed namespace writes are denied before policy evaluation.
 
 ## Expiry
 
