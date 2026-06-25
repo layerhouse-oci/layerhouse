@@ -116,14 +116,23 @@ async fn logout_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
         }),
         _ => None,
     };
+    let configured_logout_url = end_session_url
+        .is_none()
+        .then(|| {
+            state
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.logout_url().map(str::to_owned))
+        })
+        .flatten();
 
     let flags = crate::auth::cookie_secure_flag(
         &headers,
         &state.cookie_secure_mode,
         state.server_tls_enabled,
     );
-    let had_end_session = end_session_url.is_some();
-    let mut response = match end_session_url {
+    let had_idp_logout = end_session_url.is_some() || configured_logout_url.is_some();
+    let mut response = match end_session_url.or(configured_logout_url) {
         Some(url) => Redirect::temporary(&url).into_response(),
         // When there is no OIDC end_session endpoint (or no logout hint),
         // set a logged-out marker to break the auto-re-auth loop.
@@ -148,7 +157,7 @@ async fn logout_session<M: Send + Sync + 'static, B: Send + Sync + 'static>(
     );
     // Set a short-lived marker so the middleware knows not to auto-redirect
     // to /oauth2/start (which would immediately re-auth via IdP SSO).
-    if !had_end_session {
+    if !had_idp_logout {
         response.headers_mut().append(
             header::SET_COOKIE,
             HeaderValue::from_str(&format!(
@@ -179,7 +188,37 @@ fn token_type_name(token_type: TokenType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionResponse;
+    use super::{SessionResponse, logout_session};
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode, header};
+    use std::sync::Arc;
+
+    use crate::auth::AuthService;
+    use crate::config::CookieSecureMode;
+    use crate::routes::{AppState, RegistryCore};
+    use crate::store::blob::InMemoryBlobStore;
+    use crate::store::metadata::InMemoryMetadataStore;
+    use crate::store::upload::UploadTracker;
+
+    fn state_with_logout_url(
+        logout_url: &str,
+    ) -> Arc<AppState<InMemoryMetadataStore, InMemoryBlobStore>> {
+        Arc::new(AppState {
+            core: RegistryCore {
+                metadata: InMemoryMetadataStore::default(),
+                blobs: InMemoryBlobStore::default(),
+                uploads: UploadTracker::default(),
+                upload_semaphore: tokio::sync::Semaphore::new(8),
+            },
+            mirror: crate::mirror::MirrorManager::new(),
+            gc_status: Arc::new(tokio::sync::RwLock::new(crate::gc::GcStatus::default())),
+            raft: None,
+            raft_tls: None,
+            auth: Some(Arc::new(AuthService::for_test_logout_url(logout_url))),
+            server_tls_enabled: false,
+            cookie_secure_mode: CookieSecureMode::Disabled,
+        })
+    }
 
     #[test]
     fn session_response_uses_explicit_identity_fields() {
@@ -261,5 +300,45 @@ mod tests {
         assert!(value["subject"].is_null());
         assert!(value["principal"].is_null());
         assert_eq!(value["is_admin"], false);
+    }
+
+    #[tokio::test]
+    async fn logout_uses_configured_idp_logout_url_when_discovery_has_no_end_session() {
+        let response = logout_session(
+            State(state_with_logout_url("https://idp.example.test/ui/logout")),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://idp.example.test/ui/logout")
+        );
+
+        let cookies = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect::<Vec<_>>();
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with("layerhouse_session=;"))
+        );
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with("layerhouse_logout_hint=;"))
+        );
+        assert!(
+            cookies
+                .iter()
+                .all(|cookie| !cookie.starts_with("layerhouse_logged_out=1"))
+        );
     }
 }

@@ -31,6 +31,7 @@ client_id = "layerhouse"
 client_secret = "PLACEHOLDER_CLIENT_SECRET"
 token_endpoint_url = "http://localhost:5050/v2/token"
 redirect_uri = "http://localhost:5050/oauth2/callback"
+logout_url = "https://localhost:8443/ui/logout"
 tls_insecure_skip_verify = true
 jwks_refresh_seconds = 300
 token_signing_keys = ["PLACEHOLDER_SIGNING_KEY"]

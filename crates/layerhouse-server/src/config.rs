@@ -49,6 +49,8 @@ pub struct AuthConfig {
     pub token_endpoint_url: String,
     pub redirect_uri: String,
     #[serde(default)]
+    pub logout_url: Option<String>,
+    #[serde(default)]
     pub tls_insecure_skip_verify: bool,
     #[serde(default = "default_jwks_refresh_seconds")]
     pub jwks_refresh_seconds: u64,
@@ -506,6 +508,15 @@ fn validate_auth_config(auth: &AuthConfig) -> Result<(), ConfigError> {
             "auth.jwks_urls must not contain empty entries".to_string(),
         ));
     }
+    if auth
+        .logout_url
+        .as_deref()
+        .is_some_and(|url| url.trim().is_empty())
+    {
+        return Err(ConfigError::Invalid(
+            "auth.logout_url must not be empty when set".to_string(),
+        ));
+    }
     if auth.jwks_refresh_seconds == 0 {
         return Err(ConfigError::Invalid(
             "auth.jwks_refresh_seconds must be greater than zero".to_string(),
@@ -645,6 +656,7 @@ mod tests {
             client_secret: "secret".to_string(),
             token_endpoint_url: "https://idp.example.test/oauth2/token".to_string(),
             redirect_uri: "https://registry.example.test/oauth2/callback".to_string(),
+            logout_url: None,
             tls_insecure_skip_verify: false,
             jwks_refresh_seconds: 300,
             jwks_cache_s3_key: "auth/jwks/last-good.json".to_string(),
@@ -733,6 +745,7 @@ mod tests {
             client_secret: "secret".to_string(),
             token_endpoint_url: "https://idp.example.test/oauth2/token".to_string(),
             redirect_uri: "https://registry.example.test/oauth2/callback".to_string(),
+            logout_url: None,
             tls_insecure_skip_verify: false,
             jwks_refresh_seconds: 300,
             jwks_cache_s3_key: "auth/jwks/last-good.json".to_string(),
@@ -775,6 +788,16 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.auth.as_mut().unwrap().provider_name = "kanidm.example".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn auth_logout_url_must_not_be_blank_when_set() {
+        let mut config = base_config();
+        let mut auth = base_auth_config();
+        auth.logout_url = Some("   ".to_string());
+        config.auth = Some(auth);
+
         assert!(config.validate().is_err());
     }
 
@@ -823,6 +846,7 @@ mod tests {
             client_secret: "secret".to_string(),
             token_endpoint_url: "https://idp.example.test/oauth2/token".to_string(),
             redirect_uri: "https://registry.example.test/oauth2/callback".to_string(),
+            logout_url: None,
             tls_insecure_skip_verify: false,
             jwks_refresh_seconds: 300,
             jwks_cache_s3_key: "auth/jwks/last-good.json".to_string(),
