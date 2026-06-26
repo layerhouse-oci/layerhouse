@@ -867,7 +867,7 @@ fn append_explicit_scope_policies(
         return Ok(());
     }
     let Some((_, allowed_action)) =
-        permissions::matching_scope(&request.actor.scopes, &request.repository, OciAction::Pull)
+        permissions::matching_scope(&request.actor.scopes, &request.repository, request.action)
     else {
         return Ok(());
     };

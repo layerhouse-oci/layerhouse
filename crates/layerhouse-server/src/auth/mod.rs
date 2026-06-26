@@ -1667,6 +1667,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oci_bearer_split_pull_push_scopes_allow_writes() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
+
+        let mut bearer = identity(
+            "subject-alice",
+            TokenType::OciBearer,
+            &[],
+            &["repository:acme/app:pull", "repository:acme/app:push"],
+        );
+        bearer.namespace_epochs = vec![NamespaceEpoch::new("acme", 1)];
+
+        auth.check_permission(&bearer, "acme/app", OciAction::Create, &store)
+            .await
+            .expect("Docker-style split pull and push scopes allow create");
+        auth.check_permission(&bearer, "acme/app", OciAction::Update, &store)
+            .await
+            .expect("Docker-style split pull and push scopes allow update");
+        auth.check_permission(&bearer, "acme/app", OciAction::Delete, &store)
+            .await
+            .expect_err("Docker-style split push scope does not allow delete");
+    }
+
+    #[tokio::test]
     async fn oci_bearer_pull_push_scope_does_not_claim_namespace() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();

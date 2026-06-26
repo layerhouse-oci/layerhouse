@@ -82,23 +82,35 @@ pub async fn token_endpoint<M: TokenStore + AuthorizationStore, B: BlobStore>(
         .await?;
 
     let requested_scope = scope_string(&query.scope);
+    let mut granted_scopes = Vec::new();
     let mut namespace_epochs = Vec::new();
     if let Some(scope) = &requested_scope {
         for requested in scope.split_whitespace() {
             if let Some((repository, action)) = crate::auth::permissions::parse_scope(requested) {
-                let access = auth_service
+                let access = match auth_service
                     .check_permission(&identity, &repository, action, &state.core.metadata)
-                    .await?;
+                    .await
+                {
+                    Ok(access) => access,
+                    Err(LayerhouseError::Denied(_)) => continue,
+                    Err(e) => return Err(e),
+                };
+                granted_scopes.push(requested);
                 access.record_expected_namespace(&mut namespace_epochs);
             }
         }
     }
+    let granted_scope = if granted_scopes.is_empty() {
+        None
+    } else {
+        Some(granted_scopes.join(" "))
+    };
 
     // Mint OCI bearer token
     let token_str = auth_service.mint_oci_token(
         &identity,
         query.service.as_deref().unwrap_or(""),
-        requested_scope.as_deref().unwrap_or(""),
+        granted_scope.as_deref().unwrap_or(""),
         namespace_epochs,
     )?;
 
@@ -140,6 +152,13 @@ fn extract_basic_auth(req: &axum::http::Request<axum::body::Body>) -> Option<(St
 #[cfg(test)]
 mod tests {
     use super::{TokenQuery, scope_string};
+    use crate::routes::test_state_with_auth;
+    use crate::store::metadata::{PersonalAccessToken, TokenStore};
+    use axum::body::{Body, to_bytes};
+    use axum::extract::{RawQuery, State};
+    use axum::http::Request;
+    use base64::Engine;
+    use sha2::Digest;
 
     #[test]
     fn token_query_accepts_repeated_scope_parameters() {
@@ -178,6 +197,63 @@ mod tests {
         assert_eq!(
             scope_string(&scopes),
             Some("repository:qa/example:pull".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_mints_authorized_scope_subset() {
+        let state = test_state_with_auth(vec![]);
+        let raw_pat = "layerhouse-docker-scope-subset";
+        state
+            .core
+            .metadata
+            .put_personal_access_token(PersonalAccessToken {
+                id: "pat-1".to_string(),
+                subject: "builder".to_string(),
+                username: Some("builder".to_string()),
+                name: "Docker".to_string(),
+                token_hash: hex::encode(sha2::Sha256::digest(raw_pat.as_bytes())),
+                token_prefix: "layerhouse-docker".to_string(),
+                scopes: vec!["repository:users/builder/app:*".to_string()],
+                namespace_epochs: Vec::new(),
+                created_at: 100,
+                last_used_at: None,
+                expires_at: None,
+            })
+            .await
+            .unwrap();
+
+        let basic = base64::engine::general_purpose::STANDARD.encode(format!("builder:{raw_pat}"));
+        let request = Request::builder()
+            .header(axum::http::header::AUTHORIZATION, format!("Basic {basic}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = super::token_endpoint(
+            State(state.clone()),
+            RawQuery(Some(
+                "service=layerhouse&scope=repository%3Ausers%2Fbuilder%2Fapp%3Apull%2Cpush&scope=repository%3Aqa%2Fbase%3Apull"
+                    .to_string(),
+            )),
+            request,
+        )
+        .await
+        .expect("token endpoint should return a reduced token");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = json["token"].as_str().unwrap();
+        let identity = state
+            .auth
+            .as_ref()
+            .unwrap()
+            .validate_token(token, &state.core.metadata)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            identity.scopes,
+            vec!["repository:users/builder/app:pull,push"]
         );
     }
 }
