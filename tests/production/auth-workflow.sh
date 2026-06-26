@@ -15,6 +15,7 @@ set -euo pipefail
 #   EVIDENCE_ROOT  — where to write test evidence (default: /tmp/orb-auth-${RUN_ID})
 #   AUTH_SMOKE_PAT — optional PAT for live authorized OCI client checks
 #   AUTH_SMOKE_REPO — claimed repo covered by AUTH_SMOKE_PAT (default: demo/api)
+#   AUTH_SMOKE_DOCKER — set to 1 to run Docker build/login/push checks (default: 0)
 
 REGISTRY="${REGISTRY:-localhost:5050}"
 SCHEME="${SCHEME:-http}"
@@ -23,6 +24,7 @@ EVIDENCE_ROOT="${EVIDENCE_ROOT:-/tmp/orb-auth-${RUN_ID}}"
 REPO_PREFIX="qa/auth-${RUN_ID}"
 AUTH_SMOKE_USER="${AUTH_SMOKE_USER:-developer}"
 AUTH_SMOKE_REPO="${AUTH_SMOKE_REPO:-demo/api}"
+AUTH_SMOKE_DOCKER="${AUTH_SMOKE_DOCKER:-0}"
 
 NODE_PORTS="${NODE_PORTS:-5050 5051 5052}"
 
@@ -156,12 +158,54 @@ if [ -n "${AUTH_SMOKE_PAT:-}" ]; then
         echo "  SKIP: AUTH21d — oras not installed"
     fi
 
+    if [ "$AUTH_SMOKE_DOCKER" = "1" ]; then
+        if command -v docker >/dev/null 2>&1; then
+            DOCKER_TAG="$REGISTRY/$AUTH_SMOKE_REPO:auth-docker-$RUN_ID"
+            if docker build -t "$DOCKER_TAG" - >"$EVIDENCE_ROOT/docker-build.txt" 2>&1 <<EOF
+FROM scratch
+LABEL layerhouse.auth-smoke="$RUN_ID"
+EOF
+            then
+                pass AUTH21e "Docker scratch image built"
+            else
+                fail AUTH21e "Docker build failed; see $EVIDENCE_ROOT/docker-build.txt"
+            fi
+
+            if echo "$AUTH_SMOKE_PAT" | docker login "$REGISTRY" --username "$AUTH_SMOKE_USER" --password-stdin \
+                >"$EVIDENCE_ROOT/docker-login.txt" 2>&1; then
+                pass AUTH21f "Docker login with PAT succeeded"
+            else
+                fail AUTH21f "Docker login failed; see $EVIDENCE_ROOT/docker-login.txt"
+            fi
+
+            if docker push "$DOCKER_TAG" >"$EVIDENCE_ROOT/docker-push.txt" 2>&1; then
+                pass AUTH21g "Docker push with pull,push PAT succeeded"
+            else
+                fail AUTH21g "Docker push failed; see $EVIDENCE_ROOT/docker-push.txt"
+            fi
+        else
+            echo "  SKIP: AUTH21e-g — docker not installed"
+        fi
+    else
+        echo "  SKIP: AUTH21e-g — set AUTH_SMOKE_DOCKER=1 to run Docker push checks"
+    fi
+
     UNCLAIMED_REPO="qa-unclaimed-${RUN_ID}/smoke"
     UNCLAIMED_BODY="$EVIDENCE_ROOT/token-unclaimed.json"
     UNCLAIMED_STATUS=$(curl -s -o "$UNCLAIMED_BODY" -w "%{http_code}" \
         -u "$AUTH_SMOKE_USER:$AUTH_SMOKE_PAT" \
         "$SCHEME://$REGISTRY/v2/token?service=$REGISTRY&scope=repository:$UNCLAIMED_REPO:pull,push")
-    assert_status AUTH21e 403 "$UNCLAIMED_STATUS" "pull,push does not bypass namespace claim gate"
+    assert_status AUTH21h 200 "$UNCLAIMED_STATUS" "token endpoint returns only authorized scope subset"
+    UNCLAIMED_BEARER=$(jq -r '.token // empty' "$UNCLAIMED_BODY")
+    if [ -n "$UNCLAIMED_BEARER" ]; then
+        UNCLAIMED_UPLOAD_STATUS=$(curl -s -o "$EVIDENCE_ROOT/upload-unclaimed.txt" -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer $UNCLAIMED_BEARER" \
+            "$SCHEME://$REGISTRY/v2/$UNCLAIMED_REPO/blobs/uploads/")
+        assert_status AUTH21i 403 "$UNCLAIMED_UPLOAD_STATUS" "pull,push does not bypass namespace claim gate"
+    else
+        fail AUTH21i "token response did not include bearer for unclaimed namespace denial check"
+    fi
 else
     echo
     echo "--- AUTH21: OCI pull,push scope compatibility ---"

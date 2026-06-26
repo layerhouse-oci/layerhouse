@@ -75,7 +75,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 | JWKS last-good cache trust window | Automated | `cargo test -p layerhouse-server auth::` | P1 | Implemented at unit level | command log |
 | Namespace owner grants, user/group/public enforcement, admin audit, snapshot roundtrip | Automated | `cargo test -p layerhouse-server namespace_`; focused audit and snapshot tests | P0 | Implemented at unit/API/state-machine level | command log |
 | Cedar repository authorization enforcement | Automated | `cargo test -p layerhouse-server auth::cedar_authorizer` | P1 | Implemented as the authoritative repository authorizer with Rust-only safety guards outside policy | command log |
-| OCI `pull,push` scope compatibility and namespace claim gate | Automated | `AUTH_SMOKE_PAT=<pat> AUTH_SMOKE_REPO=<claimed-repo> just auth-smoke`; unit coverage in `cargo test -p layerhouse-server auth::permissions` and `cargo test -p layerhouse-server oci_bearer_pull_push_scope` | P0 | Implemented as opt-in live auth smoke plus unit coverage | `/tmp/orb-auth-<run_id>` |
+| OCI `pull,push` scope compatibility, Docker push flow, and namespace claim gate | Automated | `AUTH_SMOKE_PAT=<pat> AUTH_SMOKE_REPO=<claimed-repo> AUTH_SMOKE_DOCKER=1 just auth-smoke`; unit coverage in `cargo test -p layerhouse-server auth::permissions` and `cargo test -p layerhouse-server oci_bearer_pull_push_scope` | P0 | Implemented as opt-in live auth smoke plus unit coverage | `/tmp/orb-auth-<run_id>` |
 | Live JWKS restart resilience with IdP outage | Agent-executable manual | `AUTH-MANUAL-JWKS-RESUME-01` | P1 | Manual plan only; not automated because it intentionally stops Kanidm during pod restart | `/tmp/orb-auth-jwks-resume-<run_id>` |
 | Cross-region ordered issuer/JWKS failover | Agent-executable manual | `AUTH-MANUAL-JWKS-XREGION-01` | P2 | Manual plan only; not automated because it needs multiple reachable IdP/JWKS origins | `/tmp/orb-auth-jwks-xregion-<run_id>` |
 | JWKS rotation and token expiry | Agent-executable manual | `AUTH-MANUAL-JWKS-01` | P2 | Manual plan only; not automated because it needs Kanidm key rotation and long token lifetime waits | `/tmp/orb-auth-jwks-<run_id>` |
@@ -359,18 +359,22 @@ claimed.
 **Steps**:
 1. Run:
    ```bash
-   AUTH_SMOKE_PAT=<pat> AUTH_SMOKE_REPO=demo/api just auth-smoke
+   AUTH_SMOKE_PAT=<pat> AUTH_SMOKE_REPO=demo/api AUTH_SMOKE_DOCKER=1 just auth-smoke
    ```
 2. Confirm `/v2/token` accepts
    `scope=repository:<repo>:pull,push`.
 3. Confirm the returned bearer can start a blob upload.
 4. Confirm ORAS can push an artifact using the same PAT/client flow.
-5. Confirm the same `pull,push` request is denied for an unclaimed namespace.
+5. Confirm Docker can build, login, and push an image using the same PAT/client flow.
+6. Confirm an unclaimed namespace receives no usable write scope: token minting may
+   return a reduced bearer, but starting an upload with that bearer is denied.
 
 **Expected**:
 - `push` is accepted as OCI client vocabulary for write access.
 - The bearer can create/update content in an authorized, claimed namespace.
 - `push` does not grant delete/admin.
+- Docker split-scope token requests and opportunistic cross-repository mounts do not
+  fail an otherwise authorized destination push.
 - `push` does not create, claim, or bypass an unclaimed namespace.
 
 ## Test Execution Priority
