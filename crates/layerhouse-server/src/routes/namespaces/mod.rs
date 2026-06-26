@@ -397,6 +397,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn namespace_grants_reject_public_grantee() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        app.clone()
+            .oneshot(post_json(
+                "/api/v1/admin/namespaces/acme/claim",
+                &serde_json::json!({}),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(post_json(
+                "/api/v1/account/namespaces/acme/grants",
+                &serde_json::json!({
+                    "grantee": {"kind": "public"},
+                    "action": "pull"
+                }),
+                &user_identity(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn non_owner_cannot_manage_account_namespace_grants() {
         let state = test_state_with_auth(vec![]);
         let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());

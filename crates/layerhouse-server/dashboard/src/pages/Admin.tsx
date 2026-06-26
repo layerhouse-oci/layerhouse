@@ -803,7 +803,7 @@ function ResourceInspector(props: {
                     role="tablist"
                     aria-label={t("admin.granteeKind")}
                   >
-                    <For each={["group", "user", "public"] as GrantGranteeKind[]}>
+                    <For each={["group", "user"] as GrantGranteeKind[]}>
                       {(kind) => (
                         <button
                           type="button"
@@ -1401,12 +1401,8 @@ export default function Admin() {
       };
     }
 
-    return {
-      grantee: { kind: "public" },
-      action: "pull",
-      label: form.label.trim() || form.publicLabel.trim() || t("access.grantee.public"),
-      reason,
-    };
+    setGrantError(t("access.publicGrantDeprecated"));
+    return null;
   }
 
   async function saveGrant() {

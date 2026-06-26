@@ -73,6 +73,11 @@ Write scopes do not create or claim namespaces. For a normal repository such as
 `acme` namespace already has a live claim and the actor is authorized for that
 namespace. Unclaimed namespace writes are denied before policy evaluation.
 
+PAT scopes are for authenticated clients. Anonymous pull access is controlled by
+repository visibility: a repository with `visibility = public_pull` can be pulled
+without credentials, while pushes and deletes still require authenticated
+authorization.
+
 ## Expiry
 
 PATs can optionally expire after a number of days. Set `expires_in_days` when

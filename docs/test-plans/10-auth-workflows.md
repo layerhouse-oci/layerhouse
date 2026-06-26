@@ -58,7 +58,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 | Host Docker push with Kanidm token and PAT over trusted HTTPS | AUTH17 | P1 |
 | Namespace grant owner CRUD and enforcement | AUTH18 | P0 |
 | Admin namespace grant audit controls | AUTH19 | P1 |
-| Namespace public pull for anonymous clients | AUTH20 | P0 |
+| Repository public pull visibility for anonymous clients | AUTH20 | P0 |
 | OCI `pull,push` scope compatibility | AUTH21 | P0 |
 
 ## Coverage Status
@@ -73,7 +73,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 | Kanidm OAuth2 client redirect/landing mapping | Automated | `AUTH16` via `just compose-auth-up` setup assertion | P0 | Implemented — `kanidm-setup.sh` fails if `oauth2_rs_origin` != the callback URL | compose `kanidm-setup` logs |
 | Browser OIDC login, session cookie, and dashboard API access | Agent-executable manual | `AUTH-MANUAL-OIDC-01` | P1 | Manual plan only; not automated because it requires an interactive browser identity flow | `/tmp/orb-auth-oidc-<run_id>` |
 | JWKS last-good cache trust window | Automated | `cargo test -p layerhouse-server auth::` | P1 | Implemented at unit level | command log |
-| Namespace owner grants, user/group/public enforcement, admin audit, snapshot roundtrip | Automated | `cargo test -p layerhouse-server namespace_`; focused audit and snapshot tests | P0 | Implemented at unit/API/state-machine level | command log |
+| Namespace owner grants, user/group enforcement, admin audit, snapshot roundtrip | Automated | `cargo test -p layerhouse-server namespace_`; focused audit and snapshot tests | P0 | Implemented at unit/API/state-machine level | command log |
 | Cedar repository authorization enforcement | Automated | `cargo test -p layerhouse-server auth::cedar_authorizer` | P1 | Implemented as the authoritative repository authorizer with Rust-only safety guards outside policy | command log |
 | OCI `pull,push` scope compatibility, Docker push flow, and namespace claim gate | Automated | `AUTH_SMOKE_PAT=<pat> AUTH_SMOKE_REPO=<claimed-repo> AUTH_SMOKE_DOCKER=1 just auth-smoke`; unit coverage in `cargo test -p layerhouse-server auth::permissions` and `cargo test -p layerhouse-server oci_bearer_pull_push_scope` | P0 | Implemented as opt-in live auth smoke plus unit coverage | `/tmp/orb-auth-<run_id>` |
 | Live JWKS restart resilience with IdP outage | Agent-executable manual | `AUTH-MANUAL-JWKS-RESUME-01` | P1 | Manual plan only; not automated because it intentionally stops Kanidm during pod restart | `/tmp/orb-auth-jwks-resume-<run_id>` |
@@ -350,6 +350,25 @@ Kanidm fixture, and the public registry endpoint is `https://localhost:32050`.
 - Evidence includes Docker login/push output and `pat-response.json` under
   `target/tilt/evidence/<run_id>`.
 
+### AUTH20. Repository Public Pull Visibility
+
+**Precondition**: Auth-enabled cluster is running and a repository exists with
+`visibility = public_pull`.
+
+**Steps**:
+1. Create or update repository metadata so the exact repository has
+   `visibility = public_pull`.
+2. Without credentials, `GET` or `HEAD` the repository manifest and blob routes.
+3. Without credentials, try to start an upload under the same repository.
+4. Create a public namespace grant if the API still accepts legacy data and
+   verify it does not make private repositories public.
+
+**Expected**:
+- Anonymous manifest/blob reads are allowed only for exact repositories marked
+  `public_pull`.
+- Anonymous writes are still rejected.
+- Namespace grants for `public` are not the public-pull auth boundary.
+
 ### AUTH21. OCI `pull,push` Scope Compatibility
 
 **Precondition**: Auth-enabled compose cluster is running, `AUTH_SMOKE_PAT`
@@ -382,7 +401,7 @@ claimed.
 | Priority | Tests | Rationale |
 |----------|-------|-----------|
 | P0 | AUTH1-AUTH7, AUTH16 | Core auth on/off, PAT login, push/pull, denial, OAuth2 client mapping |
-| P0 | AUTH18, AUTH20, AUTH21 | Namespace grant enforcement, anonymous public pull, and OCI client scope compatibility |
+| P0 | AUTH18, AUTH20, AUTH21 | Namespace grant enforcement, repository public pull, and OCI client scope compatibility |
 | P1 | AUTH8-AUTH12, AUTH17, AUTH19 | Dashboard OIDC, CI tokens, revocation, wildcards, host Docker auth over trusted HTTPS, admin audit |
 | P2 | AUTH13-AUTH15 | Multi-replica consistency, edge cases |
 
@@ -403,7 +422,7 @@ claimed.
 | AUTH17 | Host Docker token fetch requires daemon TLS trust | End-to-end Docker auth with Kanidm token and PAT over HTTPS |
 | AUTH18 | Namespace grants are Raft metadata | Owner CRUD, user/group matching, action ladder |
 | AUTH19 | Admin grant changes are audited | Required reason and audit event visibility |
-| AUTH20 | Namespace-level Public Pull | Anonymous manifest/blob pull without write access |
+| AUTH20 | Repository-level Public Pull | Anonymous manifest/blob pull without write access |
 | AUTH21 | OCI clients request `pull,push` | Push-scope aliasing and unclaimed namespace denial |
 
 ## Prerequisites

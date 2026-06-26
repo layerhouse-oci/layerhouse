@@ -477,7 +477,9 @@ fn public_safe_action(
         ));
     }
     if matches!(grantee, NamespaceGrantGrantee::Public) {
-        Ok(crate::auth::permissions::OciAction::Pull)
+        Err(LayerhouseError::NameInvalid(
+            "public pull is controlled by repository visibility".to_string(),
+        ))
     } else {
         Ok(action)
     }

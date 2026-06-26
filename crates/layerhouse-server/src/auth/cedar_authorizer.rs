@@ -107,7 +107,6 @@ pub(crate) fn validate_policy_text(policy: &str) -> Result<(), String> {
 enum CedarEntityType {
     User,
     Group,
-    Anonymous,
     Namespace,
     Repository,
     Registry,
@@ -119,7 +118,6 @@ impl CedarEntityType {
         match self {
             Self::User => "User",
             Self::Group => "Group",
-            Self::Anonymous => "Anonymous",
             Self::Namespace => "Namespace",
             Self::Repository => "Repository",
             Self::Registry => "Registry",
@@ -213,12 +211,6 @@ impl CedarPrincipal {
     fn from_provider_id(id: &ProviderQualifiedId) -> Self {
         Self {
             entity: CedarEntityId::from_principal(id),
-        }
-    }
-
-    fn anonymous() -> Self {
-        Self {
-            entity: CedarEntityId::new(CedarEntityType::Anonymous, "public"),
         }
     }
 
@@ -491,10 +483,6 @@ impl CedarEntitySet {
     }
 }
 
-fn anonymous_entity_set(resource: CedarResource) -> CedarEntitySet {
-    CedarEntitySet::new(CedarPrincipal::anonymous()).with_resource(resource)
-}
-
 pub(crate) struct CedarRepositoryAuthorizer;
 
 impl CedarRepositoryAuthorizer {
@@ -512,56 +500,6 @@ impl CedarRepositoryAuthorizer {
         Ok(to_authz_decision(cedar_decision(
             CedarPolicySource(&policy),
             request,
-        )))
-    }
-
-    pub(crate) async fn authorize_public_pull(
-        &self,
-        auth: &AuthService,
-        repository: &str,
-        store: &dyn AuthorizationStore,
-    ) -> Result<AuthzDecision, String> {
-        let Ok(handle) = handle_of(repository) else {
-            return Ok(AuthzDecision::Deny);
-        };
-        if is_handle_reserved(handle) {
-            return Ok(AuthzDecision::Deny);
-        }
-        let Some(namespace) = store
-            .get_namespace(handle)
-            .await
-            .map_err(|err| err.to_string())?
-        else {
-            return Ok(AuthzDecision::Deny);
-        };
-        let resource = RepositoryResource::from_repository(repository, &namespace)
-            .map_err(|err| err.to_string())?;
-        let resource = CedarResource::Repository(CedarRepository::from_resource(&resource));
-        let epoch = NamespaceEpoch::from_namespace(&namespace);
-        let mut policy = String::new();
-        for grant in store
-            .list_namespace_grants(handle)
-            .await
-            .map_err(|err| err.to_string())?
-        {
-            if matches!(grant.grantee, NamespaceGrantGrantee::Public) {
-                append_namespace_grant_policies(&mut policy, &grant, &epoch)?;
-            }
-        }
-        append_enabled_config_policy_sets(&mut policy, &auth.config.policy_sets);
-        append_enabled_metadata_policy_sets(
-            &mut policy,
-            &store
-                .list_policy_sets()
-                .await
-                .map_err(|err| err.to_string())?,
-        );
-
-        Ok(to_authz_decision(public_cedar_decision(
-            CedarPolicySource(&policy),
-            OciAction::Pull,
-            &resource,
-            repository,
         )))
     }
 
@@ -622,64 +560,6 @@ fn to_authz_decision(decision: Decision) -> AuthzDecision {
 
 fn cedar_decision(policy_src: CedarPolicySource<'_>, request: &AuthzRequest) -> Decision {
     cedar_decision_with_schema(AUTHORIZATION_SCHEMA, policy_src, request).unwrap_or(Decision::Deny)
-}
-
-fn public_cedar_decision(
-    policy_src: CedarPolicySource<'_>,
-    action: OciAction,
-    resource: &CedarResource,
-    repository: &str,
-) -> Decision {
-    public_cedar_decision_with_schema(
-        AUTHORIZATION_SCHEMA,
-        policy_src,
-        action,
-        resource,
-        repository,
-    )
-    .unwrap_or(Decision::Deny)
-}
-
-fn public_cedar_decision_with_schema(
-    schema_src: CedarSchemaSource<'_>,
-    policy_src: CedarPolicySource<'_>,
-    action: OciAction,
-    resource: &CedarResource,
-    repository: &str,
-) -> Result<Decision, String> {
-    let schema = schema_src.parse()?;
-    let policy_set = policy_src.parse(&schema)?;
-    let principal_uid = CedarPrincipal::anonymous().entity_uid()?;
-    let action_uid = CedarAction::from_oci(action).entity_uid()?;
-    let resource_uid = resource.entity_uid()?;
-    let entities = anonymous_entity_set(resource.clone()).build(&schema)?;
-    let context = Context::from_json_value(
-        context_json_for_parts(
-            repository,
-            resource_context_id(resource),
-            namespace_context_id(resource),
-            "anonymous",
-            "",
-            "",
-            "",
-            0,
-            0,
-        ),
-        Some((&schema, &action_uid)),
-    )
-    .map_err(|err| format!("invalid Cedar authorization context: {err}"))?;
-    let request = Request::new(
-        principal_uid,
-        action_uid,
-        resource_uid,
-        context,
-        Some(&schema),
-    )
-    .map_err(|err| format!("invalid Cedar authorization request: {err}"))?;
-
-    Ok(CedarPolicyAuthorizer::new()
-        .is_authorized(&request, &policy_set, &entities)
-        .decision())
 }
 
 fn cedar_decision_with_schema(
@@ -845,13 +725,7 @@ fn append_namespace_grant_policies(
             let resource = namespace_policy_expr(epoch)?;
             append_permits_for_actions(policy, &principal, grant.action, &resource)
         }
-        NamespaceGrantGrantee::Public => {
-            if permissions::action_matches(grant.action, OciAction::Pull) {
-                let resource = namespace_policy_expr(epoch)?;
-                append_permit(policy, "principal", OciAction::Pull, &resource)?;
-            }
-            Ok(())
-        }
+        NamespaceGrantGrantee::Public => Ok(()),
     }
 }
 
@@ -1064,7 +938,7 @@ mod tests {
     use crate::config::ConfigPolicySet;
     use crate::store::metadata::{
         InMemoryMetadataStore, PolicySet as MetadataPolicySet, PolicySource, PolicyStore,
-        ReleaseReason, typed_id::OrgId,
+        ReleaseReason, Repository, RepositoryStore, Visibility, typed_id::OrgId,
     };
 
     const STABLE_GROUP_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -1169,6 +1043,19 @@ permit(
             .claim_namespace(handle, owner, handle, Subject::new("claimer"), true, 100)
             .await
             .expect("claim should succeed");
+    }
+
+    async fn put_repo(store: &InMemoryMetadataStore, name: &str, visibility: Visibility) {
+        store
+            .put_repository(Repository {
+                name: name.to_string(),
+                description: String::new(),
+                created_by: None,
+                visibility,
+                created_at: 100,
+            })
+            .await
+            .expect("repository metadata should persist");
     }
 
     async fn grant(
@@ -1829,10 +1716,11 @@ permit(
     }
 
     #[tokio::test]
-    async fn cedar_enforcement_public_grant_is_pull_only() {
+    async fn cedar_enforcement_public_namespace_grant_is_inert() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
+        put_repo(&store, "acme/app", Visibility::Private).await;
         grant(
             &store,
             "acme",
@@ -1849,7 +1737,7 @@ permit(
             "acme/app",
             OciAction::Pull,
             &store,
-            AuthzDecision::Allow,
+            AuthzDecision::Deny,
         )
         .await;
         assert_enforced(
@@ -1862,27 +1750,9 @@ permit(
         )
         .await;
 
-        auth.check_public_pull("acme/app", &store)
-            .await
-            .expect("Cedar authorizer allows anonymous public pull");
-        let cedar_public = CedarRepositoryAuthorizer::new()
-            .authorize_public_pull(&auth, "acme/app", &store)
-            .await
-            .expect("Cedar authorizer should evaluate public pull");
-        assert_eq!(cedar_public, AuthzDecision::Allow);
-
-        let private_store = InMemoryMetadataStore::default();
-        claim(
-            &private_store,
-            "private",
-            Owner::User(Subject::new("subject-owner")),
-        )
-        .await;
-        let cedar_private = CedarRepositoryAuthorizer::new()
-            .authorize_public_pull(&auth, "private/app", &private_store)
-            .await
-            .expect("Cedar authorizer should evaluate private pull");
-        assert_eq!(cedar_private, AuthzDecision::Deny);
+        auth.check_public_pull("acme/app", &store).await.expect_err(
+            "repository visibility, not namespace public grant, controls anonymous pull",
+        );
     }
 
     #[tokio::test]

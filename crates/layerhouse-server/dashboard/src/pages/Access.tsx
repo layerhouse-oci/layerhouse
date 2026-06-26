@@ -705,12 +705,8 @@ export default function Access(props: { onClose?: () => void }) {
         reason: form.reason.trim() || null,
       };
     }
-    return {
-      grantee: { kind: "public" },
-      label: form.publicLabel.trim() || t("access.grantee.public"),
-      action: "pull",
-      reason: form.reason.trim() || null,
-    };
+    setGrantError(t("access.publicGrantDeprecated"));
+    return null;
   }
 
   async function saveNamespaceGrant() {
@@ -1408,7 +1404,7 @@ export default function Access(props: { onClose?: () => void }) {
 
               <div class="access-grant-form">
                 <div class="segmented" role="tablist">
-                  <For each={["group", "user", "public"] as GrantGranteeKind[]}>
+                  <For each={["group", "user"] as GrantGranteeKind[]}>
                     {(kind) => (
                       <button
                         type="button"

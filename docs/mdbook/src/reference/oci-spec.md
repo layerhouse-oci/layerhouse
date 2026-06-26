@@ -43,6 +43,16 @@ the namespace to be claimed first; if `<name>` is `acme/app` and `acme` is
 unclaimed, a `pull,push` token is denied for create/update before Cedar policy
 evaluation.
 
+## Public Pull
+
+Anonymous pull access is repository-level. A repository marked
+`visibility = public_pull` allows unauthenticated `GET` and `HEAD` requests for
+that exact repository's manifests and blobs. Anonymous clients still cannot
+start uploads, push manifests, or delete content.
+
+Namespace grants do not make repositories public. User and group grants control
+authenticated access; repository visibility controls anonymous pull access.
+
 ## OCI Error Codes
 
 Layerhouse returns standard OCI error codes in the response body:
