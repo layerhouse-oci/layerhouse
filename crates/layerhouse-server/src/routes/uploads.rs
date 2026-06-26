@@ -6,10 +6,12 @@ use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use crate::auth::authorization::AuthorizedRepositoryAccess;
+use crate::auth::permissions::OciAction;
+use crate::auth::token::AuthIdentity;
 use crate::error::LayerhouseError;
 use crate::oci::digest::Digest;
 use crate::store::blob::BlobStore;
-use crate::store::metadata::ManifestStore;
+use crate::store::metadata::{AuthorizationStore, ManifestStore};
 use crate::store::upload::UploadSession;
 
 use super::AppState;
@@ -35,7 +37,7 @@ async fn upload_session<M: ManifestStore, B: BlobStore>(
     Ok(session)
 }
 
-pub async fn dispatch_start<M: ManifestStore, B: BlobStore>(
+pub async fn dispatch_start<M: ManifestStore + AuthorizationStore, B: BlobStore>(
     state: Arc<AppState<M, B>>,
     method: &Method,
     name: &str,
@@ -68,7 +70,7 @@ pub async fn dispatch_session<M: ManifestStore, B: BlobStore>(
     }
 }
 
-async fn start_upload<M: ManifestStore, B: BlobStore>(
+async fn start_upload<M: ManifestStore + AuthorizationStore, B: BlobStore>(
     state: &AppState<M, B>,
     name: &str,
     req: Request<Body>,
@@ -77,6 +79,7 @@ async fn start_upload<M: ManifestStore, B: BlobStore>(
         .extensions()
         .get::<AuthorizedRepositoryAccess>()
         .and_then(|access| access.expected_namespace.clone());
+    let identity = req.extensions().get::<AuthIdentity>().cloned();
     let query = super::query_params(req.uri());
 
     if let Some(digest_str) = query.get("digest") {
@@ -121,7 +124,29 @@ async fn start_upload<M: ManifestStore, B: BlobStore>(
             .ok_or_else(|| LayerhouseError::DigestInvalid(mount_digest.clone()))?;
 
         if state.core.blobs.stat(&digest).await.is_ok() {
-            if state.auth.is_some() {
+            if let Some(auth) = state.auth.as_ref() {
+                let can_mount = if let Some(identity) = identity.as_ref() {
+                    match auth
+                        .check_permission(
+                            identity,
+                            from_repo,
+                            OciAction::Pull,
+                            &state.core.metadata,
+                        )
+                        .await
+                    {
+                        Ok(_) => true,
+                        Err(LayerhouseError::Denied(_)) => false,
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    false
+                };
+
+                if !can_mount {
+                    return start_upload_session(state, name).await;
+                }
+
                 state
                     .core
                     .metadata
@@ -159,6 +184,13 @@ async fn start_upload<M: ManifestStore, B: BlobStore>(
         }
     }
 
+    start_upload_session(state, name).await
+}
+
+async fn start_upload_session<M: ManifestStore, B: BlobStore>(
+    state: &AppState<M, B>,
+    name: &str,
+) -> Result<Response, LayerhouseError> {
     let session_id = uuid::Uuid::new_v4().to_string();
     state.core.blobs.start_upload(&session_id).await?;
     state
@@ -339,7 +371,8 @@ async fn cancel_upload<M: ManifestStore, B: BlobStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::test_state;
+    use crate::auth::token::TokenType;
+    use crate::routes::{test_state, test_state_with_auth};
     use axum::body::Body;
     use axum::http::{Method, Request};
     use axum::response::IntoResponse;
@@ -351,6 +384,28 @@ mod tests {
             .header("Content-Type", "application/octet-stream")
             .body(Body::empty())
             .unwrap()
+    }
+
+    async fn seed_blob<M: ManifestStore, B: BlobStore>(
+        state: &AppState<M, B>,
+        bytes: &'static [u8],
+    ) -> Digest {
+        let digest = Digest::sha256(bytes);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        state.core.blobs.start_upload(&session_id).await.unwrap();
+        state
+            .core
+            .blobs
+            .push_chunk(&session_id, bytes::Bytes::from_static(bytes))
+            .await
+            .unwrap();
+        state
+            .core
+            .blobs
+            .complete_upload(&session_id, &digest)
+            .await
+            .unwrap();
+        digest
     }
 
     #[tokio::test]
@@ -370,6 +425,68 @@ mod tests {
                 .headers()
                 .get(axum::http::header::LOCATION)
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn unauthorized_source_mount_falls_back_to_upload_session() {
+        let state = test_state_with_auth(vec![]);
+        let digest = seed_blob(&state, b"docker-layer").await;
+        let mut req = request(
+            Method::POST,
+            &format!("/v2/demo/api/blobs/uploads/?mount={digest}&from=qa/base"),
+        );
+        req.extensions_mut().insert(AuthIdentity::for_test(
+            "builder",
+            TokenType::OciBearer,
+            &[],
+            &["repository:demo/api:pull,push"],
+        ));
+        req.extensions_mut().insert(AuthorizedRepositoryAccess::new(
+            "demo/api",
+            OciAction::Update,
+            None,
+        ));
+
+        let response = dispatch_start(state, &Method::POST, "demo/api", req)
+            .await
+            .unwrap_or_else(|e| e.into_response());
+
+        assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+        assert!(response.headers().get("Docker-Upload-UUID").is_some());
+    }
+
+    #[tokio::test]
+    async fn authorized_source_mount_returns_created() {
+        let state = test_state_with_auth(vec![]);
+        let digest = seed_blob(&state, b"shared-layer").await;
+        let mut req = request(
+            Method::POST,
+            &format!("/v2/demo/api/blobs/uploads/?mount={digest}&from=qa/base"),
+        );
+        req.extensions_mut().insert(AuthIdentity::for_test(
+            "builder",
+            TokenType::OciBearer,
+            &[],
+            &["repository:demo/api:pull,push", "repository:qa/base:pull"],
+        ));
+        req.extensions_mut().insert(AuthorizedRepositoryAccess::new(
+            "demo/api",
+            OciAction::Update,
+            None,
+        ));
+
+        let response = dispatch_start(state, &Method::POST, "demo/api", req)
+            .await
+            .unwrap_or_else(|e| e.into_response());
+
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+        assert_eq!(
+            response
+                .headers()
+                .get("Docker-Content-Digest")
+                .and_then(|value| value.to_str().ok()),
+            Some(digest.to_string().as_str())
         );
     }
 
