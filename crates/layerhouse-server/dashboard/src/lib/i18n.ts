@@ -294,7 +294,8 @@ const en: Messages = {
     "This removes the namespace claim owned by {owner}. Use this only for admin recovery or unsafe handles.",
   "access.manageGrants": "Manage grants",
   "access.namespaceGrants": "Namespace grants",
-  "access.namespaceGrantDesc": "Share {handle} with groups, users, or public pull access.",
+  "access.namespaceGrantDesc":
+    "Share {handle} with groups or users. Use repository visibility for public pull access.",
   "access.adminNamespaceGrants": "Admin grant editor",
   "access.adminNamespaceGrantDesc":
     "Edit grants for {handle}. Admin changes require an audit reason.",
@@ -319,7 +320,9 @@ const en: Messages = {
   "access.grantAllows": "{action} and below",
   "access.publicPullOnly": "Public Pull only",
   "access.publicPullOnlyDesc":
-    "Anonymous clients can pull manifests and blobs; writes still require sign-in.",
+    "Anonymous pull is controlled by repository visibility; writes still require sign-in.",
+  "access.publicGrantDeprecated":
+    "Public namespace grants are no longer supported. Set repository visibility to public pull instead.",
   "access.auditReason": "Audit reason",
   "access.auditReasonPlaceholder": "support request, incident response, ownership correction",
   "access.auditHistory": "Audit history",

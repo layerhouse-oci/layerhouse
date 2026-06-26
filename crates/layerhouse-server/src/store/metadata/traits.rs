@@ -367,8 +367,8 @@ pub trait PolicyStore: Send + Sync + 'static {
     async fn delete_policy_set(&self, id: &str) -> Result<bool, LayerhouseError>;
 }
 
-pub trait AuthorizationStore: NamespaceStore + PolicyStore {}
-impl<T: NamespaceStore + PolicyStore> AuthorizationStore for T {}
+pub trait AuthorizationStore: NamespaceStore + PolicyStore + RepositoryStore {}
+impl<T: NamespaceStore + PolicyStore + RepositoryStore> AuthorizationStore for T {}
 
 /// OCI registry core: manifest CRUD + mirror config + blob lifecycle.
 pub trait RegistryStore: ManifestStore + MirrorConfigStore {}
