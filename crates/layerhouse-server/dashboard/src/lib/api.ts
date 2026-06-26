@@ -21,6 +21,7 @@ import type {
   NamespaceListResponse,
   NamespaceResponse,
   ObservedIdentityListResponse,
+  PatchRepositoryRequest,
   PatchNamespaceGrantRequest,
   PersonalAccessToken,
   PolicySet,
@@ -233,6 +234,17 @@ export function fetchRawManifest(repo: string, digest: string): Promise<unknown>
 
 export function deleteRepository(repo: string): Promise<DeleteCounts> {
   return fetchJson(`/api/v1/repositories/${repo}`, { method: "DELETE" });
+}
+
+export function patchRepository(
+  repo: string,
+  request: PatchRepositoryRequest,
+): Promise<RepositoryListResponse["repositories"][number]> {
+  return fetchJson(`/api/v1/repositories/${repo}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
 }
 
 export function deleteManifestDigest(repo: string, digest: string): Promise<DeleteCounts> {

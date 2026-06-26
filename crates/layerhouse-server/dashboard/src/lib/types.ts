@@ -65,6 +65,7 @@ export type GrantSource = "personal" | "group_grant" | "public";
 export type RepoKind = "image" | "helm" | "wasm" | "artifact" | "unknown";
 export type RepositoryFilter = "all" | "mine" | "shared" | "public";
 export type RepositoryRecencyFilter = "all" | "recent" | "stale";
+export type RepositoryVisibility = "private" | "public_pull";
 
 export interface RepositorySummary {
   name: string;
@@ -75,7 +76,7 @@ export interface RepositorySummary {
   last_modified: number;
   description: string;
   created_by: string | null;
-  visibility: string;
+  visibility: RepositoryVisibility;
   access_level: OciAction;
   max_grantable: OciAction;
   grant_source: GrantSource;
@@ -85,6 +86,11 @@ export interface RepositoryListResponse {
   repositories: RepositorySummary[];
   total_reachable: number;
   next_cursor: string | null;
+}
+
+export interface PatchRepositoryRequest {
+  description?: string;
+  visibility?: RepositoryVisibility;
 }
 
 export interface ManifestSummary {
