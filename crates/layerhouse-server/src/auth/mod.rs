@@ -646,6 +646,18 @@ impl AuthService {
         let (expected_namespace, resource) = self
             .repository_resource_context(repository, action, store)
             .await?;
+        if action == permissions::OciAction::Pull
+            && store.get_repository(repository).await?.is_some_and(|repo| {
+                repo.visibility == crate::store::metadata::Visibility::PublicPull
+            })
+        {
+            return Ok(repository_authorization(
+                repository,
+                action,
+                AuthzDecision::Allow,
+                expected_namespace,
+            ));
+        }
         let request = AuthzRequest {
             actor: identity.actor(),
             repository: repository.to_string(),
@@ -680,6 +692,16 @@ impl AuthService {
         repository: &str,
         store: &dyn AuthorizationStore,
     ) -> Result<(permissions::OciAction, permissions::GrantSource), LayerhouseError> {
+        if store
+            .get_repository(repository)
+            .await?
+            .is_some_and(|repo| repo.visibility == crate::store::metadata::Visibility::PublicPull)
+        {
+            return Ok((
+                permissions::OciAction::Pull,
+                permissions::GrantSource::Public,
+            ));
+        }
         let action = match cedar_authorizer::CedarRepositoryAuthorizer::new()
             .max_grantable_action(self, &identity.actor(), repository, store)
             .await
@@ -715,23 +737,11 @@ impl AuthService {
         store: &dyn AuthorizationStore,
     ) -> Result<(), LayerhouseError> {
         let _ = handle_of(repository)?;
-        let decision = match cedar_authorizer::CedarRepositoryAuthorizer::new()
-            .authorize_public_pull(self, repository, store)
-            .await
-        {
-            Ok(decision) => decision,
-            Err(err) => {
-                tracing::warn!(
-                    repository,
-                    err = %err,
-                    "Cedar public-pull authorization failed closed"
-                );
-                AuthzDecision::Deny
+        match store.get_repository(repository).await? {
+            Some(repo) if repo.visibility == crate::store::metadata::Visibility::PublicPull => {
+                Ok(())
             }
-        };
-        match decision {
-            AuthzDecision::Allow => Ok(()),
-            AuthzDecision::Deny => Err(LayerhouseError::Denied(format!(
+            _ => Err(LayerhouseError::Denied(format!(
                 "repository {repository:?} is not public"
             ))),
         }
@@ -789,8 +799,15 @@ impl AuthService {
         identity: &AuthIdentity,
         repository: &str,
         action: permissions::OciAction,
-        namespaces: &dyn NamespaceStore,
+        store: &dyn AuthorizationStore,
     ) -> Result<permissions::GrantSource, LayerhouseError> {
+        if action == permissions::OciAction::Pull
+            && store.get_repository(repository).await?.is_some_and(|repo| {
+                repo.visibility == crate::store::metadata::Visibility::PublicPull
+            })
+        {
+            return Ok(permissions::GrantSource::Public);
+        }
         if action == permissions::OciAction::Delete
             && permissions::in_personal_namespace(identity.username.as_deref(), repository)
         {
@@ -800,7 +817,7 @@ impl AuthService {
             && !uses_explicit_scopes(identity)
             && let Ok(handle) = handle_of(repository)
             && !is_handle_reserved(handle)
-            && let Some(ns) = namespaces.get_namespace(handle).await?
+            && let Some(ns) = store.get_namespace(handle).await?
             && matches!(&ns.owner, Owner::User(subject) if *subject == identity.subject)
         {
             return Ok(permissions::GrantSource::Personal);
@@ -1005,7 +1022,7 @@ mod tests {
     use crate::store::metadata::typed_id::OrgId;
     use crate::store::metadata::{
         InMemoryMetadataStore, NamespaceEpoch, NamespaceGrant, NamespaceGrantGrantee,
-        NamespaceStore, Owner, ReleaseReason,
+        NamespaceStore, Owner, ReleaseReason, Repository, RepositoryStore, Visibility,
     };
 
     pub(super) fn auth_config() -> AuthConfig {
@@ -1170,6 +1187,19 @@ mod tests {
             .claim_namespace(handle, owner, handle, Subject::new("claimer"), true, 100)
             .await
             .expect("claim should succeed");
+    }
+
+    async fn put_repo(store: &InMemoryMetadataStore, name: &str, visibility: Visibility) {
+        store
+            .put_repository(Repository {
+                name: name.to_string(),
+                description: String::new(),
+                created_by: None,
+                visibility,
+                created_at: 100,
+            })
+            .await
+            .expect("repository metadata should persist");
     }
 
     async fn grant(
@@ -1453,10 +1483,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn namespace_public_grant_allows_pull_only() {
+    async fn repository_public_pull_visibility_allows_anonymous_pull_only() {
         let auth = AuthService::for_test(vec![]);
         let store = InMemoryMetadataStore::default();
         claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
+        put_repo(&store, "acme/app", Visibility::PublicPull).await;
+
+        auth.check_public_pull("acme/app", &store)
+            .await
+            .expect("public repository visibility allows anonymous pull");
+        let bob = identity("subject-bob", TokenType::OidcAccess, &[], &[]);
+        auth.check_permission(&bob, "acme/app", OciAction::Pull, &store)
+            .await
+            .expect("public repository visibility also lets authenticated users pull");
+        let (action, source) = auth
+            .max_grantable_action(&bob, "acme/app", &store)
+            .await
+            .expect("public repository visibility is grantable pull access");
+        assert_eq!(action, OciAction::Pull);
+        assert_eq!(source, permissions::GrantSource::Public);
+        auth.check_permission(&bob, "acme/app", OciAction::Create, &store)
+            .await
+            .expect_err("public repository visibility cannot write");
+    }
+
+    #[tokio::test]
+    async fn namespace_public_grant_does_not_make_repository_public() {
+        let auth = AuthService::for_test(vec![]);
+        let store = InMemoryMetadataStore::default();
+        claim(&store, "acme", Owner::User(Subject::new("subject-owner"))).await;
+        put_repo(&store, "acme/app", Visibility::Private).await;
         grant(
             &store,
             "acme",
@@ -1468,14 +1524,11 @@ mod tests {
 
         auth.check_public_pull("acme/app", &store)
             .await
-            .expect("public grant allows anonymous pull");
+            .expect_err("namespace public grants do not control repository visibility");
         let bob = identity("subject-bob", TokenType::OidcAccess, &[], &[]);
         auth.check_permission(&bob, "acme/app", OciAction::Pull, &store)
             .await
-            .expect("public grant also lets authenticated users pull");
-        auth.check_permission(&bob, "acme/app", OciAction::Create, &store)
-            .await
-            .expect_err("public grant cannot write");
+            .expect_err("namespace public grants do not authorize authenticated pulls");
     }
 
     #[tokio::test]

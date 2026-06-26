@@ -264,9 +264,8 @@ pub struct PersonalAccessToken {
 /// Visibility of a repository. Controls whether anonymous clients may pull.
 /// `Private` (the default) requires authentication for every operation;
 /// `PublicPull` additionally allows unauthenticated `GET`/`HEAD` of manifests
-/// and blobs (write operations still require auth). The public-pull middleware
-/// short-circuit that honors this is a follow-on (see TODOS.md); Phase 1 only
-/// carries the label so the schema is stable.
+/// and blobs for this exact repository. Write operations still require
+/// authentication and repository authorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Visibility {
@@ -329,8 +328,8 @@ impl NamespaceEpoch {
 }
 
 /// Principal that receives a namespace-scoped grant. User and group grants are
-/// keyed by provider-qualified stable IDs; public grants are anonymous and
-/// pull-only.
+/// keyed by provider-qualified stable IDs. Public grants are rejected by the
+/// namespace grant API; repository visibility controls anonymous pull access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NamespaceGrantGrantee {
@@ -504,8 +503,8 @@ pub enum ReleaseReason {
 /// A first-class repository object ("shadow repository"). Unlike a manifest
 /// map keyed by pushed content, a `Repository` can exist before any blob is
 /// pushed, carrying human metadata (description, created_by) and a visibility label.
-/// Phase 1 defines the shape and persists an empty collection; the creation
-/// flow (`POST /api/v1/repositories`) and listing integration land in Phase 2.
+/// Dashboard APIs use it to represent empty repositories and to attach metadata
+/// to repositories before their first manifest is pushed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repository {
     pub name: String,
