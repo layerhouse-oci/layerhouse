@@ -3520,6 +3520,67 @@ pre {
   flex-wrap: wrap;
 }
 
+.repo-detail .repo-settings {
+  margin-bottom: 20px;
+}
+
+.repo-detail .repo-settings-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(180px, 240px) auto;
+  gap: 14px;
+  align-items: end;
+  padding: 18px 20px 20px;
+}
+
+.repo-detail .repo-setting-field {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.repo-detail .repo-setting-field textarea,
+.repo-detail .repo-setting-field select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--button-radius);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.045);
+  outline: none;
+  font-size: 13px;
+}
+
+.repo-detail .repo-setting-field textarea {
+  min-height: 74px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.repo-detail .repo-setting-field select {
+  min-height: 38px;
+  padding: 0 30px 0 10px;
+  font-family: var(--font-mono);
+}
+
+.repo-detail .repo-setting-field textarea:focus,
+.repo-detail .repo-setting-field select:focus {
+  border-color: rgba(0, 122, 255, 0.42);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
+}
+
+.repo-detail .repo-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+}
+
+.repo-detail .settings-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .repo-detail .panel {
   position: relative;
   overflow: hidden;
@@ -4354,6 +4415,10 @@ pre {
   }
   .repo-detail .detail-grid {
     grid-template-columns: 1fr;
+  }
+  .repo-detail .repo-settings-grid {
+    grid-template-columns: 1fr;
+    align-items: stretch;
   }
   .repo-detail .filter-row {
     gap: 8px;

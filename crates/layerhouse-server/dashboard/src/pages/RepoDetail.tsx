@@ -6,8 +6,9 @@ import {
   deleteManifestTag,
   fetchRepositories,
   fetchRepositoryManifests,
+  patchRepository,
 } from "../lib/api";
-import type { ManifestSummary, RepositorySummary } from "../lib/types";
+import type { ManifestSummary, RepositorySummary, RepositoryVisibility } from "../lib/types";
 import { copyToClipboard, digestShort, formatAgo, formatBytes, manifestKind } from "../lib/format";
 import { t } from "../lib/i18n";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -25,6 +26,13 @@ const GRANT_BADGE: Record<string, string> = {
   personal: "badge-blue",
   group_grant: "badge-teal",
   public: "badge-gray",
+};
+
+const ACTION_RANK: Record<string, number> = {
+  pull: 0,
+  create: 1,
+  update: 2,
+  delete: 3,
 };
 
 function configValue(manifest: ManifestSummary, key: string): string | null {
@@ -89,18 +97,35 @@ export default function RepoDetail() {
   const [busy, setBusy] = createSignal(false);
   const [toast, setToast] = createSignal<string | null>(null);
   const [copied, setCopied] = createSignal<string | null>(null);
+  const [settingsSaving, setSettingsSaving] = createSignal(false);
+  const [descriptionDraft, setDescriptionDraft] = createSignal("");
+  const [visibilityDraft, setVisibilityDraft] = createSignal<RepositoryVisibility>("private");
 
   const repo = () => decodeURIComponent(params.name);
   const [repoAccess, setRepoAccess] = createSignal<RepositorySummary | null>(null);
 
-  createEffect(() => {
+  function canUpdateRepository(access: RepositorySummary) {
+    return ACTION_RANK[access.access_level] >= ACTION_RANK.update;
+  }
+
+  async function loadRepoAccess() {
     const name = repo();
-    fetchRepositories({ q: name, n: 1 })
-      .then((res) => {
-        const match = res.repositories.find((r) => r.name === name);
-        setRepoAccess(match ?? null);
-      })
-      .catch(() => setRepoAccess(null));
+    try {
+      const res = await fetchRepositories({ q: name, n: 1 });
+      const match = res.repositories.find((r) => r.name === name) ?? null;
+      setRepoAccess(match);
+      if (match) {
+        setDescriptionDraft(match.description ?? "");
+        setVisibilityDraft(match.visibility);
+      }
+    } catch {
+      setRepoAccess(null);
+    }
+  }
+
+  createEffect(() => {
+    repo();
+    loadRepoAccess();
   });
 
   async function load() {
@@ -205,6 +230,26 @@ export default function RepoDetail() {
     }
   }
 
+  async function saveRepositorySettings() {
+    const access = repoAccess();
+    if (!access || !canUpdateRepository(access)) return;
+    setSettingsSaving(true);
+    try {
+      const updated = await patchRepository(repo(), {
+        description: descriptionDraft(),
+        visibility: visibilityDraft(),
+      });
+      setRepoAccess(updated);
+      setDescriptionDraft(updated.description ?? "");
+      setVisibilityDraft(updated.visibility);
+      showToast(t("repo.settingsSaved"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t("repo.settingsSaveError"));
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
   function toggleSelected(digest: string) {
     const next = new Set(selected());
     if (next.has(digest)) next.delete(digest);
@@ -285,24 +330,78 @@ export default function RepoDetail() {
 
       <Show when={repoAccess()}>
         {(access) => (
-          <section class="access-panel glass">
-            <span class="section-label">{t("repo.access")}</span>
-            <div class="access-badges">
-              <span class={`badge ${ACCESS_BADGE[access().access_level] ?? "badge-gray"}`}>
-                {t(`access.action.${access().access_level}`)}
-              </span>
-              <Show when={access().max_grantable !== access().access_level}>
-                <span class="badge badge-gray">
-                  {t("repo.canGrant", { action: t(`access.action.${access().max_grantable}`) })}
+          <>
+            <section class="access-panel glass">
+              <span class="section-label">{t("repo.access")}</span>
+              <div class="access-badges">
+                <span class={`badge ${ACCESS_BADGE[access().access_level] ?? "badge-gray"}`}>
+                  {t(`access.action.${access().access_level}`)}
                 </span>
-              </Show>
-              <span class={`badge ${GRANT_BADGE[access().grant_source] ?? "badge-gray"}`}>
-                {t("repo.accessSource", {
-                  source: t(`access.grantSource.${access().grant_source}`),
-                })}
-              </span>
-            </div>
-          </section>
+                <Show when={access().max_grantable !== access().access_level}>
+                  <span class="badge badge-gray">
+                    {t("repo.canGrant", { action: t(`access.action.${access().max_grantable}`) })}
+                  </span>
+                </Show>
+                <span class={`badge ${GRANT_BADGE[access().grant_source] ?? "badge-gray"}`}>
+                  {t("repo.accessSource", {
+                    source: t(`access.grantSource.${access().grant_source}`),
+                  })}
+                </span>
+              </div>
+            </section>
+
+            <section class="repo-settings panel glass">
+              <div class="panel-head">
+                <div>
+                  <p class="section-label">{t("repo.settingsLabel")}</p>
+                  <h2>{t("repo.settings")}</h2>
+                </div>
+                <span class="summary">
+                  {visibilityDraft() === "public_pull"
+                    ? t("repo.visibilityPublicHelp")
+                    : t("repo.visibilityPrivateHelp")}
+                </span>
+              </div>
+              <div class="repo-settings-grid">
+                <label class="repo-setting-field">
+                  <span>{t("repo.description")}</span>
+                  <textarea
+                    rows={3}
+                    value={descriptionDraft()}
+                    disabled={!canUpdateRepository(access()) || settingsSaving()}
+                    placeholder={t("repo.descriptionPlaceholder")}
+                    onInput={(e) => setDescriptionDraft(e.currentTarget.value)}
+                  />
+                </label>
+                <label class="repo-setting-field">
+                  <span>{t("repo.visibility")}</span>
+                  <select
+                    value={visibilityDraft()}
+                    disabled={!canUpdateRepository(access()) || settingsSaving()}
+                    onChange={(e) =>
+                      setVisibilityDraft(e.currentTarget.value as RepositoryVisibility)
+                    }
+                  >
+                    <option value="private">{t("repo.visibilityPrivate")}</option>
+                    <option value="public_pull">{t("repo.visibilityPublicPull")}</option>
+                  </select>
+                </label>
+                <div class="repo-settings-actions">
+                  <button
+                    class="select-toggle active"
+                    type="button"
+                    disabled={!canUpdateRepository(access()) || settingsSaving()}
+                    onClick={saveRepositorySettings}
+                  >
+                    {settingsSaving() ? t("common.saving") : t("common.save")}
+                  </button>
+                  <Show when={!canUpdateRepository(access())}>
+                    <span class="settings-note">{t("repo.settingsReadOnly")}</span>
+                  </Show>
+                </div>
+              </div>
+            </section>
+          </>
         )}
       </Show>
 

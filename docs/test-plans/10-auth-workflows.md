@@ -353,19 +353,23 @@ Kanidm fixture, and the public registry endpoint is `https://localhost:32050`.
 ### AUTH20. Repository Public Pull Visibility
 
 **Precondition**: Auth-enabled cluster is running and a repository exists with
-`visibility = public_pull`.
+metadata owned by the test actor.
 
 **Steps**:
-1. Create or update repository metadata so the exact repository has
+1. Create or update repository metadata through the dashboard settings panel or
+   `PATCH /api/v1/repositories/<name>` so the exact repository has
    `visibility = public_pull`.
 2. Without credentials, `GET` or `HEAD` the repository manifest and blob routes.
 3. Without credentials, try to start an upload under the same repository.
-4. Create a public namespace grant if the API still accepts legacy data and
+4. Toggle the same repository back to `visibility = private`.
+5. Without credentials, repeat the manifest or blob read.
+6. Create a public namespace grant if the API still accepts legacy data and
    verify it does not make private repositories public.
 
 **Expected**:
 - Anonymous manifest/blob reads are allowed only for exact repositories marked
-  `public_pull`.
+   `public_pull`.
+- Toggling visibility back to `private` disables anonymous pull.
 - Anonymous writes are still rejected.
 - Namespace grants for `public` are not the public-pull auth boundary.
 
