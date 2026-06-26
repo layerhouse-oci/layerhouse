@@ -53,6 +53,15 @@ start uploads, push manifests, or delete content.
 Namespace grants do not make repositories public. User and group grants control
 authenticated access; repository visibility controls anonymous pull access.
 
+Repository owners or actors with `update` access can change visibility from the
+dashboard repository settings panel or with `PATCH /api/v1/repositories/<name>`:
+
+```json
+{ "visibility": "public_pull" }
+```
+
+Use `{ "visibility": "private" }` to require authentication for pulls again.
+
 ## OCI Error Codes
 
 Layerhouse returns standard OCI error codes in the response body:

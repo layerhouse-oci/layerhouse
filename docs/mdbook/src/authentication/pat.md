@@ -76,7 +76,8 @@ namespace. Unclaimed namespace writes are denied before policy evaluation.
 PAT scopes are for authenticated clients. Anonymous pull access is controlled by
 repository visibility: a repository with `visibility = public_pull` can be pulled
 without credentials, while pushes and deletes still require authenticated
-authorization.
+authorization. Repository owners and actors with `update` access can toggle this
+in the dashboard repository settings panel or by patching repository metadata.
 
 ## Expiry
 

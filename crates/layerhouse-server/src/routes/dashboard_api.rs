@@ -251,6 +251,17 @@ async fn repository_dispatch_result<
             .map(IntoResponse::into_response);
     }
 
+    if method == Method::PATCH && !parts.is_empty() && !parts.contains(&"manifests") {
+        let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+            .await
+            .map_err(|e| LayerhouseError::NameInvalid(e.to_string()))?;
+        let req: PatchRepositoryRequest = serde_json::from_slice(&body)
+            .map_err(|e| LayerhouseError::NameInvalid(e.to_string()))?;
+        return patch_repository(State(state), identity, Path(path.to_string()), Json(req))
+            .await
+            .map(IntoResponse::into_response);
+    }
+
     if method == Method::DELETE && !parts.is_empty() && !parts.contains(&"manifests") {
         return delete_repository(State(state), identity, Path(path.to_string()))
             .await
@@ -449,6 +460,12 @@ struct CreateRepositoryRequest {
     visibility: Visibility,
 }
 
+#[derive(Debug, Deserialize)]
+struct PatchRepositoryRequest {
+    description: Option<String>,
+    visibility: Option<Visibility>,
+}
+
 /// Create a first-class ("shadow") repository that can exist before any blob is
 /// pushed. Requires `Create` permission on the target path; the personal
 /// namespace (`users/<username>/*`) grants this implicitly. The caller subject
@@ -513,6 +530,69 @@ async fn create_repository<
     }
 
     Ok((StatusCode::CREATED, Json(repo)).into_response())
+}
+
+async fn require_update_permission(
+    auth: &Option<Arc<crate::auth::AuthService>>,
+    identity: Option<&Extension<crate::auth::token::AuthIdentity>>,
+    name: &str,
+    namespaces: &dyn AuthorizationStore,
+) -> Result<Option<NamespaceEpoch>, LayerhouseError> {
+    let Some(auth) = auth.as_ref() else {
+        return Ok(None);
+    };
+    let Some(Extension(identity)) = identity else {
+        return Err(LayerhouseError::Unauthorized {
+            message: "authentication required".to_string(),
+            realm: None,
+            service: None,
+            scope: None,
+        });
+    };
+    Ok(auth
+        .check_permission(identity, name, OciAction::Update, namespaces)
+        .await?
+        .expected_namespace)
+}
+
+async fn patch_repository<M: ManifestStore + RepositoryStore + AuthorizationStore, B: BlobStore>(
+    State(state): State<Arc<AppState<M, B>>>,
+    identity: Option<Extension<crate::auth::token::AuthIdentity>>,
+    Path(name): Path<String>,
+    Json(req): Json<PatchRepositoryRequest>,
+) -> Result<impl IntoResponse, LayerhouseError> {
+    let name = percent_decode(&name);
+    validate_repository_name(&name)?;
+
+    let expected_namespace =
+        require_update_permission(&state.auth, identity.as_ref(), &name, &state.core.metadata)
+            .await?;
+
+    let mut repo = state
+        .core
+        .metadata
+        .get_repository(&name)
+        .await?
+        .ok_or_else(|| LayerhouseError::NameUnknown(name.clone()))?;
+
+    if let Some(description) = req.description {
+        repo.description = description.trim().to_string();
+    }
+    if let Some(visibility) = req.visibility {
+        repo.visibility = visibility;
+    }
+
+    if state.auth.is_some() {
+        state
+            .core
+            .metadata
+            .put_repository_with_expected_namespace(repo.clone(), expected_namespace)
+            .await?;
+    } else {
+        state.core.metadata.put_repository(repo.clone()).await?;
+    }
+
+    Ok(Json(repo))
 }
 
 async fn require_delete_permission(
@@ -1420,6 +1500,23 @@ mod tests {
         req
     }
 
+    fn patch_repository_request(
+        name: &str,
+        body: serde_json::Value,
+        identity: Option<AuthIdentity>,
+    ) -> Request<Body> {
+        let mut req = Request::builder()
+            .uri(format!("/api/v1/repositories/{name}"))
+            .method(Method::PATCH)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        if let Some(identity) = identity {
+            req.extensions_mut().insert(identity);
+        }
+        req
+    }
+
     fn scoped_identity(scopes: Vec<String>) -> AuthIdentity {
         let scope_refs = scopes.iter().map(String::as_str).collect::<Vec<_>>();
         let mut identity = AuthIdentity::for_test(
@@ -1562,6 +1659,204 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn patch_repository_updates_metadata_for_owner() {
+        let state = test_state_with_auth(vec![]);
+        state
+            .core
+            .metadata
+            .put_repository(crate::store::metadata::Repository {
+                name: "users/alice/app".to_string(),
+                description: "old".to_string(),
+                created_by: Some(Subject::new("user-1")),
+                visibility: Visibility::Private,
+                created_at: 123,
+            })
+            .await
+            .unwrap();
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        let response = app
+            .oneshot(patch_repository_request(
+                "users/alice/app",
+                serde_json::json!({
+                    "description": "  new description  ",
+                    "visibility": "public_pull"
+                }),
+                Some(session_identity()),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data["description"], "new description");
+        assert_eq!(data["visibility"], "public_pull");
+        assert_eq!(data["created_at"], 123);
+
+        state
+            .auth
+            .as_ref()
+            .unwrap()
+            .check_public_pull("users/alice/app", &state.core.metadata)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn patch_repository_private_disables_public_pull() {
+        let state = test_state_with_auth(vec![]);
+        state
+            .core
+            .metadata
+            .put_repository(crate::store::metadata::Repository {
+                name: "users/alice/app".to_string(),
+                description: "public".to_string(),
+                created_by: Some(Subject::new("user-1")),
+                visibility: Visibility::PublicPull,
+                created_at: 123,
+            })
+            .await
+            .unwrap();
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        let response = app
+            .oneshot(patch_repository_request(
+                "users/alice/app",
+                serde_json::json!({ "visibility": "private" }),
+                Some(session_identity()),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        state
+            .auth
+            .as_ref()
+            .unwrap()
+            .check_public_pull("users/alice/app", &state.core.metadata)
+            .await
+            .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn patch_repository_denied_without_update_grant() {
+        let state = test_state_with_auth(vec![]);
+        state
+            .core
+            .metadata
+            .put_repository(crate::store::metadata::Repository {
+                name: "team-a/app".to_string(),
+                description: "old".to_string(),
+                created_by: None,
+                visibility: Visibility::Private,
+                created_at: 123,
+            })
+            .await
+            .unwrap();
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(patch_repository_request(
+                "team-a/app",
+                serde_json::json!({ "description": "new" }),
+                Some(scoped_identity(vec![
+                    "repository:team-a/app:pull".to_string(),
+                ])),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn patch_repository_requires_identity_when_auth_enabled() {
+        let state = test_state_with_auth(vec![]);
+        state
+            .core
+            .metadata
+            .put_repository(crate::store::metadata::Repository {
+                name: "users/alice/app".to_string(),
+                description: "old".to_string(),
+                created_by: None,
+                visibility: Visibility::Private,
+                created_at: 123,
+            })
+            .await
+            .unwrap();
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(patch_repository_request(
+                "users/alice/app",
+                serde_json::json!({ "description": "new" }),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn patch_repository_missing_metadata_returns_not_found() {
+        let state = test_state_with_auth(vec![]);
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(patch_repository_request(
+                "users/alice/missing",
+                serde_json::json!({ "description": "new" }),
+                Some(session_identity()),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn patch_repository_allows_auth_disabled_mode() {
+        let state = test_state();
+        state
+            .core
+            .metadata
+            .put_repository(crate::store::metadata::Repository {
+                name: "team-a/app".to_string(),
+                description: "old".to_string(),
+                created_by: None,
+                visibility: Visibility::Private,
+                created_at: 123,
+            })
+            .await
+            .unwrap();
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state.clone());
+
+        let response = app
+            .oneshot(patch_repository_request(
+                "team-a/app",
+                serde_json::json!({ "description": "new", "visibility": "public_pull" }),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let stored = state
+            .core
+            .metadata
+            .get_repository("team-a/app")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.description, "new");
+        assert_eq!(stored.visibility, Visibility::PublicPull);
     }
 
     #[tokio::test]
