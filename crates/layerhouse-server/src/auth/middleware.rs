@@ -391,23 +391,22 @@ fn expire_session_cookie(response: &mut Response, flags: &super::CookieFlags) {
 }
 
 fn extract_repository_from_path(path: &str) -> String {
-    let raw = path
-        .strip_prefix("/v2/")
-        .and_then(|rest| {
-            let parts: Vec<&str> = rest.split('/').collect();
-            parts
-                .iter()
-                .position(|part| {
-                    matches!(
-                        *part,
-                        "blobs" | "manifests" | "tags" | "referrers" | "uploads"
-                    )
-                })
-                .filter(|index| *index > 0)
-                .map(|index| parts[..index].join("/"))
-        })
-        .unwrap_or_default();
-    percent_decode(&raw)
+    let raw = path.strip_prefix("/v2/").and_then(|rest| {
+        // Match route markers from the right, like the v2 dispatcher. OCI
+        // repository names may contain marker-looking segments such as
+        // `blobs/sample`, so stopping at the first marker would emit an empty
+        // or truncated auth challenge scope.
+        rest.rsplit_once("/blobs/uploads/")
+            .map(|(name, _)| name)
+            .or_else(|| rest.strip_suffix("/blobs/uploads"))
+            .or_else(|| rest.rsplit_once("/manifests/").map(|(name, _)| name))
+            .or_else(|| rest.strip_suffix("/tags/list"))
+            .or_else(|| rest.rsplit_once("/referrers/").map(|(name, _)| name))
+            .or_else(|| rest.rsplit_once("/blobs/").map(|(name, _)| name))
+            .filter(|name| !name.is_empty())
+    });
+    let raw = raw.unwrap_or_default();
+    percent_decode(raw)
 }
 
 /// Resolve the OCI action a `/v2/` request needs, performing the manifest
@@ -557,6 +556,22 @@ mod tests {
         assert_eq!(
             extract_repository_from_path("/v2/qa/auth-test/alpine/tags/list"),
             "qa/auth-test/alpine"
+        );
+    }
+
+    #[test]
+    fn extracts_repository_names_with_route_marker_segments() {
+        assert_eq!(
+            extract_repository_from_path("/v2/blobs/sample/manifests/v1"),
+            "blobs/sample"
+        );
+        assert_eq!(
+            extract_repository_from_path("/v2/foo/blobs/bar/manifests/v1"),
+            "foo/blobs/bar"
+        );
+        assert_eq!(
+            extract_repository_from_path("/v2/tags/list/blobs/uploads/session-1"),
+            "tags/list"
         );
     }
 

@@ -59,6 +59,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 | Namespace grant owner CRUD and enforcement | AUTH18 | P0 |
 | Admin namespace grant audit controls | AUTH19 | P1 |
 | Namespace public pull for anonymous clients | AUTH20 | P0 |
+| OCI `pull,push` scope compatibility | AUTH21 | P0 |
 
 ## Coverage Status
 
@@ -74,6 +75,7 @@ Do not delete `qa/oci-*` repositories created by the OCI workflow test plan.
 | JWKS last-good cache trust window | Automated | `cargo test -p layerhouse-server auth::` | P1 | Implemented at unit level | command log |
 | Namespace owner grants, user/group/public enforcement, admin audit, snapshot roundtrip | Automated | `cargo test -p layerhouse-server namespace_`; focused audit and snapshot tests | P0 | Implemented at unit/API/state-machine level | command log |
 | Cedar repository authorization enforcement | Automated | `cargo test -p layerhouse-server auth::cedar_authorizer` | P1 | Implemented as the authoritative repository authorizer with Rust-only safety guards outside policy | command log |
+| OCI `pull,push` scope compatibility and namespace claim gate | Automated | `AUTH_SMOKE_PAT=<pat> AUTH_SMOKE_REPO=<claimed-repo> just auth-smoke`; unit coverage in `cargo test -p layerhouse-server auth::permissions` and `cargo test -p layerhouse-server oci_bearer_pull_push_scope` | P0 | Implemented as opt-in live auth smoke plus unit coverage | `/tmp/orb-auth-<run_id>` |
 | Live JWKS restart resilience with IdP outage | Agent-executable manual | `AUTH-MANUAL-JWKS-RESUME-01` | P1 | Manual plan only; not automated because it intentionally stops Kanidm during pod restart | `/tmp/orb-auth-jwks-resume-<run_id>` |
 | Cross-region ordered issuer/JWKS failover | Agent-executable manual | `AUTH-MANUAL-JWKS-XREGION-01` | P2 | Manual plan only; not automated because it needs multiple reachable IdP/JWKS origins | `/tmp/orb-auth-jwks-xregion-<run_id>` |
 | JWKS rotation and token expiry | Agent-executable manual | `AUTH-MANUAL-JWKS-01` | P2 | Manual plan only; not automated because it needs Kanidm key rotation and long token lifetime waits | `/tmp/orb-auth-jwks-<run_id>` |
@@ -348,12 +350,35 @@ Kanidm fixture, and the public registry endpoint is `https://localhost:32050`.
 - Evidence includes Docker login/push output and `pat-response.json` under
   `target/tilt/evidence/<run_id>`.
 
+### AUTH21. OCI `pull,push` Scope Compatibility
+
+**Precondition**: Auth-enabled compose cluster is running, `AUTH_SMOKE_PAT`
+is a PAT for `AUTH_SMOKE_REPO`, and that repository's namespace is already
+claimed.
+
+**Steps**:
+1. Run:
+   ```bash
+   AUTH_SMOKE_PAT=<pat> AUTH_SMOKE_REPO=demo/api just auth-smoke
+   ```
+2. Confirm `/v2/token` accepts
+   `scope=repository:<repo>:pull,push`.
+3. Confirm the returned bearer can start a blob upload.
+4. Confirm ORAS can push an artifact using the same PAT/client flow.
+5. Confirm the same `pull,push` request is denied for an unclaimed namespace.
+
+**Expected**:
+- `push` is accepted as OCI client vocabulary for write access.
+- The bearer can create/update content in an authorized, claimed namespace.
+- `push` does not grant delete/admin.
+- `push` does not create, claim, or bypass an unclaimed namespace.
+
 ## Test Execution Priority
 
 | Priority | Tests | Rationale |
 |----------|-------|-----------|
 | P0 | AUTH1-AUTH7, AUTH16 | Core auth on/off, PAT login, push/pull, denial, OAuth2 client mapping |
-| P0 | AUTH18, AUTH20 | Namespace grant enforcement and anonymous public pull |
+| P0 | AUTH18, AUTH20, AUTH21 | Namespace grant enforcement, anonymous public pull, and OCI client scope compatibility |
 | P1 | AUTH8-AUTH12, AUTH17, AUTH19 | Dashboard OIDC, CI tokens, revocation, wildcards, host Docker auth over trusted HTTPS, admin audit |
 | P2 | AUTH13-AUTH15 | Multi-replica consistency, edge cases |
 
@@ -375,6 +400,7 @@ Kanidm fixture, and the public registry endpoint is `https://localhost:32050`.
 | AUTH18 | Namespace grants are Raft metadata | Owner CRUD, user/group matching, action ladder |
 | AUTH19 | Admin grant changes are audited | Required reason and audit event visibility |
 | AUTH20 | Namespace-level Public Pull | Anonymous manifest/blob pull without write access |
+| AUTH21 | OCI clients request `pull,push` | Push-scope aliasing and unclaimed namespace denial |
 
 ## Prerequisites
 

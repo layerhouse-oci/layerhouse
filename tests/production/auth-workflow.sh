@@ -13,12 +13,16 @@ set -euo pipefail
 #   REGISTRY       — registry host:port (default: localhost:5050)
 #   RUN_ID         — unique test run identifier (default: timestamp)
 #   EVIDENCE_ROOT  — where to write test evidence (default: /tmp/orb-auth-${RUN_ID})
+#   AUTH_SMOKE_PAT — optional PAT for live authorized OCI client checks
+#   AUTH_SMOKE_REPO — claimed repo covered by AUTH_SMOKE_PAT (default: demo/api)
 
 REGISTRY="${REGISTRY:-localhost:5050}"
 SCHEME="${SCHEME:-http}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 EVIDENCE_ROOT="${EVIDENCE_ROOT:-/tmp/orb-auth-${RUN_ID}}"
 REPO_PREFIX="qa/auth-${RUN_ID}"
+AUTH_SMOKE_USER="${AUTH_SMOKE_USER:-developer}"
+AUTH_SMOKE_REPO="${AUTH_SMOKE_REPO:-demo/api}"
 
 NODE_PORTS="${NODE_PORTS:-5050 5051 5052}"
 
@@ -118,6 +122,51 @@ fi
 # 3. Use the PAT for docker login
 # This requires the kanidm setup to have completed successfully.
 # See docs/test-plans/10-auth-workflows.md for the full test procedure.
+
+if [ -n "${AUTH_SMOKE_PAT:-}" ]; then
+    echo
+    echo "--- AUTH21: OCI pull,push scope compatibility ---"
+    TOKEN_BODY="$EVIDENCE_ROOT/token-pull-push.json"
+    TOKEN_STATUS=$(curl -s -o "$TOKEN_BODY" -w "%{http_code}" \
+        -u "$AUTH_SMOKE_USER:$AUTH_SMOKE_PAT" \
+        "$SCHEME://$REGISTRY/v2/token?service=$REGISTRY&scope=repository:$AUTH_SMOKE_REPO:pull,push")
+    assert_status AUTH21a 200 "$TOKEN_STATUS" "token endpoint accepts repository:$AUTH_SMOKE_REPO:pull,push"
+    BEARER=$(jq -r '.token // empty' "$TOKEN_BODY")
+    if [ -n "$BEARER" ]; then
+        pass AUTH21b "bearer token minted"
+    else
+        fail AUTH21b "token response did not include bearer"
+    fi
+
+    UPLOAD_STATUS=$(curl -s -o "$EVIDENCE_ROOT/upload-start.txt" -w "%{http_code}" \
+        -X POST \
+        -H "Authorization: Bearer $BEARER" \
+        "$SCHEME://$REGISTRY/v2/$AUTH_SMOKE_REPO/blobs/uploads/")
+    assert_status AUTH21c 202 "$UPLOAD_STATUS" "pull,push bearer can start upload"
+
+    if command -v oras >/dev/null 2>&1; then
+        echo "$AUTH_SMOKE_PAT" | oras login "$REGISTRY" --username "$AUTH_SMOKE_USER" --password-stdin >/dev/null
+        if oras push "$REGISTRY/$AUTH_SMOKE_REPO:auth-smoke-$RUN_ID" README.md:application/vnd.layerhouse.auth-smoke.readme.v1+text \
+            >"$EVIDENCE_ROOT/oras-push.txt" 2>&1; then
+            pass AUTH21d "ORAS push with pull,push scope succeeded"
+        else
+            fail AUTH21d "ORAS push failed; see $EVIDENCE_ROOT/oras-push.txt"
+        fi
+    else
+        echo "  SKIP: AUTH21d — oras not installed"
+    fi
+
+    UNCLAIMED_REPO="qa-unclaimed-${RUN_ID}/smoke"
+    UNCLAIMED_BODY="$EVIDENCE_ROOT/token-unclaimed.json"
+    UNCLAIMED_STATUS=$(curl -s -o "$UNCLAIMED_BODY" -w "%{http_code}" \
+        -u "$AUTH_SMOKE_USER:$AUTH_SMOKE_PAT" \
+        "$SCHEME://$REGISTRY/v2/token?service=$REGISTRY&scope=repository:$UNCLAIMED_REPO:pull,push")
+    assert_status AUTH21e 403 "$UNCLAIMED_STATUS" "pull,push does not bypass namespace claim gate"
+else
+    echo
+    echo "--- AUTH21: OCI pull,push scope compatibility ---"
+    echo "  SKIP: set AUTH_SMOKE_PAT and AUTH_SMOKE_REPO to run live pull,push checks"
+fi
 
 # ---- Summary ----
 echo
