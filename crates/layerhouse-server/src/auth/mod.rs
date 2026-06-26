@@ -692,26 +692,32 @@ impl AuthService {
         repository: &str,
         store: &dyn AuthorizationStore,
     ) -> Result<(permissions::OciAction, permissions::GrantSource), LayerhouseError> {
-        if store
+        let public_pull = store
             .get_repository(repository)
             .await?
-            .is_some_and(|repo| repo.visibility == crate::store::metadata::Visibility::PublicPull)
-        {
-            return Ok((
-                permissions::OciAction::Pull,
-                permissions::GrantSource::Public,
-            ));
-        }
+            .is_some_and(|repo| repo.visibility == crate::store::metadata::Visibility::PublicPull);
         let action = match cedar_authorizer::CedarRepositoryAuthorizer::new()
             .max_grantable_action(self, &identity.actor(), repository, store)
             .await
         {
             Ok(Some(action)) => action,
+            Ok(None) if public_pull => {
+                return Ok((
+                    permissions::OciAction::Pull,
+                    permissions::GrantSource::Public,
+                ));
+            }
             Ok(None) => {
                 return Err(LayerhouseError::Denied(format!(
                     "access denied for repository {}",
                     repository
                 )));
+            }
+            Err(_) if public_pull => {
+                return Ok((
+                    permissions::OciAction::Pull,
+                    permissions::GrantSource::Public,
+                ));
             }
             Err(err) => {
                 tracing::warn!(
@@ -1505,6 +1511,14 @@ mod tests {
         auth.check_permission(&bob, "acme/app", OciAction::Create, &store)
             .await
             .expect_err("public repository visibility cannot write");
+
+        let owner = identity("subject-owner", TokenType::OidcAccess, &[], &[]);
+        let (action, source) = auth
+            .max_grantable_action(&owner, "acme/app", &store)
+            .await
+            .expect("public repository visibility does not cap owner access");
+        assert_eq!(action, OciAction::Delete);
+        assert_eq!(source, permissions::GrantSource::Personal);
     }
 
     #[tokio::test]
