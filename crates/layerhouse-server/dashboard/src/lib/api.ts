@@ -32,6 +32,7 @@ import type {
   ReleaseNamespaceRequest,
   RepositoryFilter,
   RepositoryListResponse,
+  RepositorySummary,
   SyncJob,
   SyncJobRun,
   TagListResponse,
@@ -203,6 +204,10 @@ export function fetchRepositories(
   return fetchJson(`/api/v1/repositories${qs(params)}`);
 }
 
+export function fetchRepository(repo: string): Promise<RepositorySummary> {
+  return fetchJson(`/api/v1/repositories/${repo}`);
+}
+
 export function fetchRepositoryManifests(
   repo: string,
   params: {
@@ -239,7 +244,7 @@ export function deleteRepository(repo: string): Promise<DeleteCounts> {
 export function patchRepository(
   repo: string,
   request: PatchRepositoryRequest,
-): Promise<RepositoryListResponse["repositories"][number]> {
+): Promise<RepositorySummary> {
   return fetchJson(`/api/v1/repositories/${repo}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },

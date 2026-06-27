@@ -251,6 +251,12 @@ async fn repository_dispatch_result<
             .map(IntoResponse::into_response);
     }
 
+    if method == Method::GET && !parts.is_empty() && !parts.contains(&"manifests") {
+        return get_repository(State(state), identity, Path(path.to_string()))
+            .await
+            .map(IntoResponse::into_response);
+    }
+
     if method == Method::PATCH && !parts.is_empty() && !parts.contains(&"manifests") {
         let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
             .await
@@ -342,43 +348,17 @@ async fn list_repositories<M: ManifestStore + AuthorizationStore, B: BlobStore>(
     let mut enriched: Vec<EnrichedRepositorySummary> = Vec::new();
     if let (Some(auth), Some(Extension(identity))) = (state.auth.as_ref(), &identity) {
         for repo in repos {
-            if let Ok((action, source)) = auth
-                .max_grantable_action(identity, &repo.name, &state.core.metadata)
-                .await
+            if let Ok(repo) =
+                enrich_repository_summary(repo, Some(auth), Some(identity), &state.core.metadata)
+                    .await
             {
-                enriched.push(EnrichedRepositorySummary {
-                    name: repo.name,
-                    tag_count: repo.tag_count,
-                    manifest_count: repo.manifest_count,
-                    stored_size_bytes: repo.stored_size_bytes,
-                    manifest_size_bytes: repo.manifest_size_bytes,
-                    last_modified: repo.last_modified,
-                    description: repo.description,
-                    created_by: repo.created_by,
-                    visibility: repo.visibility,
-                    access_level: action,
-                    max_grantable: action,
-                    grant_source: source,
-                });
+                enriched.push(repo);
             }
         }
     } else {
         // Auth-disabled mode: everything is visible, source is public.
         for repo in repos {
-            enriched.push(EnrichedRepositorySummary {
-                name: repo.name,
-                tag_count: repo.tag_count,
-                manifest_count: repo.manifest_count,
-                stored_size_bytes: repo.stored_size_bytes,
-                manifest_size_bytes: repo.manifest_size_bytes,
-                last_modified: repo.last_modified,
-                description: repo.description,
-                created_by: repo.created_by,
-                visibility: repo.visibility,
-                access_level: OciAction::Delete,
-                max_grantable: OciAction::Delete,
-                grant_source: GrantSource::Public,
-            });
+            enriched.push(enrich_repository_summary(repo, None, None, &state.core.metadata).await?);
         }
     }
 
@@ -449,6 +429,75 @@ async fn list_repositories<M: ManifestStore + AuthorizationStore, B: BlobStore>(
         has_more,
         next,
     )
+}
+
+async fn enrich_repository_summary(
+    repo: crate::store::metadata::RepositorySummary,
+    auth: Option<&Arc<crate::auth::AuthService>>,
+    identity: Option<&crate::auth::token::AuthIdentity>,
+    metadata: &dyn AuthorizationStore,
+) -> Result<EnrichedRepositorySummary, LayerhouseError> {
+    let (access_level, grant_source) = if let (Some(auth), Some(identity)) = (auth, identity) {
+        auth.max_grantable_action(identity, &repo.name, metadata)
+            .await?
+    } else {
+        (OciAction::Delete, GrantSource::Public)
+    };
+
+    Ok(EnrichedRepositorySummary {
+        name: repo.name,
+        tag_count: repo.tag_count,
+        manifest_count: repo.manifest_count,
+        stored_size_bytes: repo.stored_size_bytes,
+        manifest_size_bytes: repo.manifest_size_bytes,
+        last_modified: repo.last_modified,
+        description: repo.description,
+        created_by: repo.created_by,
+        visibility: repo.visibility,
+        access_level,
+        max_grantable: access_level,
+        grant_source,
+    })
+}
+
+async fn get_repository<M: ManifestStore + RepositoryStore + AuthorizationStore, B: BlobStore>(
+    State(state): State<Arc<AppState<M, B>>>,
+    identity: Option<Extension<crate::auth::token::AuthIdentity>>,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, LayerhouseError> {
+    let name = percent_decode(&name);
+    validate_repository_name(&name)?;
+
+    if let (Some(auth), Some(Extension(identity))) = (state.auth.as_ref(), identity.as_ref()) {
+        auth.check_permission(identity, &name, OciAction::Pull, &state.core.metadata)
+            .await?;
+    } else if state.auth.is_some() {
+        return Err(LayerhouseError::Unauthorized {
+            message: "authentication required".to_string(),
+            realm: None,
+            service: None,
+            scope: None,
+        });
+    }
+
+    let summary = state
+        .core
+        .metadata
+        .list_repository_summaries()
+        .await?
+        .into_iter()
+        .find(|repo| repo.name == name)
+        .ok_or_else(|| LayerhouseError::NameUnknown(name.clone()))?;
+
+    let enriched = enrich_repository_summary(
+        summary,
+        state.auth.as_ref(),
+        identity.as_ref().map(|Extension(identity)| identity),
+        &state.core.metadata,
+    )
+    .await?;
+
+    Ok(Json(enriched))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1933,6 +1982,18 @@ mod tests {
         req
     }
 
+    fn get_repository_request(name: &str, identity: Option<AuthIdentity>) -> Request<Body> {
+        let mut req = Request::builder()
+            .uri(format!("/api/v1/repositories/{name}"))
+            .method(Method::GET)
+            .body(Body::empty())
+            .unwrap();
+        if let Some(id) = identity {
+            req.extensions_mut().insert(id);
+        }
+        req
+    }
+
     #[tokio::test]
     async fn list_repositories_filters_by_pull_permission() {
         let state = test_state_with_auth(vec![]);
@@ -1967,6 +2028,75 @@ mod tests {
         assert!(names.contains(&"team-a/frontend"));
         assert!(names.contains(&"team-a/backend"));
         assert_eq!(data["total_reachable"], 2);
+    }
+
+    #[tokio::test]
+    async fn get_repository_returns_exact_match_with_access_metadata() {
+        let state = test_state_with_auth(vec![]);
+        seed_manifest(&state, "users/alice/app", "latest").await;
+        seed_manifest(&state, "users/alice/app-extra", "latest").await;
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(get_repository_request(
+                "users/alice/app",
+                Some(session_identity()),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data["name"], "users/alice/app");
+        assert_eq!(data["access_level"], "delete");
+        assert_eq!(data["grant_source"], "personal");
+    }
+
+    #[tokio::test]
+    async fn get_repository_requires_identity_when_auth_enabled() {
+        let state = test_state_with_auth(vec![]);
+        seed_manifest(&state, "users/alice/app", "latest").await;
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(get_repository_request("users/alice/app", None))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_repository_denied_without_pull_access() {
+        let state = test_state_with_auth(vec![]);
+        seed_manifest(&state, "team-a/app", "latest").await;
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(get_repository_request(
+                "team-a/app",
+                Some(session_identity()),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_repository_missing_returns_not_found() {
+        let state = test_state();
+        let app = routes::<InMemoryMetadataStore, InMemoryBlobStore>().with_state(state);
+
+        let response = app
+            .oneshot(get_repository_request("team-a/missing", None))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

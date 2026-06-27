@@ -4,7 +4,7 @@ import {
   batchDeleteManifestDigests,
   deleteManifestDigest,
   deleteManifestTag,
-  fetchRepositories,
+  fetchRepository,
   fetchRepositoryManifests,
   patchRepository,
 } from "../lib/api";
@@ -109,15 +109,11 @@ export default function RepoDetail() {
   }
 
   async function loadRepoAccess() {
-    const name = repo();
     try {
-      const res = await fetchRepositories({ q: name, n: 1 });
-      const match = res.repositories.find((r) => r.name === name) ?? null;
+      const match = await fetchRepository(repo());
       setRepoAccess(match);
-      if (match) {
-        setDescriptionDraft(match.description ?? "");
-        setVisibilityDraft(match.visibility);
-      }
+      setDescriptionDraft(match.description ?? "");
+      setVisibilityDraft(match.visibility);
     } catch {
       setRepoAccess(null);
     }
