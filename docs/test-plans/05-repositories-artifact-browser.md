@@ -246,6 +246,7 @@ Prepare a repository fixture with:
 **Steps**:
 1. Exercise these endpoints:
    - `GET /api/v1/repositories`
+   - `GET /api/v1/repositories/{name}`
    - `GET /api/v1/repositories/{name}/manifests`
    - `GET /api/v1/repositories/{name}/manifests/{digest}`
    - `GET /api/v1/repositories/{name}/manifests/{digest}/raw`
@@ -258,6 +259,8 @@ Prepare a repository fixture with:
 - `/v2/*` remains OCI-spec-only for OCI clients.
 - Repository list returns name, tag count, manifest count, `stored_size_bytes`,
   `manifest_size_bytes`, and last modified.
+- Repository detail returns the exact repository metadata and access fields even
+  when another repository has a matching name prefix.
 - Manifest list returns digest rows with tags, type, `stored_size_bytes`,
   `manifest_size_bytes`, timestamps, and config summary.
 - Untagged manifests return empty `tags`.
