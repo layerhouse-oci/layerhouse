@@ -84,7 +84,7 @@ Layerhouse directory types at the WASM boundary.
 | Scenario | Mode | Command/Plan ID | Priority | Current Status | Evidence Path |
 |---|---|---|---|---|---|
 | WIT ABI round trip with `crates/connectors/fake-directory` | Automated | `cargo test -p layerhouse-server directory_wasm` | P0 | Implemented; fake compiled component roundtrip covered by connector validation | command log |
-| Config/startup matrix for disabled directory, enabled missing component, digest mismatch, ABI mismatch, and token/base-origin validation | Automated | `cargo test -p layerhouse-server directory_config` | P0 | Partial; config schema validation covered, startup file/digest/ABI/token/CA content checks pending | command log |
+| Config/startup matrix for disabled directory, enabled missing component, digest mismatch, ABI mismatch, and token/base-origin validation | Automated | `cargo test -p layerhouse-server directory_config && cargo test -p layerhouse-server directory_startup` | P0 | Partial; config schema plus startup file/digest/ABI/provider/token/CA content checks covered, full server process smoke pending | command log |
 | Host-mediated WASI HTTP SSRF/header/body protections | Automated | `cargo test -p layerhouse-server directory_http_host` | P0 | Planned; not implemented yet | command log |
 | Kanidm component build and checksum package | Automated | `just connector-kanidm-build && just connector-kanidm-package` | P0 | Planned; not implemented yet | `target/connectors/` |
 | Compose Kanidm search/resolve smoke | Automated | `just compose-auth-directory-up` | P0 | Planned; not implemented yet | `target/directory-smoke/<run_id>` |
