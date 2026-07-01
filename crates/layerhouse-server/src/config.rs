@@ -377,12 +377,12 @@ pub fn resolve_advertise_addr(listen: &str) -> Result<String, ConfigError> {
 }
 
 impl Config {
-    pub fn from_file(path: &str) -> Result<Self, ConfigError> {
+    pub fn from_file_with_dir(path: &str) -> Result<(Self, PathBuf), ConfigError> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
         let config_dir = config_file_dir(path)?;
         config.validate_with_config_dir(Some(&config_dir))?;
-        Ok(config)
+        Ok((config, config_dir))
     }
 
     #[cfg(test)]

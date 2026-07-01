@@ -47,6 +47,8 @@ base64.workspace = true
 aes-gcm.workspace = true
 rand.workspace = true
 cedar-policy.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
 
 [build-dependencies]
 walkdir.workspace = true
@@ -57,5 +59,3 @@ tempfile.workspace = true
 rcgen.workspace = true
 time.workspace = true
 httpmock.workspace = true
-wasmtime.workspace = true
-wasmtime-wasi.workspace = true

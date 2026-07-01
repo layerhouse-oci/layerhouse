@@ -1,7 +1,6 @@
 mod auth;
 mod config;
 mod dashboard;
-#[cfg(test)]
 mod directory;
 mod error;
 mod gc;
@@ -45,6 +44,8 @@ enum AppError {
     #[error("{0}")]
     Config(#[from] crate::config::ConfigError),
     #[error("{0}")]
+    Directory(#[from] crate::directory::DirectoryStartupError),
+    #[error("{0}")]
     LogStore(#[from] crate::raft::log_store::LogStoreError),
     #[error("{0}")]
     Snapshot(#[from] SnapshotError),
@@ -79,14 +80,19 @@ async fn main() -> Result<(), AppError> {
         _ => tracing_subscriber::fmt().with_env_filter(env_filter).init(),
     }
 
-    let config = match std::env::args().nth(1) {
+    let (config, config_dir) = match std::env::args().nth(1) {
         Some(ref path) if path == "--config" => {
             let path = std::env::args().nth(2).ok_or(AppError::MissingConfigPath)?;
-            Config::from_file(&path)?
+            let (config, config_dir) = Config::from_file_with_dir(&path)?;
+            (config, Some(config_dir))
         }
-        Some(ref path) => Config::from_file(path)?,
-        None => Config::default_dev(),
+        Some(ref path) => {
+            let (config, config_dir) = Config::from_file_with_dir(path)?;
+            (config, Some(config_dir))
+        }
+        None => (Config::default_dev(), None),
     };
+    directory::validate_directory_startup(&config, config_dir.as_deref()).await?;
     let listen = config.server.listen.clone();
 
     let node_id = resolve_node_id()?;
