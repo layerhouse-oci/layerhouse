@@ -16,6 +16,7 @@ env:
   rust_min: "1.92"
   LAYERHOUSE_SKIP_DASHBOARD: 1
   CARGO_ZIGBUILD_VERSION: "0.19.7"
+  CARGO_COMPONENT_VERSION: "0.21.1"
   VP_NODE_VERSION: "24.15.0"
   ZIG_VERSION: "0.14.0"
 
@@ -64,7 +65,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
-      - run: cargo doc --workspace --no-deps
+      - run: cargo doc --no-deps
 
   basics:
     name: Basics
@@ -88,6 +89,42 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config
       - run: just test
 
+  connector-check:
+    name: Connector check
+    runs-on: ubuntu-latest
+    needs: [basics]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: connector-${{ env.CARGO_COMPONENT_VERSION }}
+      - uses: taiki-e/install-action@just
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+      - name: Check cargo-component
+        id: cargo-component
+        run: |
+          if command -v cargo-component >/dev/null 2>&1 || cargo component --version >/dev/null 2>&1; then
+            echo "installed=true" >> "$GITHUB_OUTPUT"
+            cargo component --version
+          else
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install cargo-binstall
+        if: steps.cargo-component.outputs.installed != 'true'
+        uses: cargo-bins/cargo-binstall@main
+      - name: Install cargo-component
+        if: steps.cargo-component.outputs.installed != 'true'
+        run: |
+          cargo binstall cargo-component --version "$CARGO_COMPONENT_VERSION" -y --force
+          cargo component --version
+      - run: just connector-check
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
@@ -102,7 +139,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
-      - run: cargo check --workspace
+      - run: cargo check
 
   coverage:
     name: Coverage

@@ -1,0 +1,121 @@
+package layerhouse:directory@0.0.3;
+
+world directory-connector {
+  enum principal-kind {
+    user,
+    group,
+  }
+
+  enum principal-status {
+    active,
+    disabled,
+    deleted,
+    unknown,
+  }
+
+  enum health-state {
+    healthy,
+    degraded,
+    unauthorized,
+    unavailable,
+    misconfigured,
+  }
+
+  enum tls-mode {
+    plain-http,
+    system-roots,
+    custom-ca,
+    insecure-skip-verify,
+  }
+
+  record principal-ref {
+    kind: principal-kind,
+    local-id: string,
+  }
+
+  record connector-info {
+    name: string,
+    version: string,
+    provider: string,
+    abi-version: string,
+  }
+
+  record connector-context {
+    provider: string,
+    base-origin: string,
+    timeout-ms: u64,
+    tls-mode: tls-mode,
+  }
+
+  record directory-principal {
+    ref: principal-ref,
+    display-name: string,
+    display-hierarchy: list<string>,
+    login: option<string>,
+    email: option<string>,
+    description: option<string>,
+    status: principal-status,
+    fetched-at-unix: option<u64>,
+  }
+
+  variant directory-error {
+    invalid-query(string),
+    unsupported-provider(string),
+    not-found(string),
+    upstream-unavailable(string),
+    upstream-unauthorized(string),
+    rate-limited(string),
+    timeout(string),
+    invalid-response(string),
+    internal(string),
+  }
+
+  variant search-filter {
+    free-text(string),
+    exact-local-id(string),
+  }
+
+  record search-request {
+    filter: search-filter,
+    kinds: list<principal-kind>,
+    limit: u32,
+    cursor: option<string>,
+  }
+
+  record search-response {
+    principals: list<directory-principal>,
+    next-cursor: option<string>,
+    warnings: list<directory-error>,
+  }
+
+  record resolve-failure {
+    ref: principal-ref,
+    error: directory-error,
+  }
+
+  variant resolve-result {
+    found(directory-principal),
+    not-found(principal-ref),
+    failed(resolve-failure),
+  }
+
+  record resolve-response {
+    results: list<resolve-result>,
+    warnings: list<directory-error>,
+  }
+
+  record resolve-request {
+    refs: list<principal-ref>,
+  }
+
+  record health-response {
+    state: health-state,
+    message: string,
+    checked-at-unix: u64,
+  }
+
+  export connector-info: func() -> connector-info;
+  export search-principals: func(ctx: connector-context, request: search-request) -> result<search-response, directory-error>;
+  export resolve-principals: func(ctx: connector-context, request: resolve-request) -> result<resolve-response, directory-error>;
+  export health: func(ctx: connector-context) -> result<health-response, directory-error>;
+}

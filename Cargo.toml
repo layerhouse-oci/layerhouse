@@ -3,9 +3,16 @@ resolver = "3"
 members = [
     "crates/layerhouse-server",
     "crates/layerhouse-ctl",
+    "crates/connectors/fake-directory",
+]
+default-members = [
+    "crates/layerhouse-server",
+    "crates/layerhouse-ctl",
 ]
 
 [workspace.package]
+# Keep the WIT package version for Layerhouse WASM connector ABIs in sync with
+# this workspace version when bumping releases.
 version = "0.0.3"
 edition = "2024"
 rust-version = "1.92"
@@ -60,6 +67,9 @@ rcgen = "0.14"
 time = "0.3"
 httpmock = "0.7"
 cedar-policy = { version = "4.11.1", default-features = false }
+wasmtime = "44.0.0"
+wasmtime-wasi = "44.0.0"
+wit-bindgen = "0.57.1"
 
 [profile.release]
 panic = "abort"

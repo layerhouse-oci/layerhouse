@@ -1,6 +1,7 @@
 set dotenv-load := true
 
 dashboard_dir := "crates/layerhouse-server/dashboard"
+cargo_component_version := "0.21.1"
 
 default:
     @just --list
@@ -9,19 +10,32 @@ fmt:
     cargo fmt --all --check
 
 clippy:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --all-targets -- -D warnings
 
 test:
-    cargo test --workspace
+    cargo test
 
 coverage-nextest:
     mkdir -p coverage
-    cargo llvm-cov nextest --workspace --lcov --output-path coverage/lcov.info
+    cargo llvm-cov nextest --lcov --output-path coverage/lcov.info
 
 dashboard-build:
     cd {{dashboard_dir}} && vp check && vp build
 
 check: fmt clippy test dashboard-build
+
+connector-check:
+    @if ! cargo component --version >/dev/null 2>&1; then \
+        echo "cargo component is missing."; \
+        echo 'Install it with:'; \
+        echo '  cargo binstall cargo-component --version "{{cargo_component_version}}" -y'; \
+        exit 1; \
+    fi
+    cargo component check -p fake-directory
+    cargo component build -p fake-directory
+    mkdir -p target/connectors
+    cp target/wasm32-wasip1/debug/fake_directory.wasm target/connectors/fake-directory-connector.wasm
+    LAYERHOUSE_TEST_FAKE_DIRECTORY_COMPONENT="$PWD/target/connectors/fake-directory-connector.wasm" cargo test -p layerhouse-server directory_wasm
 
 helm-check:
     helm lint deploy/kubernetes/helm -f deploy/kubernetes/helm/test-values/minimal.yaml
