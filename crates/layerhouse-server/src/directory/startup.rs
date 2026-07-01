@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::auth::principal::ProviderId;
 use crate::config::{AuthConfig, Config, ConfigError, DirectoryConfig};
 
-use super::http_host::DirectoryHttpPolicy;
+use super::http_host::{DirectoryHttpPolicy, DirectoryHttpTlsConfig};
 use super::wasm::{WasmDirectoryConnector, WasmDirectoryLimits};
 use super::{ConnectorInfo, DirectoryConnector};
 
@@ -45,17 +45,21 @@ async fn validate_auth_directory_startup(
 
     let resolved = ResolvedDirectoryStartupConfig::from_directory(directory, config_dir)?;
     let api_token = read_api_token_file(&resolved.api_token_file)?;
-    if let Some(tls_ca_file) = &resolved.tls_ca_file {
-        validate_tls_ca_file(tls_ca_file)?;
-    }
-    let http_policy =
-        DirectoryHttpPolicy::for_connector_origin(&resolved.base_origin, &api_token).map_err(
-            |err| {
-                DirectoryStartupError::Invalid(format!(
-                    "auth.directory.base_origin and auth.directory.api_token_file did not produce a valid directory HTTP policy: {err}"
-                ))
-            },
-        )?;
+    let tls_ca_pem = resolved
+        .tls_ca_file
+        .as_deref()
+        .map(read_tls_ca_file)
+        .transpose()?;
+    let http_policy = DirectoryHttpPolicy::for_connector_origin(
+        &resolved.base_origin,
+        &api_token,
+        directory_tls_config(directory, tls_ca_pem),
+    )
+    .map_err(|err| {
+        DirectoryStartupError::Invalid(format!(
+            "auth.directory.base_origin, auth.directory.api_token_file, and auth.directory TLS settings did not produce a valid directory HTTP policy: {err}"
+        ))
+    })?;
 
     let component_bytes = read_file(
         "auth.directory.component_path",
@@ -208,6 +212,19 @@ fn read_api_token_file(path: &Path) -> Result<String, DirectoryStartupError> {
     Ok(token.to_string())
 }
 
+fn directory_tls_config(
+    directory: &DirectoryConfig,
+    tls_ca_pem: Option<Vec<u8>>,
+) -> DirectoryHttpTlsConfig {
+    if directory.tls_insecure_skip_verify {
+        DirectoryHttpTlsConfig::InsecureSkipVerify
+    } else if let Some(pem) = tls_ca_pem {
+        DirectoryHttpTlsConfig::CustomCaPem(pem)
+    } else {
+        DirectoryHttpTlsConfig::SystemRoots
+    }
+}
+
 fn strip_one_final_line_ending(value: &str) -> &str {
     value
         .strip_suffix("\r\n")
@@ -215,7 +232,7 @@ fn strip_one_final_line_ending(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-fn validate_tls_ca_file(path: &Path) -> Result<(), DirectoryStartupError> {
+fn read_tls_ca_file(path: &Path) -> Result<Vec<u8>, DirectoryStartupError> {
     let bytes = read_file(
         "auth.directory.tls_ca_file",
         path,
@@ -259,7 +276,7 @@ fn validate_tls_ca_file(path: &Path) -> Result<(), DirectoryStartupError> {
             "auth.directory.tls_ca_file must contain at least one CA certificate".to_string(),
         ));
     }
-    Ok(())
+    Ok(bytes)
 }
 
 fn validate_connector_info(info: &ConnectorInfo) -> Result<(), DirectoryStartupError> {

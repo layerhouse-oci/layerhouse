@@ -171,12 +171,12 @@ fn directory_startup_rejects_empty_and_private_key_ca_files() {
     let temp = TempDir::new().unwrap();
     let ca_file = temp.path().join("ca.pem");
     std::fs::write(&ca_file, "").unwrap();
-    let empty = validate_tls_ca_file(&ca_file).unwrap_err().to_string();
+    let empty = read_tls_ca_file(&ca_file).unwrap_err().to_string();
     assert!(empty.contains("must not be empty"));
 
     let key = KeyPair::generate().unwrap();
     std::fs::write(&ca_file, key.serialize_pem()).unwrap();
-    let private_key = validate_tls_ca_file(&ca_file).unwrap_err().to_string();
+    let private_key = read_tls_ca_file(&ca_file).unwrap_err().to_string();
     assert!(private_key.contains("must not contain private keys"));
 }
 
@@ -186,7 +186,7 @@ fn directory_startup_accepts_pem_ca_bundle() {
     let ca_file = temp.path().join("ca.pem");
     std::fs::write(&ca_file, test_ca_pem()).unwrap();
 
-    validate_tls_ca_file(&ca_file).unwrap();
+    read_tls_ca_file(&ca_file).unwrap();
 }
 
 #[test]
