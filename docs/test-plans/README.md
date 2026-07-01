@@ -49,6 +49,7 @@ backlog so it is not a hidden production gap.
 | `09-mirror-proxy-production-workflow.md` | Mirror/proxy cache runtime | Local upstream mirror, proxy-cache pull-through, warm-up, push mirror, proxy validation |
 | `10-auth-workflows.md` | Auth runtime | Kanidm token auth, PAT lifecycle, OIDC dashboard login, and permission enforcement |
 | `11-air-gapped-k8s-bootstrap.md` | Kubernetes operator workflow | Air-gapped cert generation, native HTTPS, and containerd node trust |
+| `12-wasm-kanidm-directory-connector.md` | Directory connector runtime and Admin UX | WASM Kanidm connector build/package, compose, Docker, binary/VM, Helm wiring, Admin search/resolve, fail-fast startup, and runtime fallback |
 
 ## Coverage Status
 
@@ -73,6 +74,12 @@ backlog so it is not a hidden production gap.
 | Live JWKS restart resilience with IdP outage | Agent-executable manual | `AUTH-MANUAL-JWKS-RESUME-01` | P1 | Manual plan only; not automated because it intentionally stops the IdP during pod restart | `/tmp/orb-auth-jwks-resume-<run_id>` |
 | Cross-region JWKS failover endpoints | Agent-executable manual | `AUTH-MANUAL-JWKS-XREGION-01` | P2 | Manual plan only; not automated because it needs multiple reachable IdP/JWKS origins | `/tmp/orb-auth-jwks-xregion-<run_id>` |
 | Tagged GitHub release, GHCR image, chart archive, CLI binaries | Agent-executable manual | `REL-MANUAL-GHCR-01` | P0 | Manual plan only; not automated because it publishes release artifacts | `/tmp/orb-release-<run_id>` |
+| WASM Kanidm connector build/package and compose search/resolve smoke | Automated | `just connector-kanidm-build && just connector-kanidm-package && just compose-auth-directory-up` | P0 | Planned in `12-wasm-kanidm-directory-connector.md`; not implemented yet | `target/directory-smoke/<run_id>` |
+| Docker image with Kanidm directory connector artifact and checksum | Automated | `just connector-docker-check` | P0 | Planned in `12-wasm-kanidm-directory-connector.md`; not implemented yet | image inspection log |
+| VM package with Kanidm directory connector artifact and checksum | Automated | `just pack-binary` or release dry run | P0 | Planned in `12-wasm-kanidm-directory-connector.md`; not implemented yet | `dist/` package contents |
+| Helm install with Kanidm directory connector secret and artifact mount | Agent-executable manual | `DIR-MANUAL-KANIDM-HELM-01` | P1 | Manual plan only; implementation planned in `12-wasm-kanidm-directory-connector.md` | `/tmp/orb-dir-kanidm-<run_id>` |
+| VM install with Kanidm directory connector token and artifact | Agent-executable manual | `DIR-MANUAL-KANIDM-VM-01` | P1 | Manual plan only; implementation planned in `12-wasm-kanidm-directory-connector.md` | `/tmp/orb-dir-kanidm-vm-<run_id>` |
+| Connector digest rotation and fail-fast startup | Agent-executable manual | `DIR-MANUAL-DIGEST-ROTATE-01` | P2 | Manual plan only; implementation planned in `12-wasm-kanidm-directory-connector.md` | `/tmp/orb-dir-digest-<run_id>` |
 
 ## Non-Automated Coverage Registry
 
@@ -91,6 +98,9 @@ considered automated unless an agent runs the named plan and records evidence.
 | `AUTH-MANUAL-JWKS-RESUME-01` | restart from S3 last-good JWKS while IdP is down | Intentionally disrupts IdP availability during Kubernetes restart | `10-auth-workflows.md` |
 | `AUTH-MANUAL-JWKS-XREGION-01` | ordered internal issuer/JWKS endpoint failover | Requires multiple IdP/JWKS endpoints or a controlled proxy fixture | `10-auth-workflows.md` |
 | `AUTH-MANUAL-JWKS-01` | JWKS rotation and token expiry | Requires Kanidm key rotation flow and long token lifetime waits | `10-auth-workflows.md` |
+| `DIR-MANUAL-KANIDM-HELM-01` | Kubernetes install with Kanidm directory connector enabled | Needs a real cluster, connector artifact distribution path, and operator-provided Kanidm service token | `12-wasm-kanidm-directory-connector.md` |
+| `DIR-MANUAL-KANIDM-VM-01` | Virtual-machine install with Kanidm directory connector enabled | Needs a VM/systemd environment, connector artifact installation, and operator-provided Kanidm service token | `12-wasm-kanidm-directory-connector.md` |
+| `DIR-MANUAL-DIGEST-ROTATE-01` | Connector artifact digest rotation and fail-fast startup behavior | Requires pod restarts and intentionally mismatched connector artifacts | `12-wasm-kanidm-directory-connector.md` |
 | `REL-MANUAL-GHCR-01` | tagged GitHub release, GHCR image, chart archive, CLI binaries | Publishes public release artifacts and needs release credentials | `08-production-oci-workflows.md` |
 
 ## Execution Tiers

@@ -57,3 +57,5 @@ tempfile.workspace = true
 rcgen.workspace = true
 time.workspace = true
 httpmock.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true

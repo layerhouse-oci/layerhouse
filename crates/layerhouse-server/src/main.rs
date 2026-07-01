@@ -1,6 +1,8 @@
 mod auth;
 mod config;
 mod dashboard;
+#[cfg(test)]
+mod directory;
 mod error;
 mod gc;
 mod mirror;
