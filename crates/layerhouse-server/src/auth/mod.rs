@@ -1054,6 +1054,7 @@ mod tests {
             group_claim: "groups".to_string(),
             login_scopes: "openid profile email groups".to_string(),
             access_token_audience: None,
+            directory: None,
         }
     }
 

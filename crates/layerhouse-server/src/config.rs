@@ -1,9 +1,14 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::auth::principal::ProviderId;
+
+mod directory;
+
+pub use directory::DirectoryConfig;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -70,6 +75,8 @@ pub struct AuthConfig {
     pub login_scopes: String,
     #[serde(default)]
     pub access_token_audience: Option<String>,
+    #[serde(default)]
+    pub directory: Option<DirectoryConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -373,11 +380,17 @@ impl Config {
     pub fn from_file(path: &str) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
-        config.validate()?;
+        let config_dir = config_file_dir(path)?;
+        config.validate_with_config_dir(Some(&config_dir))?;
         Ok(config)
     }
 
+    #[cfg(test)]
     fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_with_config_dir(None)
+    }
+
+    fn validate_with_config_dir(&self, config_dir: Option<&Path>) -> Result<(), ConfigError> {
         if self.storage.s3.redirect.enabled
             && self.storage.s3.redirect.public_endpoint.trim().is_empty()
         {
@@ -426,7 +439,7 @@ impl Config {
             }
         }
         if let Some(auth) = &self.auth {
-            validate_auth_config(auth)?;
+            validate_auth_config(auth, config_dir)?;
         }
         Ok(())
     }
@@ -481,7 +494,7 @@ fn listeners_conflict(left: &str, right: &str) -> bool {
     }
 }
 
-fn validate_auth_config(auth: &AuthConfig) -> Result<(), ConfigError> {
+fn validate_auth_config(auth: &AuthConfig, config_dir: Option<&Path>) -> Result<(), ConfigError> {
     if auth.issuer_url.trim().is_empty()
         || auth.client_id.trim().is_empty()
         || auth.client_secret.trim().is_empty()
@@ -606,8 +619,24 @@ fn validate_auth_config(auth: &AuthConfig) -> Result<(), ConfigError> {
             "auth.login_scopes must not be empty".to_string(),
         ));
     }
+    if let Some(directory) = &auth.directory {
+        directory::validate_directory_config(directory, config_dir)?;
+    }
 
     Ok(())
+}
+
+fn config_file_dir(path: &str) -> Result<PathBuf, ConfigError> {
+    let path = Path::new(path);
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let dir = match parent {
+        Some(parent) if parent.is_absolute() => parent.to_path_buf(),
+        Some(parent) => std::env::current_dir()?.join(parent),
+        None => std::env::current_dir()?,
+    };
+    Ok(dir)
 }
 
 #[cfg(test)]
@@ -668,6 +697,7 @@ mod tests {
             group_claim: "groups".to_string(),
             login_scopes: "openid profile email groups".to_string(),
             access_token_audience: None,
+            directory: None,
         }
     }
 
@@ -757,6 +787,7 @@ mod tests {
             group_claim: "groups".to_string(),
             login_scopes: "openid profile email groups".to_string(),
             access_token_audience: None,
+            directory: None,
         });
         assert!(config.validate().is_ok());
 
@@ -858,6 +889,7 @@ mod tests {
             group_claim: "groups".to_string(),
             login_scopes: "openid profile email groups".to_string(),
             access_token_audience: None,
+            directory: None,
         };
 
         assert_eq!(
