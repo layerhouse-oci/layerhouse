@@ -1,0 +1,19 @@
+[package]
+name = "fake-directory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen.workspace = true
+
+[package.metadata.component]
+package = "layerhouse:fake-directory"
+
+[package.metadata.component.target]
+path = "../../../wit"
+world = "directory-connector"
