@@ -49,6 +49,7 @@ rand.workspace = true
 cedar-policy.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
+wasmtime-wasi-http.workspace = true
 
 [build-dependencies]
 walkdir.workspace = true

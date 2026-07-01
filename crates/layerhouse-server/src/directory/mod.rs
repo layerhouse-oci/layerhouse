@@ -1,3 +1,4 @@
+mod http_host;
 mod startup;
 mod test_api;
 mod wasm;
