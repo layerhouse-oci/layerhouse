@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::auth::principal::ProviderId;
 use crate::config::{AuthConfig, Config, ConfigError, DirectoryConfig};
 
+use super::http_host::DirectoryHttpPolicy;
 use super::wasm::{WasmDirectoryConnector, WasmDirectoryLimits};
 use super::{ConnectorInfo, DirectoryConnector};
 
@@ -43,10 +44,18 @@ async fn validate_auth_directory_startup(
     }
 
     let resolved = ResolvedDirectoryStartupConfig::from_directory(directory, config_dir)?;
-    validate_api_token_file(&resolved.api_token_file)?;
+    let api_token = read_api_token_file(&resolved.api_token_file)?;
     if let Some(tls_ca_file) = &resolved.tls_ca_file {
         validate_tls_ca_file(tls_ca_file)?;
     }
+    let http_policy =
+        DirectoryHttpPolicy::for_connector_origin(&resolved.base_origin, &api_token).map_err(
+            |err| {
+                DirectoryStartupError::Invalid(format!(
+                    "auth.directory.base_origin and auth.directory.api_token_file did not produce a valid directory HTTP policy: {err}"
+                ))
+            },
+        )?;
 
     let component_bytes = read_file(
         "auth.directory.component_path",
@@ -55,13 +64,14 @@ async fn validate_auth_directory_startup(
     )?;
     validate_component_digest(&component_bytes, &resolved.component_sha256)?;
 
-    let connector = WasmDirectoryConnector::from_binary(
+    let connector = WasmDirectoryConnector::from_binary_with_http_policy(
         &component_bytes,
         WasmDirectoryLimits {
             connector_info_timeout: Duration::from_millis(directory.timeout_ms()),
             memory_limit_bytes: directory.memory_limit_bytes(),
             max_concurrent_calls: directory.max_concurrent_calls(),
         },
+        http_policy,
     )
     .map_err(|err| {
         DirectoryStartupError::Invalid(format!(
@@ -90,6 +100,7 @@ async fn validate_auth_directory_startup(
 struct ResolvedDirectoryStartupConfig {
     component_path: PathBuf,
     component_sha256: String,
+    base_origin: String,
     api_token_file: PathBuf,
     tls_ca_file: Option<PathBuf>,
 }
@@ -112,10 +123,15 @@ impl ResolvedDirectoryStartupConfig {
             .component_sha256
             .clone()
             .ok_or_else(|| missing_field("auth.directory.component_sha256"))?;
+        let base_origin = directory
+            .base_origin
+            .clone()
+            .ok_or_else(|| missing_field("auth.directory.base_origin"))?;
 
         Ok(Self {
             component_path,
             component_sha256,
+            base_origin,
             api_token_file,
             tls_ca_file,
         })
@@ -163,7 +179,7 @@ fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
-fn validate_api_token_file(path: &Path) -> Result<(), DirectoryStartupError> {
+fn read_api_token_file(path: &Path) -> Result<String, DirectoryStartupError> {
     let content = std::fs::read_to_string(path).map_err(|err| {
         DirectoryStartupError::Invalid(format!(
             "auth.directory.api_token_file could not read token file at {}: {err}. Ensure the file contains the raw Kanidm bearer token only.",
@@ -189,7 +205,7 @@ fn validate_api_token_file(path: &Path) -> Result<(), DirectoryStartupError> {
         ));
     }
 
-    Ok(())
+    Ok(token.to_string())
 }
 
 fn strip_one_final_line_ending(value: &str) -> &str {

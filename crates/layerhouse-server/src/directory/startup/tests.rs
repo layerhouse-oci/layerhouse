@@ -158,12 +158,11 @@ fn directory_startup_allows_one_final_token_line_ending_only() {
     let temp = TempDir::new().unwrap();
     let token_file = temp.path().join("token");
     std::fs::write(&token_file, "kanidm-token\r\n").unwrap();
-    validate_api_token_file(&token_file).unwrap();
+    let token = read_api_token_file(&token_file).unwrap();
+    assert_eq!(token, "kanidm-token");
 
     std::fs::write(&token_file, "kanidm-token\n\n").unwrap();
-    let error = validate_api_token_file(&token_file)
-        .unwrap_err()
-        .to_string();
+    let error = read_api_token_file(&token_file).unwrap_err().to_string();
     assert!(error.contains("must not contain whitespace"));
 }
 

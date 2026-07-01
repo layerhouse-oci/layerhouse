@@ -15,7 +15,10 @@ use tokio::time::Instant;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi_http::WasiHttpCtx;
+use wasmtime_wasi_http::p2::{WasiHttpCtxView, WasiHttpView};
 
+use super::http_host::{DirectoryHttpHooks, DirectoryHttpPolicy};
 use super::{ConnectorInfo, DirectoryConnector, DirectoryError, sanitize_connector_error_message};
 
 #[derive(Clone, Debug)]
@@ -40,19 +43,32 @@ pub struct WasmDirectoryConnector {
     component: Component,
     linker: Linker<ConnectorStore>,
     limits: WasmDirectoryLimits,
+    http_policy: DirectoryHttpPolicy,
     semaphore: Arc<Semaphore>,
 }
 
 struct ConnectorStore {
     wasi: WasiCtx,
+    http: WasiHttpCtx,
+    http_hooks: DirectoryHttpHooks,
     table: ResourceTable,
     limits: StoreLimits,
 }
 
 impl ConnectorStore {
-    fn new(memory_limit_bytes: usize) -> Self {
+    fn new(
+        memory_limit_bytes: usize,
+        http_policy: DirectoryHttpPolicy,
+        call_timeout: Duration,
+    ) -> Self {
+        let http_hooks = DirectoryHttpHooks::new(http_policy, call_timeout);
+        let mut http = WasiHttpCtx::new();
+        http.set_field_size_limit(http_hooks.header_limit_bytes());
+
         Self {
             wasi: WasiCtxBuilder::new().build(),
+            http,
+            http_hooks,
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new()
                 .memory_size(memory_limit_bytes)
@@ -70,8 +86,22 @@ impl WasiView for ConnectorStore {
     }
 }
 
+impl WasiHttpView for ConnectorStore {
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.http_hooks,
+        }
+    }
+}
+
 impl WasmDirectoryConnector {
-    pub fn from_binary(bytes: &[u8], limits: WasmDirectoryLimits) -> Result<Self, DirectoryError> {
+    pub(crate) fn from_binary_with_http_policy(
+        bytes: &[u8],
+        limits: WasmDirectoryLimits,
+        http_policy: DirectoryHttpPolicy,
+    ) -> Result<Self, DirectoryError> {
         if limits.memory_limit_bytes == 0 {
             return Err(DirectoryError::InvalidQuery(
                 "memory_limit_bytes must be positive".to_string(),
@@ -90,11 +120,14 @@ impl WasmDirectoryConnector {
         let component = Component::from_binary(&engine, bytes).map_err(host_invalid_response)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(host_internal)?;
+        wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)
+            .map_err(host_internal)?;
 
         Ok(Self {
             engine,
             component,
             linker,
+            http_policy,
             semaphore: Arc::new(Semaphore::new(limits.max_concurrent_calls)),
             limits,
         })
@@ -102,10 +135,15 @@ impl WasmDirectoryConnector {
 
     async fn instantiate(
         &self,
+        call_timeout: Duration,
     ) -> Result<(Store<ConnectorStore>, bindings::DirectoryConnector), DirectoryError> {
         let mut store = Store::new(
             &self.engine,
-            ConnectorStore::new(self.limits.memory_limit_bytes),
+            ConnectorStore::new(
+                self.limits.memory_limit_bytes,
+                self.http_policy.clone(),
+                call_timeout,
+            ),
         );
         store.limiter(|state| &mut state.limits);
 
@@ -120,13 +158,14 @@ impl WasmDirectoryConnector {
         Ok((store, connector))
     }
 
-    async fn with_deadline<F, T>(
+    async fn with_deadline<F, Fut, T>(
         &self,
         timeout: Duration,
         operation: F,
     ) -> Result<T, DirectoryError>
     where
-        F: Future<Output = Result<T, DirectoryError>>,
+        F: FnOnce(Duration) -> Fut,
+        Fut: Future<Output = Result<T, DirectoryError>>,
     {
         let started = Instant::now();
         let permit = tokio::time::timeout(timeout, self.semaphore.acquire())
@@ -138,15 +177,18 @@ impl WasmDirectoryConnector {
             .checked_sub(started.elapsed())
             .ok_or_else(|| DirectoryError::Timeout("connector call timed out".into()))?;
 
-        let result = tokio::time::timeout(remaining, operation)
+        let result = tokio::time::timeout(remaining, operation(remaining))
             .await
             .map_err(|_| DirectoryError::Timeout("connector call timed out".into()))?;
         drop(permit);
         result
     }
 
-    async fn do_connector_info(&self) -> Result<ConnectorInfo, DirectoryError> {
-        let (mut store, connector) = self.instantiate().await?;
+    async fn do_connector_info(
+        &self,
+        call_timeout: Duration,
+    ) -> Result<ConnectorInfo, DirectoryError> {
+        let (mut store, connector) = self.instantiate(call_timeout).await?;
         let info = connector
             .call_connector_info(&mut store)
             .await
@@ -158,8 +200,10 @@ impl WasmDirectoryConnector {
 #[async_trait::async_trait]
 impl DirectoryConnector for WasmDirectoryConnector {
     async fn connector_info(&self) -> Result<ConnectorInfo, DirectoryError> {
-        self.with_deadline(self.limits.connector_info_timeout, self.do_connector_info())
-            .await
+        self.with_deadline(self.limits.connector_info_timeout, |remaining| {
+            self.do_connector_info(remaining)
+        })
+        .await
     }
 }
 
@@ -222,6 +266,8 @@ mod test_support {
     use std::path::Path;
     use std::time::Duration;
 
+    use crate::directory::http_host::DirectoryHttpPolicy;
+
     use super::super::test_api::{
         ConnectorContext, DirectoryConnectorTestExt, DirectoryPrincipal, HealthResponse,
         HealthState, PrincipalKind, PrincipalRef, PrincipalStatus, ResolveFailure, ResolveRequest,
@@ -238,13 +284,13 @@ mod test_support {
             limits: WasmDirectoryLimits,
         ) -> Result<Self, DirectoryError> {
             let bytes = std::fs::read(path).map_err(host_invalid_response)?;
-            Self::from_binary(&bytes, limits)
+            Self::from_binary_with_http_policy(&bytes, limits, DirectoryHttpPolicy::deny_all())
         }
 
         async fn do_health(&self, ctx: ConnectorContext) -> Result<HealthResponse, DirectoryError> {
             let timeout = Duration::from_millis(ctx.timeout_ms);
-            self.with_deadline(timeout, async move {
-                let (mut store, connector) = self.instantiate().await?;
+            self.with_deadline(timeout, |remaining| async move {
+                let (mut store, connector) = self.instantiate(remaining).await?;
                 let response = connector
                     .call_health(&mut store, &ctx.into())
                     .await
@@ -261,8 +307,8 @@ mod test_support {
             request: SearchRequest,
         ) -> Result<SearchResponse, DirectoryError> {
             let timeout = Duration::from_millis(ctx.timeout_ms);
-            self.with_deadline(timeout, async move {
-                let (mut store, connector) = self.instantiate().await?;
+            self.with_deadline(timeout, |remaining| async move {
+                let (mut store, connector) = self.instantiate(remaining).await?;
                 let response = connector
                     .call_search_principals(&mut store, &ctx.into(), &request.into())
                     .await
@@ -279,8 +325,8 @@ mod test_support {
             request: ResolveRequest,
         ) -> Result<ResolveResponse, DirectoryError> {
             let timeout = Duration::from_millis(ctx.timeout_ms);
-            self.with_deadline(timeout, async move {
-                let (mut store, connector) = self.instantiate().await?;
+            self.with_deadline(timeout, |remaining| async move {
+                let (mut store, connector) = self.instantiate(remaining).await?;
                 let response = connector
                     .call_resolve_principals(&mut store, &ctx.into(), &request.into())
                     .await

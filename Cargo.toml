@@ -69,6 +69,7 @@ httpmock = "0.7"
 cedar-policy = { version = "4.11.1", default-features = false }
 wasmtime = "44.0.0"
 wasmtime-wasi = "44.0.0"
+wasmtime-wasi-http = "44.0.0"
 wit-bindgen = "0.57.1"
 
 [profile.release]
