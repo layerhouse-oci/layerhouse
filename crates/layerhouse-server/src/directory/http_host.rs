@@ -1,14 +1,25 @@
+use std::io::BufReader;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, FORWARDED, HOST};
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 use http_body_util::{BodyExt, Limited};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use thiserror::Error;
+use tokio::net::TcpStream;
+use tokio::time::timeout;
+use tokio_rustls::TlsConnector;
 use wasmtime_wasi_http::DEFAULT_FORBIDDEN_HEADERS;
-use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
+use wasmtime_wasi_http::io::TokioIo;
+use wasmtime_wasi_http::p2::bindings::http::types::{DnsErrorPayload, ErrorCode};
 use wasmtime_wasi_http::p2::body::HyperOutgoingBody;
-use wasmtime_wasi_http::p2::types::{HostFutureIncomingResponse, OutgoingRequestConfig};
-use wasmtime_wasi_http::p2::{HttpResult, WasiHttpHooks, default_send_request};
+use wasmtime_wasi_http::p2::types::{
+    HostFutureIncomingResponse, IncomingResponse, OutgoingRequestConfig,
+};
+use wasmtime_wasi_http::p2::{HttpResult, WasiHttpHooks, hyper_request_error};
 
 pub(crate) const DIRECTORY_HTTP_HEADER_LIMIT_BYTES: usize = 16 * 1024;
 pub(crate) const DIRECTORY_HTTP_BODY_LIMIT_BYTES: usize = 1024 * 1024;
@@ -18,6 +29,7 @@ const DIRECTORY_HTTP_BODY_CHUNK_LIMIT_BYTES: usize = 64 * 1024;
 pub(crate) struct DirectoryHttpPolicy {
     allowed_origin: Option<AllowedOrigin>,
     authorization: Option<HeaderValue>,
+    tls_policy: DirectoryTlsPolicy,
     header_limit_bytes: usize,
     body_limit_bytes: usize,
 }
@@ -26,6 +38,19 @@ pub(crate) struct DirectoryHttpPolicy {
 struct AllowedOrigin {
     scheme: http::uri::Scheme,
     authority: http::uri::Authority,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum DirectoryHttpTlsConfig {
+    SystemRoots,
+    CustomCaPem(Vec<u8>),
+    InsecureSkipVerify,
+}
+
+#[derive(Clone, Debug)]
+enum DirectoryTlsPolicy {
+    PlainHttp,
+    Tls(Arc<ClientConfig>),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -40,6 +65,10 @@ pub(crate) enum DirectoryHttpPolicyError {
     OriginMismatch,
     #[error("directory connector HTTP request TLS mode does not match its origin")]
     TlsMismatch,
+    #[error("directory connector TLS trust settings are invalid for its origin")]
+    InvalidTlsTrust,
+    #[error("directory connector custom CA bundle is invalid")]
+    InvalidCaBundle,
     #[error("directory connector HTTP request contains forbidden header {0}")]
     ForbiddenHeader(String),
     #[error("directory connector HTTP request host header is invalid")]
@@ -62,6 +91,7 @@ impl DirectoryHttpPolicy {
         Self {
             allowed_origin: None,
             authorization: None,
+            tls_policy: DirectoryTlsPolicy::PlainHttp,
             header_limit_bytes: DIRECTORY_HTTP_HEADER_LIMIT_BYTES,
             body_limit_bytes: DIRECTORY_HTTP_BODY_LIMIT_BYTES,
         }
@@ -70,6 +100,7 @@ impl DirectoryHttpPolicy {
     pub(crate) fn for_connector_origin(
         base_origin: &str,
         api_token: &str,
+        tls_config: DirectoryHttpTlsConfig,
     ) -> Result<Self, DirectoryHttpPolicyError> {
         if base_origin != base_origin.trim() || base_origin.contains('#') {
             return Err(DirectoryHttpPolicyError::InvalidBaseOrigin);
@@ -119,10 +150,12 @@ impl DirectoryHttpPolicy {
                 max: DIRECTORY_HTTP_HEADER_LIMIT_BYTES,
             });
         }
+        let tls_policy = DirectoryTlsPolicy::from_origin(uri.scheme_str(), tls_config)?;
 
         Ok(Self {
             allowed_origin: Some(AllowedOrigin { scheme, authority }),
             authorization: Some(authorization),
+            tls_policy,
             header_limit_bytes: DIRECTORY_HTTP_HEADER_LIMIT_BYTES,
             body_limit_bytes: DIRECTORY_HTTP_BODY_LIMIT_BYTES,
         })
@@ -220,6 +253,132 @@ impl DirectoryHttpPolicy {
     }
 }
 
+impl DirectoryTlsPolicy {
+    fn from_origin(
+        scheme: Option<&str>,
+        tls_config: DirectoryHttpTlsConfig,
+    ) -> Result<Self, DirectoryHttpPolicyError> {
+        match (scheme, tls_config) {
+            (Some("http"), DirectoryHttpTlsConfig::SystemRoots) => Ok(Self::PlainHttp),
+            (Some("http"), _) => Err(DirectoryHttpPolicyError::InvalidTlsTrust),
+            (Some("https"), DirectoryHttpTlsConfig::SystemRoots) => Ok(Self::Tls(Arc::new(
+                system_roots_client_config()
+                    .map_err(|_| DirectoryHttpPolicyError::InvalidTlsTrust)?,
+            ))),
+            (Some("https"), DirectoryHttpTlsConfig::CustomCaPem(pem)) => {
+                Ok(Self::Tls(Arc::new(custom_ca_client_config(&pem)?)))
+            }
+            (Some("https"), DirectoryHttpTlsConfig::InsecureSkipVerify) => Ok(Self::Tls(Arc::new(
+                insecure_skip_verify_client_config()
+                    .map_err(|_| DirectoryHttpPolicyError::InvalidTlsTrust)?,
+            ))),
+            _ => Err(DirectoryHttpPolicyError::InvalidBaseOrigin),
+        }
+    }
+}
+
+fn system_roots_client_config() -> Result<ClientConfig, rustls::Error> {
+    let root_cert_store = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    Ok(
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(root_cert_store)
+            .with_no_client_auth(),
+    )
+}
+
+fn custom_ca_client_config(pem: &[u8]) -> Result<ClientConfig, DirectoryHttpPolicyError> {
+    let mut reader = BufReader::new(pem);
+    let mut certificates = Vec::new();
+    loop {
+        match rustls_pemfile::read_one(&mut reader)
+            .map_err(|_| DirectoryHttpPolicyError::InvalidCaBundle)?
+        {
+            Some(rustls_pemfile::Item::X509Certificate(cert)) => certificates.push(cert),
+            Some(_) => return Err(DirectoryHttpPolicyError::InvalidCaBundle),
+            None => break,
+        }
+    }
+    if certificates.is_empty() {
+        return Err(DirectoryHttpPolicyError::InvalidCaBundle);
+    }
+
+    let mut root_cert_store = RootCertStore::empty();
+    let (valid, invalid) = root_cert_store.add_parsable_certificates(certificates);
+    if valid == 0 || invalid > 0 {
+        return Err(DirectoryHttpPolicyError::InvalidCaBundle);
+    }
+
+    Ok(
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|_| DirectoryHttpPolicyError::InvalidTlsTrust)?
+            .with_root_certificates(root_cert_store)
+            .with_no_client_auth(),
+    )
+}
+
+fn insecure_skip_verify_client_config() -> Result<ClientConfig, rustls::Error> {
+    Ok(
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
+            .with_no_client_auth(),
+    )
+}
+
+#[derive(Debug)]
+struct InsecureServerCertVerifier;
+
+impl ServerCertVerifier for InsecureServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA256,
+        ]
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct DirectoryHttpHooks {
     policy: DirectoryHttpPolicy,
@@ -299,7 +458,11 @@ impl WasiHttpHooks for DirectoryHttpHooks {
         let (request, config) = self
             .prepare_request(request, config)
             .map_err(directory_policy_error_code)?;
-        Ok(default_send_request(request, config))
+        let tls_policy = self.policy.tls_policy.clone();
+        let handle = wasmtime_wasi::runtime::spawn(async move {
+            Ok(send_request_with_tls_policy(request, config, tls_policy).await)
+        });
+        Ok(HostFutureIncomingResponse::pending(handle))
     }
 
     fn is_forbidden_header(&mut self, name: &HeaderName) -> bool {
@@ -313,6 +476,120 @@ impl WasiHttpHooks for DirectoryHttpHooks {
     fn outgoing_body_chunk_size(&mut self) -> usize {
         DIRECTORY_HTTP_BODY_CHUNK_LIMIT_BYTES.min(self.policy.body_limit_bytes)
     }
+}
+
+async fn send_request_with_tls_policy(
+    mut request: hyper::Request<HyperOutgoingBody>,
+    OutgoingRequestConfig {
+        use_tls,
+        connect_timeout,
+        first_byte_timeout,
+        between_bytes_timeout,
+    }: OutgoingRequestConfig,
+    tls_policy: DirectoryTlsPolicy,
+) -> Result<IncomingResponse, ErrorCode> {
+    let authority = request
+        .uri()
+        .authority()
+        .ok_or(ErrorCode::HttpRequestUriInvalid)?
+        .clone();
+    let connect_authority = match authority.port() {
+        Some(_) => authority.to_string(),
+        None if use_tls => format!("{}:443", authority.as_str()),
+        None => format!("{}:80", authority.as_str()),
+    };
+
+    let tcp_stream = timeout(connect_timeout, TcpStream::connect(&connect_authority))
+        .await
+        .map_err(|_| ErrorCode::ConnectionTimeout)?
+        .map_err(tcp_error_code)?;
+
+    let (mut sender, worker) = if use_tls {
+        let DirectoryTlsPolicy::Tls(client_config) = tls_policy else {
+            return Err(ErrorCode::TlsProtocolError);
+        };
+        let server_name = ServerName::try_from(authority.host().to_string())
+            .map_err(|_| dns_error("invalid dns name"))?;
+        let connector = TlsConnector::from(client_config);
+        let stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .map_err(|err| {
+                tracing::warn!("directory connector TLS protocol error: {err:?}");
+                ErrorCode::TlsProtocolError
+            })?;
+        let stream = TokioIo::new(stream);
+
+        let (sender, conn) = timeout(
+            connect_timeout,
+            hyper::client::conn::http1::handshake(stream),
+        )
+        .await
+        .map_err(|_| ErrorCode::ConnectionTimeout)?
+        .map_err(hyper_request_error)?;
+        let worker = wasmtime_wasi::runtime::spawn(async move {
+            if let Err(err) = conn.await {
+                tracing::warn!("directory connector HTTP connection error: {err}");
+            }
+        });
+        (sender, worker)
+    } else {
+        let stream = TokioIo::new(tcp_stream);
+        let (sender, conn) = timeout(
+            connect_timeout,
+            hyper::client::conn::http1::handshake(stream),
+        )
+        .await
+        .map_err(|_| ErrorCode::ConnectionTimeout)?
+        .map_err(hyper_request_error)?;
+        let worker = wasmtime_wasi::runtime::spawn(async move {
+            if let Err(err) = conn.await {
+                tracing::warn!("directory connector HTTP connection error: {err}");
+            }
+        });
+        (sender, worker)
+    };
+
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    *request.uri_mut() = http::Uri::builder()
+        .path_and_query(path_and_query)
+        .build()
+        .map_err(|_| ErrorCode::HttpRequestUriInvalid)?;
+
+    let resp = timeout(first_byte_timeout, sender.send_request(request))
+        .await
+        .map_err(|_| ErrorCode::ConnectionReadTimeout)?
+        .map_err(hyper_request_error)?
+        .map(|body| body.map_err(hyper_request_error).boxed_unsync());
+
+    Ok(IncomingResponse {
+        resp,
+        worker: Some(worker),
+        between_bytes_timeout,
+    })
+}
+
+fn tcp_error_code(error: std::io::Error) -> ErrorCode {
+    if error.kind() == std::io::ErrorKind::AddrNotAvailable
+        || error
+            .to_string()
+            .starts_with("failed to lookup address information")
+    {
+        dns_error("address not available")
+    } else {
+        ErrorCode::ConnectionRefused
+    }
+}
+
+fn dns_error(message: impl Into<String>) -> ErrorCode {
+    ErrorCode::DnsError(DnsErrorPayload {
+        rcode: Some(message.into()),
+        info_code: Some(0),
+    })
 }
 
 fn cap_timeout(timeout: Duration, cap: Duration) -> Duration {
@@ -338,6 +615,8 @@ fn directory_policy_error_code(error: DirectoryHttpPolicyError) -> ErrorCode {
         | DirectoryHttpPolicyError::InvalidAuthorizationHeader
         | DirectoryHttpPolicyError::OriginMismatch
         | DirectoryHttpPolicyError::TlsMismatch
+        | DirectoryHttpPolicyError::InvalidTlsTrust
+        | DirectoryHttpPolicyError::InvalidCaBundle
         | DirectoryHttpPolicyError::ForbiddenHeader(_)
         | DirectoryHttpPolicyError::InvalidHostHeader
         | DirectoryHttpPolicyError::InvalidContentLength
@@ -349,16 +628,29 @@ fn directory_policy_error_code(error: DirectoryHttpPolicyError) -> ErrorCode {
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
 
     use bytes::Bytes;
     use http::header::HeaderName;
-    use http_body_util::Empty;
+    use http_body_util::{Empty, Full};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
+        ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    };
+    use rustls::ServerConfig;
+    use time::{Duration as TimeDuration, OffsetDateTime};
+    use tokio::sync::oneshot;
+    use tokio_rustls::TlsAcceptor;
 
     use super::*;
 
     fn policy() -> DirectoryHttpPolicy {
-        DirectoryHttpPolicy::for_connector_origin("https://kanidm.example.test:8443", "secret")
-            .unwrap()
+        DirectoryHttpPolicy::for_connector_origin(
+            "https://kanidm.example.test:8443",
+            "secret",
+            DirectoryHttpTlsConfig::SystemRoots,
+        )
+        .unwrap()
     }
 
     fn hooks() -> DirectoryHttpHooks {
@@ -384,6 +676,14 @@ mod tests {
         hyper::Request::builder()
             .uri(uri)
             .header(HOST, "kanidm.example.test:8443")
+            .body(empty_body())
+            .unwrap()
+    }
+
+    fn request_with_host(uri: String, host: String) -> hyper::Request<HyperOutgoingBody> {
+        hyper::Request::builder()
+            .uri(uri)
+            .header(HOST, host)
             .body(empty_body())
             .unwrap()
     }
@@ -526,5 +826,209 @@ mod tests {
         ));
 
         assert_eq!(error, DirectoryHttpPolicyError::EgressNotConfigured);
+    }
+
+    #[test]
+    fn directory_http_host_rejects_ca_config_for_plain_http() {
+        let error = DirectoryHttpPolicy::for_connector_origin(
+            "http://kanidm.example.test:8080",
+            "secret",
+            DirectoryHttpTlsConfig::InsecureSkipVerify,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, DirectoryHttpPolicyError::InvalidTlsTrust);
+    }
+
+    #[test]
+    fn directory_http_host_rejects_invalid_custom_ca() {
+        let error = DirectoryHttpPolicy::for_connector_origin(
+            "https://kanidm.example.test:8443",
+            "secret",
+            DirectoryHttpTlsConfig::CustomCaPem(b"not pem".to_vec()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, DirectoryHttpPolicyError::InvalidCaBundle);
+    }
+
+    #[test]
+    fn directory_http_host_accepts_insecure_tls_for_https() {
+        DirectoryHttpPolicy::for_connector_origin(
+            "https://kanidm.example.test:8443",
+            "secret",
+            DirectoryHttpTlsConfig::InsecureSkipVerify,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn directory_http_host_sends_https_with_custom_ca() {
+        let tls = test_tls_config("localhost");
+        let (base_origin, authorization_rx) = spawn_tls_http_server(tls.server_config).await;
+        let policy = DirectoryHttpPolicy::for_connector_origin(
+            &base_origin,
+            "secret",
+            DirectoryHttpTlsConfig::CustomCaPem(tls.ca_pem),
+        )
+        .unwrap();
+
+        let hooks = DirectoryHttpHooks::new(policy, Duration::from_millis(2_000));
+        let authority = base_origin.trim_start_matches("https://").to_string();
+        let (request, config) = hooks
+            .prepare_request(
+                request_with_host(format!("{base_origin}/api/person"), authority),
+                config(true),
+            )
+            .unwrap();
+        let response =
+            send_request_with_tls_policy(request, config, hooks.policy.tls_policy.clone())
+                .await
+                .unwrap();
+
+        assert_eq!(response.resp.status(), http::StatusCode::OK);
+        let authorization = tokio::time::timeout(Duration::from_secs(1), authorization_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(authorization.as_deref(), Some("Bearer secret"));
+    }
+
+    #[tokio::test]
+    async fn directory_http_host_sends_https_with_insecure_tls() {
+        let tls = test_tls_config("localhost");
+        let (base_origin, authorization_rx) = spawn_tls_http_server(tls.server_config).await;
+        let policy = DirectoryHttpPolicy::for_connector_origin(
+            &base_origin,
+            "secret",
+            DirectoryHttpTlsConfig::InsecureSkipVerify,
+        )
+        .unwrap();
+
+        let hooks = DirectoryHttpHooks::new(policy, Duration::from_millis(2_000));
+        let authority = base_origin.trim_start_matches("https://").to_string();
+        let (request, config) = hooks
+            .prepare_request(
+                request_with_host(format!("{base_origin}/api/person"), authority),
+                config(true),
+            )
+            .unwrap();
+        let response =
+            send_request_with_tls_policy(request, config, hooks.policy.tls_policy.clone())
+                .await
+                .unwrap();
+
+        assert_eq!(response.resp.status(), http::StatusCode::OK);
+        let authorization = tokio::time::timeout(Duration::from_secs(1), authorization_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(authorization.as_deref(), Some("Bearer secret"));
+    }
+
+    struct TestTlsConfig {
+        ca_pem: Vec<u8>,
+        server_config: ServerConfig,
+    }
+
+    fn test_tls_config(host: &str) -> TestTlsConfig {
+        let now = OffsetDateTime::now_utc();
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params =
+            CertificateParams::new(vec!["layerhouse-test-ca.local".to_string()]).unwrap();
+        ca_params.distinguished_name = DistinguishedName::new();
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "layerhouse-test-ca");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::CrlSign,
+        ];
+        ca_params.not_before = now - TimeDuration::days(1);
+        ca_params.not_after = now + TimeDuration::days(30);
+        let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+
+        let leaf_key = KeyPair::generate().unwrap();
+        let mut leaf_params = CertificateParams::new(vec![host.to_string()]).unwrap();
+        leaf_params.distinguished_name = DistinguishedName::new();
+        leaf_params
+            .distinguished_name
+            .push(DnType::CommonName, host.to_string());
+        leaf_params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        leaf_params.not_before = now - TimeDuration::days(1);
+        leaf_params.not_after = now + TimeDuration::days(30);
+        let leaf = leaf_params.signed_by(&leaf_key, &ca).unwrap();
+
+        let leaf_pem = leaf.pem();
+        let mut cert_reader = BufReader::new(leaf_pem.as_bytes());
+        let certs = rustls_pemfile::certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key_pem = leaf_key.serialize_pem();
+        let mut key_reader = BufReader::new(key_pem.as_bytes());
+        let key = rustls_pemfile::private_key(&mut key_reader)
+            .unwrap()
+            .unwrap();
+        let server_config =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .unwrap();
+
+        TestTlsConfig {
+            ca_pem: ca.pem().into_bytes(),
+            server_config,
+        }
+    }
+
+    async fn spawn_tls_http_server(
+        server_config: ServerConfig,
+    ) -> (String, oneshot::Receiver<Option<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (authorization_tx, authorization_rx) = oneshot::channel();
+        let authorization_tx = Arc::new(Mutex::new(Some(authorization_tx)));
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(stream).await.unwrap();
+            let authorization_tx = authorization_tx.clone();
+            let service = hyper::service::service_fn(
+                move |request: hyper::Request<hyper::body::Incoming>| {
+                    let authorization_tx = authorization_tx.clone();
+                    async move {
+                        let authorization = request
+                            .headers()
+                            .get(AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(ToString::to_string);
+                        if let Some(sender) = authorization_tx.lock().unwrap().take() {
+                            let _ = sender.send(authorization);
+                        }
+                        Ok::<_, Infallible>(hyper::Response::new(Full::new(Bytes::from_static(
+                            b"ok",
+                        ))))
+                    }
+                },
+            );
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .unwrap();
+        });
+
+        (
+            format!("https://localhost:{}", addr.port()),
+            authorization_rx,
+        )
     }
 }

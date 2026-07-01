@@ -85,7 +85,7 @@ Layerhouse directory types at the WASM boundary.
 |---|---|---|---|---|---|
 | WIT ABI round trip with `crates/connectors/fake-directory` | Automated | `cargo test -p layerhouse-server directory_wasm` | P0 | Implemented; fake compiled component roundtrip covered by connector validation | command log |
 | Config/startup matrix for disabled directory, enabled missing component, digest mismatch, ABI mismatch, and token/base-origin validation | Automated | `cargo test -p layerhouse-server directory_config && cargo test -p layerhouse-server directory_startup` | P0 | Partial; config schema plus startup file/digest/ABI/provider/token/CA content checks covered, full server process smoke pending | command log |
-| Host-mediated WASI HTTP SSRF/header/body protections | Automated | `cargo test -p layerhouse-server directory_http_host` | P0 | Implemented; direct host policy tests cover origin/TLS checks, forbidden headers, header/body bounds, token injection, and timeout capping. End-to-end Kanidm HTTP smoke remains under the compose search/resolve case. | command log |
+| Host-mediated WASI HTTP SSRF/header/body/TLS protections | Automated | `cargo test -p layerhouse-server directory_http_host` | P0 | Implemented; direct host policy tests cover origin/TLS checks, forbidden headers, header/body bounds, token injection, timeout capping, custom CA HTTPS transport, and insecure HTTPS transport. End-to-end Kanidm HTTP smoke remains under the compose search/resolve case. | command log |
 | Kanidm component build and checksum package | Automated | `just connector-kanidm-build && just connector-kanidm-package` | P0 | Planned; not implemented yet | `target/connectors/` |
 | Compose Kanidm search/resolve smoke | Automated | `just compose-auth-directory-up` | P0 | Planned; not implemented yet | `target/directory-smoke/<run_id>` |
 | Admin directory route authorization and partial resolve envelope | Automated | `cargo test -p layerhouse-server directory_routes` | P0 | Planned; not implemented yet | command log |
@@ -356,6 +356,8 @@ Guest attempts must fail for:
 Assertions:
 
 - Host never injects the token for rejected requests.
+- Host-owned HTTPS transport uses system roots, the configured custom CA bundle,
+  or `tls_insecure_skip_verify` according to validated directory config.
 - Layerhouse does not require an MVP path permission manifest. The official
   Kanidm connector's endpoint choices are covered by connector code review,
   fixture tests, digest pinning, and least-privilege Kanidm token setup.

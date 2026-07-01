@@ -57,6 +57,8 @@ postcard = { version = "1", features = ["alloc"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
+tokio-rustls = "0.26"
+webpki-roots = "1"
 rust-embed = "8"
 walkdir = "2"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
